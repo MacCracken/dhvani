@@ -1,0 +1,44 @@
+[package]
+name = "nada"
+version = "0.20.3"
+edition = "2024"
+rust-version = "1.89"
+license = "AGPL-3.0-only"
+description = "Core audio engine — buffers, DSP, resampling, mixing, analysis, and capture for Rust"
+homepage = "https://github.com/MacCracken/nada"
+repository = "https://github.com/MacCracken/nada"
+readme = "README.md"
+keywords = ["audio", "dsp", "mixing", "resampling", "pipewire"]
+categories = ["multimedia", "multimedia::audio"]
+
+[features]
+default = ["simd"]
+simd = []
+pipewire = ["dep:pipewire"]
+full = ["simd", "pipewire"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+
+# Audio capture
+pipewire = { version = "0.9", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+
+[[bench]]
+name = "mix"
+harness = false
+
+[[bench]]
+name = "resample"
+harness = false
+
+[[bench]]
+name = "dsp"
+harness = false
