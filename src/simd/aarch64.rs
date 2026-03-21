@@ -42,6 +42,10 @@ pub fn f32_to_i16(src: &[f32], dst: &mut [i16]) {
     }
 }
 
+pub fn weighted_sum(samples: &[f32], weights: &[f32]) -> (f32, f32) {
+    unsafe { weighted_sum_neon(samples, weights) }
+}
+
 // ── NEON implementations ────────────────────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
@@ -170,4 +174,31 @@ unsafe fn noise_gate_neon(samples: &mut [f32], threshold: f32) {
             samples[i] = 0.0;
         }
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn weighted_sum_neon(samples: &[f32], weights: &[f32]) -> (f32, f32) {
+    let len = samples.len().min(weights.len());
+    let chunks = len / 4;
+    let mut acc_sum = unsafe { vdupq_n_f32(0.0) };
+    let mut acc_wt = unsafe { vdupq_n_f32(0.0) };
+
+    for i in 0..chunks {
+        let off = i * 4;
+        unsafe {
+            let s = vld1q_f32(samples.as_ptr().add(off));
+            let w = vld1q_f32(weights.as_ptr().add(off));
+            acc_sum = vmlaq_f32(acc_sum, s, w);
+            acc_wt = vaddq_f32(acc_wt, w);
+        }
+    }
+
+    let mut total_sum = unsafe { vaddvq_f32(acc_sum) };
+    let mut total_wt = unsafe { vaddvq_f32(acc_wt) };
+    for i in (chunks * 4)..len {
+        total_sum += samples[i] * weights[i];
+        total_wt += weights[i];
+    }
+    (total_sum, total_wt)
 }

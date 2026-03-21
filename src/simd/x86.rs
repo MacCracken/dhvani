@@ -51,6 +51,10 @@ pub fn f32_to_i16(src: &[f32], dst: &mut [i16]) {
     unsafe { f32_to_i16_sse2(src, dst) };
 }
 
+pub fn weighted_sum(samples: &[f32], weights: &[f32]) -> (f32, f32) {
+    unsafe { weighted_sum_sse2(samples, weights) }
+}
+
 // ── SSE2 (4 f32 per op) ────────────────────────────────────────────
 
 #[target_feature(enable = "sse2")]
@@ -250,6 +254,47 @@ unsafe fn f32_to_i16_sse2(src: &[f32], dst: &mut [i16]) {
     for i in (chunks * 4)..len {
         let clamped = src[i].clamp(-1.0, 1.0);
         dst[i] = (clamped * 32767.0) as i16;
+    }
+}
+
+#[target_feature(enable = "sse2")]
+unsafe fn weighted_sum_sse2(samples: &[f32], weights: &[f32]) -> (f32, f32) {
+    let len = samples.len().min(weights.len());
+    let chunks = len / 4;
+    let mut acc_sum = _mm_setzero_ps();
+    let mut acc_wt = _mm_setzero_ps();
+
+    for i in 0..chunks {
+        let off = i * 4;
+        unsafe {
+            let s = _mm_loadu_ps(samples.as_ptr().add(off));
+            let w = _mm_loadu_ps(weights.as_ptr().add(off));
+            acc_sum = _mm_add_ps(acc_sum, _mm_mul_ps(s, w));
+            acc_wt = _mm_add_ps(acc_wt, w);
+        }
+    }
+
+    // Horizontal sum both accumulators
+    let sum = unsafe { horizontal_sum_f32_sse2(acc_sum) };
+    let wt = unsafe { horizontal_sum_f32_sse2(acc_wt) };
+
+    let mut total_sum = sum;
+    let mut total_wt = wt;
+    for i in (chunks * 4)..len {
+        total_sum += samples[i] * weights[i];
+        total_wt += weights[i];
+    }
+    (total_sum, total_wt)
+}
+
+#[target_feature(enable = "sse2")]
+unsafe fn horizontal_sum_f32_sse2(v: __m128) -> f32 {
+    unsafe {
+        let shuf = _mm_shuffle_ps(v, v, 0b_01_00_11_10);
+        let sum1 = _mm_add_ps(v, shuf);
+        let shuf2 = _mm_shuffle_ps(sum1, sum1, 0b_00_01_00_01);
+        let sum2 = _mm_add_ps(sum1, shuf2);
+        _mm_cvtss_f32(sum2)
     }
 }
 

@@ -71,6 +71,15 @@ pub fn f32_to_i16(src: &[f32], dst: &mut [i16]) { aarch64::f32_to_i16(src, dst) 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn f32_to_i16(src: &[f32], dst: &mut [i16]) { f32_to_i16_scalar(src, dst) }
 
+/// Weighted dot product: sum(samples[i] * weights[i]) for pre-computed sinc kernels.
+/// Returns (weighted_sum, weight_sum) for normalization.
+#[cfg(target_arch = "x86_64")]
+pub fn weighted_sum(samples: &[f32], weights: &[f32]) -> (f32, f32) { x86::weighted_sum(samples, weights) }
+#[cfg(target_arch = "aarch64")]
+pub fn weighted_sum(samples: &[f32], weights: &[f32]) -> (f32, f32) { aarch64::weighted_sum(samples, weights) }
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub fn weighted_sum(samples: &[f32], weights: &[f32]) -> (f32, f32) { weighted_sum_scalar(samples, weights) }
+
 // ── Scalar fallbacks ────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -112,6 +121,18 @@ fn noise_gate_scalar(samples: &mut [f32], threshold: f32) {
 fn i16_to_f32_scalar(src: &[i16], dst: &mut [f32]) {
     let len = src.len().min(dst.len());
     for i in 0..len { dst[i] = src[i] as f32 / 32768.0; }
+}
+
+#[allow(dead_code)]
+fn weighted_sum_scalar(samples: &[f32], weights: &[f32]) -> (f32, f32) {
+    let len = samples.len().min(weights.len());
+    let mut sum = 0.0f32;
+    let mut weight_sum = 0.0f32;
+    for i in 0..len {
+        sum += samples[i] * weights[i];
+        weight_sum += weights[i];
+    }
+    (sum, weight_sum)
 }
 
 #[allow(dead_code)]

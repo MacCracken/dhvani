@@ -61,34 +61,80 @@ pub fn resample_sinc(
 
     let mut out = vec![0.0f32; new_frames * ch];
 
+    // Pre-allocate kernel weight buffer for SIMD path
+    let max_kernel_len = ((half_width as f64 / filter_scale).ceil() as usize) * 2 + 1;
+    #[cfg(feature = "simd")]
+    let mut kernel_weights = vec![0.0f32; max_kernel_len];
+    #[cfg(feature = "simd")]
+    let mut kernel_samples = vec![0.0f32; max_kernel_len];
+
     for frame in 0..new_frames {
         let src_pos = frame as f64 / ratio;
         let src_center = src_pos.floor() as i64;
         let frac = src_pos - src_center as f64;
 
-        // Determine kernel bounds
         let scaled_half = (half_width as f64 / filter_scale).ceil() as i64;
 
-        for c in 0..ch {
-            let mut sum = 0.0f64;
-            let mut weight_sum = 0.0f64;
-
+        #[cfg(feature = "simd")]
+        {
+            // Pre-compute kernel weights for this frame
+            let mut kernel_len = 0usize;
+            let mut first_valid_idx = 0i64;
             for i in -scaled_half..=scaled_half {
                 let src_idx = src_center + i;
                 if src_idx < 0 || src_idx >= buf.frames as i64 {
                     continue;
                 }
-
+                if kernel_len == 0 {
+                    first_valid_idx = src_idx;
+                }
                 let x = (i as f64 - frac) * kernel_scale;
-                let w = windowed_sinc(x, scaled_half as f64);
-                let sample = buf.samples[src_idx as usize * ch + c] as f64;
-                sum += sample * w;
-                weight_sum += w;
+                kernel_weights[kernel_len] = windowed_sinc(x, scaled_half as f64) as f32;
+                kernel_len += 1;
             }
 
-            let idx = frame * ch + c;
-            if weight_sum.abs() > 1e-10 {
-                out[idx] = (sum / weight_sum) as f32;
+            // For each channel, gather samples and use SIMD dot product
+            for c in 0..ch {
+                for (k, ks) in kernel_samples.iter_mut().enumerate().take(kernel_len) {
+                    let src_idx = (first_valid_idx as usize + k) * ch + c;
+                    *ks = buf.samples[src_idx];
+                }
+
+                let (sum, weight_sum) = crate::simd::weighted_sum(
+                    &kernel_samples[..kernel_len],
+                    &kernel_weights[..kernel_len],
+                );
+
+                let idx = frame * ch + c;
+                if weight_sum.abs() > 1e-6 {
+                    out[idx] = sum / weight_sum;
+                }
+            }
+        }
+
+        #[cfg(not(feature = "simd"))]
+        {
+            for c in 0..ch {
+                let mut sum = 0.0f64;
+                let mut weight_sum = 0.0f64;
+
+                for i in -scaled_half..=scaled_half {
+                    let src_idx = src_center + i;
+                    if src_idx < 0 || src_idx >= buf.frames as i64 {
+                        continue;
+                    }
+
+                    let x = (i as f64 - frac) * kernel_scale;
+                    let w = windowed_sinc(x, scaled_half as f64);
+                    let sample = buf.samples[src_idx as usize * ch + c] as f64;
+                    sum += sample * w;
+                    weight_sum += w;
+                }
+
+                let idx = frame * ch + c;
+                if weight_sum.abs() > 1e-10 {
+                    out[idx] = (sum / weight_sum) as f32;
+                }
             }
         }
     }

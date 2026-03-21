@@ -46,3 +46,7 @@ harness = false
 [[bench]]
 name = "convert"
 harness = false
+
+[[bench]]
+name = "simd"
+harness = false

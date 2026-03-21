@@ -15,6 +15,9 @@
 //! | [`dsp`] | Biquad filters, parametric EQ, compressor, reverb, delay, de-esser, gate, limiter |
 //! | [`analysis`] | DFT spectrum, loudness (LUFS), silence detection |
 //! | [`clock`] | Sample-accurate transport clock, tempo, beats, PTS, A/V sync |
+//! | [`midi`] | MIDI 1.0/2.0 events, clips, voice management, routing |
+//! | [`capture`] | PipeWire audio capture/output (requires `pipewire` feature) |
+//! | [`ffi`] | C-compatible FFI for key types |
 //!
 //! ## Quick Start
 //!
@@ -61,8 +64,10 @@
 
 pub mod analysis;
 pub mod buffer;
+pub mod capture;
 pub mod clock;
 pub mod dsp;
+pub mod ffi;
 pub mod midi;
 
 #[cfg(feature = "simd")]

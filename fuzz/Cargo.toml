@@ -1,0 +1,31 @@
+[package]
+name = "nada-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.nada]
+path = ".."
+features = []
+default-features = false
+
+[[bin]]
+name = "fuzz_mix"
+path = "fuzz_targets/fuzz_mix.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_resample"
+path = "fuzz_targets/fuzz_resample.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_dsp"
+path = "fuzz_targets/fuzz_dsp.rs"
+doc = false
