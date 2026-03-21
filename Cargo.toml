@@ -49,6 +49,7 @@ harness = false
 [[bench]]
 name = "dsp"
 harness = false
+required-features = ["dsp"]
 
 [[bench]]
 name = "convert"
@@ -57,7 +58,25 @@ harness = false
 [[bench]]
 name = "simd"
 harness = false
+required-features = ["dsp"]
 
 [[bench]]
 name = "analysis"
 harness = false
+required-features = ["analysis"]
+
+[[example]]
+name = "analysis"
+required-features = ["analysis"]
+
+[[example]]
+name = "mixing"
+required-features = ["dsp", "analysis"]
+
+[[example]]
+name = "midi"
+required-features = ["midi"]
+
+[[example]]
+name = "graph"
+required-features = ["graph"]

@@ -238,16 +238,16 @@ pub mod clock;
 pub mod ffi;
 
 // Feature-gated modules
-#[cfg(feature = "dsp")]
-pub mod dsp;
 #[cfg(feature = "analysis")]
 pub mod analysis;
-#[cfg(feature = "midi")]
-pub mod midi;
+#[cfg(feature = "dsp")]
+pub mod dsp;
 #[cfg(feature = "graph")]
 pub mod graph;
 #[cfg(feature = "graph")]
 pub mod meter;
+#[cfg(feature = "midi")]
+pub mod midi;
 
 #[cfg(feature = "simd")]
 pub(crate) mod simd;

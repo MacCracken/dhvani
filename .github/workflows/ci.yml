@@ -115,8 +115,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Test with no default features
-        run: cargo test --no-default-features
+      - name: Test with no default features (lib + unit tests only, doc tests need features)
+        run: cargo test --no-default-features --lib --tests
 
   msrv:
     name: MSRV (1.89)
@@ -130,7 +130,7 @@ jobs:
       - name: Check with MSRV
         run: cargo check --no-default-features
       - name: Test with MSRV
-        run: cargo test --no-default-features
+        run: cargo test --no-default-features --lib --tests
 
   coverage:
     name: Coverage

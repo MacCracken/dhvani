@@ -3,16 +3,14 @@
 mod proptest_tests;
 mod serde_tests;
 
-use crate::buffer::{AudioBuffer, mix, resample_linear};
+use crate::buffer::AudioBuffer;
 use crate::clock::AudioClock;
-
-#[cfg(feature = "dsp")]
-use crate::dsp;
 
 #[cfg(feature = "dsp")]
 #[test]
 fn full_pipeline_mix_compress_normalize() {
-    use crate::dsp::{Compressor, CompressorParams};
+    use crate::buffer::mix;
+    use crate::dsp::{self, Compressor, CompressorParams};
 
     let a = AudioBuffer::from_interleaved(vec![0.8, 0.8, 0.7, 0.7], 2, 44100).unwrap();
     let b = AudioBuffer::from_interleaved(vec![0.6, 0.6, 0.5, 0.5], 2, 44100).unwrap();
@@ -39,6 +37,7 @@ fn full_pipeline_mix_compress_normalize() {
 
 #[test]
 fn resample_preserves_duration() {
+    use crate::buffer::resample_linear;
     let buf = AudioBuffer::from_interleaved(vec![0.5; 44100], 1, 44100).unwrap();
     let resampled = resample_linear(&buf, 48000).unwrap();
 
@@ -63,6 +62,7 @@ fn clock_syncs_with_buffer() {
 #[test]
 fn noise_gate_then_analyze() {
     use crate::analysis;
+    use crate::dsp;
 
     let mut buf =
         AudioBuffer::from_interleaved(vec![0.001, -0.001, 0.5, -0.5, 0.002, -0.002], 1, 44100)
@@ -80,6 +80,7 @@ fn noise_gate_then_analyze() {
 #[cfg(feature = "dsp")]
 #[test]
 fn db_roundtrip() {
+    use crate::dsp;
     let amp = 0.707;
     let db = dsp::amplitude_to_db(amp);
     let back = dsp::db_to_amplitude(db);
@@ -89,7 +90,7 @@ fn db_roundtrip() {
 #[cfg(feature = "dsp")]
 #[test]
 fn full_dsp_chain_eq_compress_reverb_delay() {
-    use crate::dsp::{
+    use crate::dsp::{self,
         BandType, Compressor, CompressorParams, DelayLine, EqBandConfig, ParametricEq, Reverb,
         ReverbParams,
     };
@@ -158,6 +159,7 @@ fn full_dsp_chain_eq_compress_reverb_delay() {
 #[test]
 fn format_conversion_pipeline() {
     use crate::buffer::convert::{f32_to_i16, i16_to_f32, mono_to_stereo, stereo_to_mono};
+    use crate::dsp;
 
     // Start with i16 samples
     let original_i16: Vec<i16> = (0..1024)

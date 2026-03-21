@@ -300,6 +300,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "dsp")]
     #[test]
     fn ffi_noise_gate() {
         let samples = [0.01f32, 0.5, 0.001, 0.8];
@@ -312,6 +313,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "dsp")]
     #[test]
     fn ffi_hard_limiter() {
         let samples = [2.0f32, -2.0, 0.5];

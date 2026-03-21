@@ -173,15 +173,24 @@ mod tests {
 
     #[test]
     fn params_validate_rejects_out_of_range() {
-        let p = GainSmootherParams { attack: 1.5, release: 0.05 };
+        let p = GainSmootherParams {
+            attack: 1.5,
+            release: 0.05,
+        };
         assert!(p.validate().is_err());
-        let p = GainSmootherParams { attack: 0.3, release: -0.1 };
+        let p = GainSmootherParams {
+            attack: 0.3,
+            release: -0.1,
+        };
         assert!(p.validate().is_err());
     }
 
     #[test]
     fn serde_roundtrip() {
-        let p = GainSmootherParams { attack: 0.2, release: 0.1 };
+        let p = GainSmootherParams {
+            attack: 0.2,
+            release: 0.1,
+        };
         let json = serde_json::to_string(&p).unwrap();
         let back: GainSmootherParams = serde_json::from_str(&json).unwrap();
         assert_eq!(back.attack, p.attack);
