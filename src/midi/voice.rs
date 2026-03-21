@@ -73,23 +73,41 @@ impl Voice {
     }
 
     /// Voice state in the synthesis lifecycle.
-    pub fn state(&self) -> VoiceState { self.state }
+    pub fn state(&self) -> VoiceState {
+        self.state
+    }
     /// MIDI note number.
-    pub fn note(&self) -> u8 { self.note }
+    pub fn note(&self) -> u8 {
+        self.note
+    }
     /// MIDI velocity.
-    pub fn velocity(&self) -> u8 { self.velocity }
+    pub fn velocity(&self) -> u8 {
+        self.velocity
+    }
     /// MIDI channel.
-    pub fn channel(&self) -> u8 { self.channel }
+    pub fn channel(&self) -> u8 {
+        self.channel
+    }
     /// Amplitude envelope level (0.0–1.0).
-    pub fn envelope_level(&self) -> f32 { self.envelope_level }
+    pub fn envelope_level(&self) -> f32 {
+        self.envelope_level
+    }
     /// Age in process blocks.
-    pub fn age(&self) -> u64 { self.age }
+    pub fn age(&self) -> u64 {
+        self.age
+    }
     /// Per-note pitch bend (-1.0 to +1.0, 0.0 = no bend).
-    pub fn pitch_bend(&self) -> f32 { self.pitch_bend }
+    pub fn pitch_bend(&self) -> f32 {
+        self.pitch_bend
+    }
     /// Per-note pressure / aftertouch (0.0 to 1.0).
-    pub fn pressure(&self) -> f32 { self.pressure }
+    pub fn pressure(&self) -> f32 {
+        self.pressure
+    }
     /// Per-note brightness (CC#74, 0.0 to 1.0).
-    pub fn brightness(&self) -> f32 { self.brightness }
+    pub fn brightness(&self) -> f32 {
+        self.brightness
+    }
 
     /// Whether this voice is idle.
     pub fn is_idle(&self) -> bool {

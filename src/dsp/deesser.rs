@@ -65,11 +65,13 @@ pub struct DeEsser {
 impl DeEsser {
     /// Create a new de-esser. Returns an error if parameters are invalid.
     pub fn new(params: DeEsserParams, sample_rate: u32, channels: u32) -> crate::Result<Self> {
-        params.validate().map_err(|reason| crate::NadaError::InvalidParameter {
-            name: "DeEsserParams".into(),
-            value: String::new(),
-            reason: reason.into(),
-        })?;
+        params
+            .validate()
+            .map_err(|reason| crate::NadaError::InvalidParameter {
+                name: "DeEsserParams".into(),
+                value: String::new(),
+                reason: reason.into(),
+            })?;
         let detector = BiquadFilter::new(
             FilterType::BandPass,
             params.freq_hz,

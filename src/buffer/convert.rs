@@ -145,30 +145,40 @@ pub fn stereo_to_mono(buf: &AudioBuffer) -> Result<AudioBuffer, NadaError> {
 /// Convert 24-bit signed integers (stored as i32, only lower 24 bits used) to f32.
 /// Range: [-8388608, 8388607] -> [-1.0, 1.0)
 pub fn i24_to_f32(samples: &[i32]) -> Vec<f32> {
-    samples.iter().map(|&s| {
-        // Sign-extend from 24 bits
-        let extended = (s << 8) >> 8;
-        extended as f32 / 8388608.0
-    }).collect()
+    samples
+        .iter()
+        .map(|&s| {
+            // Sign-extend from 24 bits
+            let extended = (s << 8) >> 8;
+            extended as f32 / 8388608.0
+        })
+        .collect()
 }
 
 /// Convert f32 to 24-bit signed integers (stored as i32).
 /// Input clamped to [-1.0, 1.0].
 pub fn f32_to_i24(samples: &[f32]) -> Vec<i32> {
-    samples.iter().map(|&s| {
-        let clamped = s.clamp(-1.0, 1.0);
-        (clamped * 8388607.0) as i32
-    }).collect()
+    samples
+        .iter()
+        .map(|&s| {
+            let clamped = s.clamp(-1.0, 1.0);
+            (clamped * 8388607.0) as i32
+        })
+        .collect()
 }
 
 /// Convert 24-bit packed bytes (3 bytes per sample, little-endian) to f32.
 pub fn i24_packed_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(3).map(|chunk| {
-        let raw = i32::from(chunk[0]) | (i32::from(chunk[1]) << 8) | (i32::from(chunk[2]) << 16);
-        // Sign-extend from 24 bits
-        let extended = (raw << 8) >> 8;
-        extended as f32 / 8388608.0
-    }).collect()
+    bytes
+        .chunks_exact(3)
+        .map(|chunk| {
+            let raw =
+                i32::from(chunk[0]) | (i32::from(chunk[1]) << 8) | (i32::from(chunk[2]) << 16);
+            // Sign-extend from 24 bits
+            let extended = (raw << 8) >> 8;
+            extended as f32 / 8388608.0
+        })
+        .collect()
 }
 
 /// Convert f32 to 24-bit packed bytes (3 bytes per sample, little-endian).
@@ -197,16 +207,22 @@ pub fn f32_to_f64(samples: &[f32]) -> Vec<f64> {
 /// Convert unsigned 8-bit PCM to f32.
 /// u8 range [0, 255] maps to f32 range [-1.0, 1.0), centered at 128.
 pub fn u8_to_f32(samples: &[u8]) -> Vec<f32> {
-    samples.iter().map(|&s| (f32::from(s) - 128.0) / 128.0).collect()
+    samples
+        .iter()
+        .map(|&s| (f32::from(s) - 128.0) / 128.0)
+        .collect()
 }
 
 /// Convert f32 to unsigned 8-bit PCM.
 /// f32 range [-1.0, 1.0] maps to u8 range [0, 255], centered at 128.
 pub fn f32_to_u8(samples: &[f32]) -> Vec<u8> {
-    samples.iter().map(|&s| {
-        let clamped = s.clamp(-1.0, 1.0);
-        ((clamped * 128.0) + 128.0).clamp(0.0, 255.0) as u8
-    }).collect()
+    samples
+        .iter()
+        .map(|&s| {
+            let clamped = s.clamp(-1.0, 1.0);
+            ((clamped * 128.0) + 128.0).clamp(0.0, 255.0) as u8
+        })
+        .collect()
 }
 
 /// Downmix 5.1 surround (6 channels) to stereo using ITU-R BS.775 coefficients.

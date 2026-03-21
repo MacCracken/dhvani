@@ -17,7 +17,9 @@ pub fn spectrum_fft(buf: &AudioBuffer, window_size: usize) -> crate::Result<Spec
         return Err(NadaError::Dsp("cannot compute FFT on empty buffer".into()));
     }
     if buf.channels == 0 {
-        return Err(NadaError::Dsp("cannot compute FFT with zero channels".into()));
+        return Err(NadaError::Dsp(
+            "cannot compute FFT with zero channels".into(),
+        ));
     }
 
     let window_size = window_size.next_power_of_two().min(window_size);
@@ -45,7 +47,9 @@ pub fn spectrum_fft(buf: &AudioBuffer, window_size: usize) -> crate::Result<Spec
 
     // In-place FFT (returns false if preconditions fail)
     if !fft_in_place(&mut real, &mut imag) {
-        return Err(NadaError::Dsp("FFT failed: window size must be a power of two".into()));
+        return Err(NadaError::Dsp(
+            "FFT failed: window size must be a power of two".into(),
+        ));
     }
     let mut magnitudes = vec![0.0f32; num_bins];
 
@@ -61,7 +65,12 @@ pub fn spectrum_fft(buf: &AudioBuffer, window_size: usize) -> crate::Result<Spec
         }
     }
 
-    Ok(Spectrum::from_magnitudes(magnitudes, freq_resolution, buf.sample_rate, window_size))
+    Ok(Spectrum::from_magnitudes(
+        magnitudes,
+        freq_resolution,
+        buf.sample_rate,
+        window_size,
+    ))
 }
 
 /// In-place radix-2 Cooley-Tukey FFT.

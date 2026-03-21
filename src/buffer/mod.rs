@@ -404,9 +404,9 @@ impl BufferPool {
 
     /// Take a buffer from the pool. If the pool is empty, allocates a new one.
     pub fn acquire(&mut self) -> AudioBuffer {
-        self.buffers.pop().unwrap_or_else(|| {
-            AudioBuffer::silence(self.channels, self.frames, self.sample_rate)
-        })
+        self.buffers
+            .pop()
+            .unwrap_or_else(|| AudioBuffer::silence(self.channels, self.frames, self.sample_rate))
     }
 
     /// Return a buffer to the pool for reuse. Silences it before storing.

@@ -57,11 +57,13 @@ pub struct EnvelopeLimiter {
 impl EnvelopeLimiter {
     /// Create a new limiter. Returns an error if parameters are invalid.
     pub fn new(params: LimiterParams, sample_rate: u32) -> crate::Result<Self> {
-        params.validate().map_err(|reason| crate::NadaError::InvalidParameter {
-            name: "LimiterParams".into(),
-            value: String::new(),
-            reason: reason.into(),
-        })?;
+        params
+            .validate()
+            .map_err(|reason| crate::NadaError::InvalidParameter {
+                name: "LimiterParams".into(),
+                value: String::new(),
+                reason: reason.into(),
+            })?;
         Ok(Self {
             params,
             envelope_db: -120.0,

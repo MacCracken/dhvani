@@ -77,19 +77,33 @@ impl Spectrum {
     }
 
     /// Magnitude bins (linear scale, 0.0–1.0 normalized).
-    pub fn magnitudes(&self) -> &[f32] { &self.magnitudes }
+    pub fn magnitudes(&self) -> &[f32] {
+        &self.magnitudes
+    }
     /// Magnitude bins in dB (relative to peak).
-    pub fn magnitude_db(&self) -> &[f32] { &self.magnitude_db }
+    pub fn magnitude_db(&self) -> &[f32] {
+        &self.magnitude_db
+    }
     /// Frequency resolution (Hz per bin).
-    pub fn freq_resolution(&self) -> f32 { self.freq_resolution }
+    pub fn freq_resolution(&self) -> f32 {
+        self.freq_resolution
+    }
     /// Sample rate used for analysis.
-    pub fn sample_rate(&self) -> u32 { self.sample_rate }
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
     /// FFT window size used.
-    pub fn fft_size(&self) -> usize { self.fft_size }
+    pub fn fft_size(&self) -> usize {
+        self.fft_size
+    }
     /// Frequency of the peak bin (Hz).
-    pub fn peak_frequency(&self) -> f32 { self.peak_frequency }
+    pub fn peak_frequency(&self) -> f32 {
+        self.peak_frequency
+    }
     /// Magnitude of the peak bin (dB).
-    pub fn peak_magnitude_db(&self) -> f32 { self.peak_magnitude_db }
+    pub fn peak_magnitude_db(&self) -> f32 {
+        self.peak_magnitude_db
+    }
 
     /// Number of frequency bins.
     pub fn bin_count(&self) -> usize {
@@ -166,7 +180,9 @@ pub fn spectrum_dft(buf: &AudioBuffer, window_size: usize) -> crate::Result<Spec
         return Err(NadaError::Dsp("cannot compute DFT on empty buffer".into()));
     }
     if buf.channels == 0 {
-        return Err(NadaError::Dsp("cannot compute DFT with zero channels".into()));
+        return Err(NadaError::Dsp(
+            "cannot compute DFT with zero channels".into(),
+        ));
     }
 
     let samples = if buf.samples.len() >= window_size {
@@ -199,7 +215,12 @@ pub fn spectrum_dft(buf: &AudioBuffer, window_size: usize) -> crate::Result<Spec
     }
 
     let freq_resolution = buf.sample_rate as f32 / n as f32;
-    Ok(Spectrum::from_magnitudes(magnitudes, freq_resolution, buf.sample_rate, n))
+    Ok(Spectrum::from_magnitudes(
+        magnitudes,
+        freq_resolution,
+        buf.sample_rate,
+        n,
+    ))
 }
 
 /// Compute integrated loudness in LUFS (EBU R128 simplified).

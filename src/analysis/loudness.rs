@@ -33,7 +33,9 @@ pub fn measure_r128(buf: &AudioBuffer) -> crate::Result<R128Loudness> {
         return Err(NadaError::Dsp("cannot measure R128 on empty buffer".into()));
     }
     if buf.channels == 0 {
-        return Err(NadaError::Dsp("cannot measure R128 with zero channels".into()));
+        return Err(NadaError::Dsp(
+            "cannot measure R128 with zero channels".into(),
+        ));
     }
 
     let sr = buf.sample_rate;

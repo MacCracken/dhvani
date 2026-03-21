@@ -17,7 +17,9 @@ pub struct Chromagram {
 
 impl Chromagram {
     /// Energy per pitch class (0=C, 1=C#, ..., 11=B). Normalized 0–1.
-    pub fn chroma(&self) -> &[f32; 12] { &self.chroma }
+    pub fn chroma(&self) -> &[f32; 12] {
+        &self.chroma
+    }
 
     /// Index of the dominant pitch class.
     pub fn dominant_class(&self) -> usize {

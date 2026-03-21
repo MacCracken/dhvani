@@ -53,7 +53,11 @@ impl MidiRoute {
     /// Create a new route with the given settings.
     ///
     /// `note_range` is clamped so that min <= max and both are in 0–127.
-    pub fn new(channel_filter: Option<u8>, velocity_curve: VelocityCurve, note_range: (u8, u8)) -> Self {
+    pub fn new(
+        channel_filter: Option<u8>,
+        velocity_curve: VelocityCurve,
+        note_range: (u8, u8),
+    ) -> Self {
         let min = note_range.0.min(127);
         let max = note_range.1.min(127).max(min);
         Self {
@@ -73,11 +77,17 @@ impl MidiRoute {
     }
 
     /// Channel filter (None = all channels).
-    pub fn channel_filter(&self) -> Option<u8> { self.channel_filter }
+    pub fn channel_filter(&self) -> Option<u8> {
+        self.channel_filter
+    }
     /// Velocity transformation curve.
-    pub fn velocity_curve(&self) -> &VelocityCurve { &self.velocity_curve }
+    pub fn velocity_curve(&self) -> &VelocityCurve {
+        &self.velocity_curve
+    }
     /// Inclusive note range (min, max).
-    pub fn note_range(&self) -> (u8, u8) { self.note_range }
+    pub fn note_range(&self) -> (u8, u8) {
+        self.note_range
+    }
 
     /// Set the channel filter. Channel is clamped to 0–15.
     pub fn set_channel_filter(&mut self, channel: Option<u8>) {

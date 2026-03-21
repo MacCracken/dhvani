@@ -70,11 +70,13 @@ pub struct Compressor {
 impl Compressor {
     /// Create a new compressor. Returns an error if parameters are invalid.
     pub fn new(params: CompressorParams, sample_rate: u32) -> crate::Result<Self> {
-        params.validate().map_err(|reason| crate::NadaError::InvalidParameter {
-            name: "CompressorParams".into(),
-            value: String::new(),
-            reason: reason.into(),
-        })?;
+        params
+            .validate()
+            .map_err(|reason| crate::NadaError::InvalidParameter {
+                name: "CompressorParams".into(),
+                value: String::new(),
+                reason: reason.into(),
+            })?;
         Ok(Self {
             params,
             envelope_db: -120.0,

@@ -149,11 +149,13 @@ pub struct Reverb {
 impl Reverb {
     /// Create a new reverb processor. Returns an error if parameters are invalid.
     pub fn new(params: ReverbParams, sample_rate: u32) -> crate::Result<Self> {
-        params.validate().map_err(|reason| crate::NadaError::InvalidParameter {
-            name: "ReverbParams".into(),
-            value: String::new(),
-            reason: reason.into(),
-        })?;
+        params
+            .validate()
+            .map_err(|reason| crate::NadaError::InvalidParameter {
+                name: "ReverbParams".into(),
+                value: String::new(),
+                reason: reason.into(),
+            })?;
         let combs_l: Vec<CombFilter> = COMB_DELAYS
             .iter()
             .map(|&d| CombFilter::new(scale_delay(d, sample_rate)))

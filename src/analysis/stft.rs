@@ -174,9 +174,8 @@ impl StftProcessor {
 
             let mut magnitudes = Vec::with_capacity(num_bins);
             for k in 0..num_bins {
-                let mag =
-                    ((real[k] * real[k] + imag[k] * imag[k]).sqrt() / self.window_size as f64)
-                        as f32;
+                let mag = ((real[k] * real[k] + imag[k] * imag[k]).sqrt() / self.window_size as f64)
+                    as f32;
                 magnitudes.push(mag);
             }
 
