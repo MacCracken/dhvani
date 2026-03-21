@@ -77,7 +77,11 @@ pub fn stft(buf: &AudioBuffer, window_size: usize, hop_size: usize) -> Spectrogr
             real[i] = samples[(pos + i) * ch] as f64 * window[i];
         }
 
-        fft_in_place(&mut real, &mut imag);
+        if !fft_in_place(&mut real, &mut imag) {
+            frames.push(vec![0.0; num_bins]);
+            pos += hop_size;
+            continue;
+        }
 
         let mut magnitudes = Vec::with_capacity(num_bins);
         for k in 0..num_bins {

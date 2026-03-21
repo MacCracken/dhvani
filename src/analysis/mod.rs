@@ -6,6 +6,7 @@ pub mod fft;
 pub mod loudness;
 pub mod onset;
 pub mod stft;
+pub mod waveform;
 
 pub use chroma::{Chromagram, chromagram};
 pub use dynamics::{DynamicsAnalysis, analyze_dynamics};
@@ -13,6 +14,7 @@ pub use fft::spectrum_fft;
 pub use loudness::{R128Loudness, measure_r128};
 pub use onset::{OnsetResult, detect_onsets};
 pub use stft::{Spectrogram, stft as compute_stft};
+pub use waveform::{WaveformData, compute_waveform};
 
 use crate::buffer::AudioBuffer;
 

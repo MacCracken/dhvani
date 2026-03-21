@@ -1,6 +1,6 @@
 [package]
 name = "nada"
-version = "0.22.3"
+version = "0.20.3"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -49,4 +49,8 @@ harness = false
 
 [[bench]]
 name = "simd"
+harness = false
+
+[[bench]]
+name = "analysis"
 harness = false

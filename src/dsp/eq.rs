@@ -250,4 +250,108 @@ mod tests {
         eq.process(&mut buf);
         assert!(buf.rms() < original_rms * 0.1);
     }
+
+    #[test]
+    fn reset_clears_all_bands() {
+        let bands = vec![EqBandConfig {
+            band_type: BandType::Peaking,
+            freq_hz: 440.0,
+            gain_db: 12.0,
+            q: 1.0,
+            enabled: true,
+        }];
+        let mut eq = ParametricEq::new(bands, 44100, 1);
+        let mut buf = make_sine(440.0, 44100, 256);
+        eq.process(&mut buf);
+        eq.reset();
+        // After reset, filters should be clean — no transient from prior state
+        let mut silence = AudioBuffer::silence(1, 64, 44100);
+        eq.process(&mut silence);
+        assert!(silence.peak() < 0.001);
+    }
+
+    #[test]
+    fn empty_eq_passthrough() {
+        let mut eq = ParametricEq::new(vec![], 44100, 1);
+        let mut buf = make_sine(440.0, 44100, 1024);
+        let original = buf.samples.clone();
+        eq.process(&mut buf);
+        assert_eq!(buf.samples, original);
+    }
+
+    #[test]
+    fn remove_band_out_of_bounds() {
+        let mut eq = ParametricEq::new(vec![], 44100, 1);
+        eq.remove_band(99); // should not panic
+        assert_eq!(eq.band_count(), 0);
+    }
+
+    #[test]
+    fn set_band_out_of_bounds() {
+        let mut eq = ParametricEq::new(vec![], 44100, 1);
+        eq.set_band(99, EqBandConfig {
+            band_type: BandType::Peaking,
+            freq_hz: 1000.0,
+            gain_db: 0.0,
+            q: 1.0,
+            enabled: true,
+        }); // should not panic
+        assert_eq!(eq.band_count(), 0);
+    }
+
+    #[test]
+    fn band_returns_none_for_invalid_index() {
+        let eq = ParametricEq::new(vec![], 44100, 1);
+        assert!(eq.band(0).is_none());
+        assert!(eq.band(99).is_none());
+    }
+
+    #[test]
+    fn notch_band() {
+        let bands = vec![EqBandConfig {
+            band_type: BandType::Notch,
+            freq_hz: 1000.0,
+            gain_db: 0.0,
+            q: 10.0,
+            enabled: true,
+        }];
+        let mut eq = ParametricEq::new(bands, 44100, 1);
+        let mut buf = make_sine(1000.0, 44100, 4096);
+        let original_rms = buf.rms();
+        eq.process(&mut buf);
+        assert!(buf.rms() < original_rms * 0.2);
+    }
+
+    #[test]
+    fn highpass_band() {
+        let bands = vec![EqBandConfig {
+            band_type: BandType::HighPass,
+            freq_hz: 5000.0,
+            gain_db: 0.0,
+            q: 0.707,
+            enabled: true,
+        }];
+        let mut eq = ParametricEq::new(bands, 44100, 1);
+        let mut buf = make_sine(100.0, 44100, 4096);
+        let original_rms = buf.rms();
+        eq.process(&mut buf);
+        assert!(buf.rms() < original_rms * 0.1);
+    }
+
+    #[test]
+    fn bandpass_band() {
+        let bands = vec![EqBandConfig {
+            band_type: BandType::BandPass,
+            freq_hz: 1000.0,
+            gain_db: 0.0,
+            q: 5.0,
+            enabled: true,
+        }];
+        let mut eq = ParametricEq::new(bands, 44100, 1);
+        // 100Hz should be attenuated by bandpass at 1kHz
+        let mut buf = make_sine(100.0, 44100, 4096);
+        let original_rms = buf.rms();
+        eq.process(&mut buf);
+        assert!(buf.rms() < original_rms * 0.3);
+    }
 }

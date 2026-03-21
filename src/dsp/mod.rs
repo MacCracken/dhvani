@@ -4,8 +4,12 @@ pub mod biquad;
 pub mod compressor;
 pub mod deesser;
 pub mod delay;
+pub mod envelope;
 pub mod eq;
+pub mod lfo;
 pub mod limiter;
+pub mod noise_reduction;
+pub mod oscillator;
 pub mod pan;
 pub mod reverb;
 
@@ -19,7 +23,11 @@ pub use compressor::{Compressor, CompressorParams};
 pub use deesser::{DeEsser, DeEsserParams};
 pub use delay::{DelayLine, ModulatedDelay, ModulatedDelayParams};
 pub use eq::{BandType, EqBandConfig, ParametricEq};
+pub use envelope::{AdsrParams, Envelope, EnvelopeState};
+pub use lfo::{Lfo, LfoShape};
 pub use limiter::{EnvelopeLimiter, LimiterParams};
+pub use noise_reduction::noise_reduce;
+pub use oscillator::{Oscillator, Waveform};
 pub use pan::StereoPanner;
 pub use reverb::{Reverb, ReverbParams};
 

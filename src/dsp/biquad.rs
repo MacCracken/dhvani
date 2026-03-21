@@ -332,10 +332,77 @@ mod tests {
 
     #[test]
     fn extreme_q_does_not_panic() {
-        // Very high Q and edge frequencies should not produce NaN/Inf
         let mut buf = make_sine(440.0, 44100, 256);
         let mut filt = BiquadFilter::new(FilterType::BandPass, 20000.0, 100.0, 44100, 1);
         filt.process(&mut buf);
         assert!(buf.samples.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn allpass_preserves_magnitude() {
+        let mut buf = make_sine(1000.0, 44100, 4096);
+        let original_rms = buf.rms();
+        let mut filt = BiquadFilter::new(FilterType::AllPass, 1000.0, 0.707, 44100, 1);
+        filt.process(&mut buf);
+        // AllPass should preserve magnitude (only change phase)
+        assert!(
+            (buf.rms() - original_rms).abs() < original_rms * 0.05,
+            "AllPass should preserve RMS: {} vs {}",
+            buf.rms(),
+            original_rms
+        );
+    }
+
+    #[test]
+    fn low_shelf_boosts_lows() {
+        let mut buf = make_sine(200.0, 44100, 4096);
+        let original_rms = buf.rms();
+        let mut filt = BiquadFilter::new(
+            FilterType::LowShelf { gain_db: 12.0 },
+            500.0,
+            0.707,
+            44100,
+            1,
+        );
+        filt.process(&mut buf);
+        assert!(buf.rms() > original_rms * 1.5, "Low shelf should boost 200Hz");
+    }
+
+    #[test]
+    fn high_shelf_boosts_highs() {
+        let mut buf = make_sine(8000.0, 44100, 4096);
+        let original_rms = buf.rms();
+        let mut filt = BiquadFilter::new(
+            FilterType::HighShelf { gain_db: 12.0 },
+            5000.0,
+            0.707,
+            44100,
+            1,
+        );
+        filt.process(&mut buf);
+        assert!(buf.rms() > original_rms * 1.5, "High shelf should boost 8kHz");
+    }
+
+    #[test]
+    fn low_shelf_cuts_lows() {
+        let mut buf = make_sine(200.0, 44100, 4096);
+        let original_rms = buf.rms();
+        let mut filt = BiquadFilter::new(
+            FilterType::LowShelf { gain_db: -12.0 },
+            500.0,
+            0.707,
+            44100,
+            1,
+        );
+        filt.process(&mut buf);
+        assert!(buf.rms() < original_rms * 0.5, "Low shelf should cut 200Hz");
+    }
+
+    #[test]
+    fn process_sample_out_of_range_channel() {
+        let mut filt = BiquadFilter::new(FilterType::LowPass, 1000.0, 0.707, 44100, 1);
+        // Channel 5 doesn't exist — should return input unchanged
+        let out = filt.process_sample(0.75, 5);
+        assert!((out - 0.75).abs() < f32::EPSILON);
     }
 }

@@ -267,4 +267,99 @@ mod tests {
             assert!(nada_buffer_from_interleaved(std::ptr::null(), 10, 0, 44100).is_null());
         }
     }
+
+    #[test]
+    fn ffi_rms() {
+        let samples = vec![0.5f32; 100];
+        let buf = unsafe {
+            nada_buffer_from_interleaved(samples.as_ptr(), samples.len(), 1, 44100)
+        };
+        assert!(!buf.is_null());
+        unsafe {
+            let rms = nada_buffer_rms(buf);
+            assert!((rms - 0.5).abs() < 0.01);
+            assert_eq!(nada_buffer_rms(std::ptr::null()), 0.0);
+            nada_buffer_free(buf);
+        }
+    }
+
+    #[test]
+    fn ffi_clamp() {
+        let samples = vec![2.0f32, -2.0, 0.5];
+        let buf = unsafe {
+            nada_buffer_from_interleaved(samples.as_ptr(), samples.len(), 1, 44100)
+        };
+        unsafe {
+            nada_buffer_clamp(buf);
+            assert!((nada_buffer_peak(buf) - 1.0).abs() < f32::EPSILON);
+            nada_buffer_clamp(std::ptr::null_mut()); // null safety
+            nada_buffer_free(buf);
+        }
+    }
+
+    #[test]
+    fn ffi_noise_gate() {
+        let samples = vec![0.01f32, 0.5, 0.001, 0.8];
+        let buf = unsafe {
+            nada_buffer_from_interleaved(samples.as_ptr(), samples.len(), 1, 44100)
+        };
+        unsafe {
+            nada_buffer_noise_gate(buf, 0.1);
+            nada_buffer_noise_gate(std::ptr::null_mut(), 0.1); // null safety
+            nada_buffer_free(buf);
+        }
+    }
+
+    #[test]
+    fn ffi_hard_limiter() {
+        let samples = vec![2.0f32, -2.0, 0.5];
+        let buf = unsafe {
+            nada_buffer_from_interleaved(samples.as_ptr(), samples.len(), 1, 44100)
+        };
+        unsafe {
+            nada_buffer_hard_limiter(buf, 1.0);
+            assert!((nada_buffer_peak(buf) - 1.0).abs() < f32::EPSILON);
+            nada_buffer_hard_limiter(std::ptr::null_mut(), 1.0); // null safety
+            nada_buffer_free(buf);
+        }
+    }
+
+    #[test]
+    fn ffi_samples_ptr() {
+        let samples = vec![0.5f32, -0.5];
+        let buf = unsafe {
+            nada_buffer_from_interleaved(samples.as_ptr(), samples.len(), 1, 44100)
+        };
+        unsafe {
+            let ptr = nada_buffer_samples(buf);
+            assert!(!ptr.is_null());
+            assert_eq!(nada_buffer_total_samples(buf), 2);
+            assert_eq!(nada_buffer_samples(std::ptr::null()), std::ptr::null());
+            assert_eq!(nada_buffer_total_samples(std::ptr::null()), 0);
+            nada_buffer_free(buf);
+        }
+    }
+
+    #[test]
+    fn ffi_sample_rate_null() {
+        unsafe {
+            assert_eq!(nada_buffer_sample_rate(std::ptr::null()), 0);
+        }
+    }
+
+    #[test]
+    fn ffi_apply_gain_null() {
+        unsafe {
+            nada_buffer_apply_gain(std::ptr::null_mut(), 2.0); // should not panic
+        }
+    }
+
+    #[test]
+    fn ffi_zero_sample_rate_returns_null() {
+        let samples = vec![0.5f32; 4];
+        unsafe {
+            let buf = nada_buffer_from_interleaved(samples.as_ptr(), samples.len(), 1, 0);
+            assert!(buf.is_null());
+        }
+    }
 }

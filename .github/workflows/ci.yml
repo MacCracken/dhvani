@@ -61,7 +61,7 @@ jobs:
       - name: Install cargo-vet
         run: cargo install cargo-vet
       - name: Vet
-        run: cargo vet --locked || true
+        run: cargo vet --locked
 
   semver:
     name: Semver Check
@@ -86,6 +86,9 @@ jobs:
             cargo-flags: ""
           - os: macos-latest
             target: aarch64-apple-darwin
+            cargo-flags: "--no-default-features"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
             cargo-flags: "--no-default-features"
     runs-on: ${{ matrix.os }}
     steps:
@@ -180,8 +183,20 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
       - name: Fuzz mix
-        run: cargo +nightly fuzz run fuzz_mix -- -max_total_time=60 || true
+        run: cargo +nightly fuzz run fuzz_mix -- -max_total_time=30 || true
       - name: Fuzz resample
-        run: cargo +nightly fuzz run fuzz_resample -- -max_total_time=60 || true
+        run: cargo +nightly fuzz run fuzz_resample -- -max_total_time=30 || true
       - name: Fuzz dsp
-        run: cargo +nightly fuzz run fuzz_dsp -- -max_total_time=60 || true
+        run: cargo +nightly fuzz run fuzz_dsp -- -max_total_time=30 || true
+      - name: Fuzz biquad
+        run: cargo +nightly fuzz run fuzz_biquad -- -max_total_time=30 || true
+      - name: Fuzz midi
+        run: cargo +nightly fuzz run fuzz_midi -- -max_total_time=30 || true
+      - name: Fuzz analysis
+        run: cargo +nightly fuzz run fuzz_analysis -- -max_total_time=30 || true
+      - name: Fuzz convert
+        run: cargo +nightly fuzz run fuzz_convert -- -max_total_time=30 || true
+      - name: Fuzz graph
+        run: cargo +nightly fuzz run fuzz_graph -- -max_total_time=30 || true
+      - name: Fuzz noise reduce
+        run: cargo +nightly fuzz run fuzz_noise_reduce -- -max_total_time=30 || true

@@ -109,6 +109,25 @@ fn bench_reverb_1s(c: &mut Criterion) {
     });
 }
 
+fn bench_panner_1s(c: &mut Criterion) {
+    let mut buf = make_stereo_1s();
+    let panner = nada::dsp::StereoPanner::new(0.3);
+    c.bench_function("panner_stereo_1s", |bench| {
+        bench.iter(|| panner.process(&mut buf))
+    });
+}
+
+fn bench_limiter_1s(c: &mut Criterion) {
+    let mut buf = make_stereo_1s();
+    let mut limiter = nada::dsp::EnvelopeLimiter::new(
+        nada::dsp::LimiterParams { ceiling_db: -1.0, release_ms: 50.0, knee_db: 3.0 },
+        44100,
+    );
+    c.bench_function("limiter_stereo_1s", |bench| {
+        bench.iter(|| limiter.process(&mut buf))
+    });
+}
+
 criterion_group!(
     benches,
     bench_noise_gate_1s,
@@ -119,5 +138,7 @@ criterion_group!(
     bench_parametric_eq_10band_1s,
     bench_compressor_1s,
     bench_reverb_1s,
+    bench_panner_1s,
+    bench_limiter_1s,
 );
 criterion_main!(benches);

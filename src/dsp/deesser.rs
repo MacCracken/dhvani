@@ -40,6 +40,8 @@ pub struct DeEsser {
     params: DeEsserParams,
     /// Band-pass filter for detecting sibilant energy.
     detector: BiquadFilter,
+    /// Pre-allocated sidechain buffer (avoids clone per process call).
+    sidechain: Vec<f32>,
     sample_rate: u32,
     channels: u32,
 }
@@ -57,6 +59,7 @@ impl DeEsser {
         Self {
             params,
             detector,
+            sidechain: Vec::new(),
             sample_rate,
             channels,
         }
@@ -65,8 +68,15 @@ impl DeEsser {
     /// Process an audio buffer in-place.
     pub fn process(&mut self, buf: &mut AudioBuffer) {
         let ch = buf.channels as usize;
-        // We need a copy for sidechain detection
-        let mut sidechain = buf.clone();
+        // Reuse pre-allocated sidechain buffer (no heap allocation in hot path)
+        self.sidechain.resize(buf.samples.len(), 0.0);
+        self.sidechain.copy_from_slice(&buf.samples);
+        let mut sidechain = AudioBuffer {
+            samples: std::mem::take(&mut self.sidechain),
+            channels: buf.channels,
+            sample_rate: buf.sample_rate,
+            frames: buf.frames,
+        };
         self.detector.process(&mut sidechain);
 
         let threshold_lin = db_to_amplitude(self.params.threshold_db);
@@ -92,6 +102,9 @@ impl DeEsser {
                 }
             }
         }
+
+        // Reclaim sidechain buffer for reuse
+        self.sidechain = sidechain.samples;
     }
 
     /// Reset filter state.
@@ -187,8 +200,54 @@ mod tests {
         let mut buf = make_sine(6000.0, 0.8, 256);
         deesser.process(&mut buf);
         deesser.reset();
-        // Should not panic and detector should be clean
         let out = deesser.detector.process_sample(0.0, 0);
         assert!(out.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn set_params_updates_detector() {
+        let mut deesser = DeEsser::new(DeEsserParams::default(), 44100, 1);
+        deesser.set_params(DeEsserParams {
+            freq_hz: 8000.0,
+            threshold_db: -20.0,
+            reduction_db: 8.0,
+            q: 3.0,
+        });
+        let mut buf = make_sine(8000.0, 0.8, 4096);
+        deesser.process(&mut buf);
+        assert!(buf.samples.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn stereo_deessing() {
+        let params = DeEsserParams {
+            freq_hz: 6000.0,
+            threshold_db: -30.0,
+            reduction_db: 12.0,
+            q: 1.0,
+        };
+        let mut deesser = DeEsser::new(params, 44100, 2);
+        let samples: Vec<f32> = (0..8192)
+            .map(|i| {
+                0.8 * (2.0 * std::f32::consts::PI * 6000.0 * (i / 2) as f32 / 44100.0).sin()
+            })
+            .collect();
+        let mut buf = AudioBuffer::from_interleaved(samples, 2, 44100).unwrap();
+        deesser.process(&mut buf);
+        assert!(buf.samples.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn sidechain_buffer_reused() {
+        let mut deesser = DeEsser::new(DeEsserParams::default(), 44100, 1);
+        let mut buf = make_sine(6000.0, 0.8, 1024);
+        deesser.process(&mut buf);
+        // After process, sidechain buffer should be populated (reusable)
+        assert!(!deesser.sidechain.is_empty());
+        let cap_after_first = deesser.sidechain.capacity();
+        // Process again — should reuse same allocation
+        let mut buf2 = make_sine(6000.0, 0.8, 1024);
+        deesser.process(&mut buf2);
+        assert_eq!(deesser.sidechain.capacity(), cap_after_first);
     }
 }

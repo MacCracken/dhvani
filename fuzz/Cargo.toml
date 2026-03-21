@@ -29,3 +29,33 @@ doc = false
 name = "fuzz_dsp"
 path = "fuzz_targets/fuzz_dsp.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_biquad"
+path = "fuzz_targets/fuzz_biquad.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_midi"
+path = "fuzz_targets/fuzz_midi.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_analysis"
+path = "fuzz_targets/fuzz_analysis.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_convert"
+path = "fuzz_targets/fuzz_convert.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_graph"
+path = "fuzz_targets/fuzz_graph.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_noise_reduce"
+path = "fuzz_targets/fuzz_noise_reduce.rs"
+doc = false

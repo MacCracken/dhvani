@@ -1,6 +1,9 @@
-//! Integration tests for nada.
+//! Integration and property-based tests for nada.
 
 #![allow(deprecated)]
+
+mod proptest_tests;
+mod serde_tests;
 
 use crate::buffer::{AudioBuffer, mix, resample_linear};
 use crate::clock::AudioClock;

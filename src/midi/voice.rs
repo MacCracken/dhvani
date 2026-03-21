@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn voice_reuse_after_free() {
         let mut mgr = VoiceManager::new(2, VoiceStealMode::None);
-        let idx0 = mgr.note_on(60, 100, 0).unwrap();
+        let _idx0 = mgr.note_on(60, 100, 0).unwrap();
         let idx1 = mgr.note_on(62, 100, 0).unwrap();
         assert_eq!(mgr.note_on(64, 100, 0), None); // full
 

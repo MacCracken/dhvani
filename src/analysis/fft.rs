@@ -17,6 +17,7 @@ pub fn spectrum_fft(buf: &AudioBuffer, window_size: usize) -> Spectrum {
     let window_size = window_size.max(2);
 
     let n = window_size.min(buf.samples.len());
+    let num_bins = window_size / 2;
 
     // Apply Hann window and prepare complex buffer
     let mut real = vec![0.0f64; window_size];
@@ -28,11 +29,14 @@ pub fn spectrum_fft(buf: &AudioBuffer, window_size: usize) -> Spectrum {
         *r = buf.samples[i] as f64 * window;
     }
 
-    // In-place FFT
-    fft_in_place(&mut real, &mut imag);
-
-    // Compute magnitude spectrum (first half only — symmetric for real input)
-    let num_bins = window_size / 2;
+    // In-place FFT (returns false if preconditions fail)
+    if !fft_in_place(&mut real, &mut imag) {
+        return Spectrum {
+            magnitudes: vec![0.0; num_bins],
+            freq_resolution: buf.sample_rate as f32 / window_size as f32,
+            sample_rate: buf.sample_rate,
+        };
+    }
     let mut magnitudes = vec![0.0f32; num_bins];
 
     for (k, mag) in magnitudes.iter_mut().enumerate() {
@@ -55,10 +59,14 @@ pub fn spectrum_fft(buf: &AudioBuffer, window_size: usize) -> Spectrum {
 }
 
 /// In-place radix-2 Cooley-Tukey FFT.
-pub(crate) fn fft_in_place(real: &mut [f64], imag: &mut [f64]) {
+///
+/// `real` and `imag` must have the same length, which must be a power of 2.
+/// Returns `false` if preconditions are not met (no processing done).
+pub(crate) fn fft_in_place(real: &mut [f64], imag: &mut [f64]) -> bool {
     let n = real.len();
-    assert!(n.is_power_of_two());
-    assert_eq!(real.len(), imag.len());
+    if !n.is_power_of_two() || real.len() != imag.len() || n == 0 {
+        return false;
+    }
 
     // Bit-reversal permutation
     let mut j = 0usize;
@@ -103,6 +111,7 @@ pub(crate) fn fft_in_place(real: &mut [f64], imag: &mut [f64]) {
         }
         len <<= 1;
     }
+    true
 }
 
 #[cfg(test)]

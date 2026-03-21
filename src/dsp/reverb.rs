@@ -128,7 +128,6 @@ pub struct Reverb {
     /// Right channel allpass filters.
     allpasses_r: Vec<AllpassFilter>,
     params: ReverbParams,
-    _sample_rate: u32,
 }
 
 impl Reverb {
@@ -157,7 +156,6 @@ impl Reverb {
             allpasses_l,
             allpasses_r,
             params: params.clone(),
-            _sample_rate: sample_rate,
         };
         reverb.update_params(&params);
         reverb

@@ -263,4 +263,57 @@ mod tests {
         let rec = RecordManager::new(16);
         assert_eq!(rec.dropped_samples(), 0);
     }
+
+    #[test]
+    fn record_drop_without_finish() {
+        // Should not hang or panic when dropped without calling finish()
+        let mut rec = RecordManager::new(16);
+        rec.push_samples(&[1.0, 2.0, 3.0]);
+        drop(rec); // implicit Drop
+    }
+
+    #[test]
+    fn loop_record_drop_without_finish() {
+        let mut rec = LoopRecordManager::new(16, RecordingMode::Normal);
+        rec.push_samples(&[1.0, 2.0]);
+        rec.push_loop_marker();
+        rec.push_samples(&[3.0]);
+        drop(rec);
+    }
+
+    #[test]
+    fn loop_record_empty_takes() {
+        let mut rec = LoopRecordManager::new(64, RecordingMode::Normal);
+        rec.push_loop_marker(); // empty first take
+        rec.push_loop_marker(); // empty second take
+        rec.push_samples(&[1.0]);
+        let takes = rec.finish();
+        // 3 takes: empty, empty, [1.0]
+        assert_eq!(takes.len(), 3);
+        assert!(takes[0].is_empty());
+        assert!(takes[1].is_empty());
+        assert_eq!(takes[2].len(), 1);
+    }
+
+    #[test]
+    fn loop_record_replace_mode() {
+        let rec = LoopRecordManager::new(16, RecordingMode::Replace);
+        assert_eq!(rec.mode(), RecordingMode::Replace);
+    }
+
+    #[test]
+    fn loop_record_dropped_samples() {
+        let rec = LoopRecordManager::new(16, RecordingMode::Normal);
+        assert_eq!(rec.dropped_samples(), 0);
+    }
+
+    #[test]
+    fn large_recording() {
+        let mut rec = RecordManager::new(128);
+        for _ in 0..100 {
+            rec.push_samples(&[0.5; 1024]);
+        }
+        let result = rec.finish();
+        assert_eq!(result.len(), 100 * 1024);
+    }
 }

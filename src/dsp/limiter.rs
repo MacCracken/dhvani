@@ -199,4 +199,63 @@ mod tests {
         limiter.reset();
         assert!((limiter.envelope_db + 120.0).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn soft_knee_limits() {
+        let params = LimiterParams {
+            ceiling_db: -6.0,
+            release_ms: 10.0,
+            knee_db: 6.0, // soft knee
+        };
+        let mut limiter = EnvelopeLimiter::new(params, 44100);
+        let mut buf = make_sine(1.0, 4096);
+        limiter.process(&mut buf);
+        let ceiling_lin = db_to_amplitude(-6.0);
+        assert!(buf.peak() <= ceiling_lin + 0.02);
+        assert!(buf.samples.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn gain_reduction_reports() {
+        let params = LimiterParams {
+            ceiling_db: -12.0,
+            release_ms: 10.0,
+            knee_db: 0.0,
+        };
+        let mut limiter = EnvelopeLimiter::new(params, 44100);
+        let mut buf = make_sine(1.0, 4096);
+        limiter.process(&mut buf);
+        // Should have applied gain reduction
+        assert!(limiter.gain_reduction_db() < 0.0);
+    }
+
+    #[test]
+    fn set_params_updates() {
+        let mut limiter = EnvelopeLimiter::new(LimiterParams::default(), 44100);
+        limiter.set_params(LimiterParams {
+            ceiling_db: -3.0,
+            release_ms: 100.0,
+            knee_db: 3.0,
+        });
+        let mut buf = make_sine(1.0, 2048);
+        limiter.process(&mut buf);
+        assert!(buf.samples.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn stereo_limiting() {
+        let params = LimiterParams {
+            ceiling_db: -6.0,
+            release_ms: 10.0,
+            knee_db: 0.0,
+        };
+        let mut limiter = EnvelopeLimiter::new(params, 44100);
+        let samples: Vec<f32> = (0..8192)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * (i / 2) as f32 / 44100.0).sin())
+            .collect();
+        let mut buf = AudioBuffer::from_interleaved(samples, 2, 44100).unwrap();
+        limiter.process(&mut buf);
+        let ceiling_lin = db_to_amplitude(-6.0);
+        assert!(buf.peak() <= ceiling_lin + 0.02);
+    }
 }

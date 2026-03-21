@@ -449,4 +449,93 @@ mod tests {
         let out2 = proc.process().unwrap().samples[0];
         assert!((out2 - 0.9).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn graph_node_count() {
+        let mut graph = Graph::new();
+        assert_eq!(graph.node_count(), 0);
+        assert_eq!(graph.connection_count(), 0);
+        let a = NodeId::next();
+        let b = NodeId::next();
+        graph.add_node(a, Box::new(PassthroughNode));
+        graph.add_node(b, Box::new(GainNode { gain: 1.0 }));
+        graph.connect(a, b);
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.connection_count(), 1);
+    }
+
+    #[test]
+    fn execution_plan_is_finished() {
+        struct FinishedNode;
+        impl AudioNode for FinishedNode {
+            fn name(&self) -> &str { "finished" }
+            fn num_inputs(&self) -> usize { 0 }
+            fn num_outputs(&self) -> usize { 1 }
+            fn process(&mut self, _inputs: &[&AudioBuffer], _output: &mut AudioBuffer) {}
+            fn is_finished(&self) -> bool { true }
+        }
+
+        let mut graph = Graph::new();
+        let id = NodeId::next();
+        graph.add_node(id, Box::new(FinishedNode));
+        let plan = graph.compile().unwrap();
+        assert!(plan.is_finished());
+    }
+
+    #[test]
+    fn graph_processor_is_finished() {
+        struct FinishedNode;
+        impl AudioNode for FinishedNode {
+            fn name(&self) -> &str { "finished" }
+            fn num_inputs(&self) -> usize { 0 }
+            fn num_outputs(&self) -> usize { 1 }
+            fn process(&mut self, _inputs: &[&AudioBuffer], _output: &mut AudioBuffer) {}
+            fn is_finished(&self) -> bool { true }
+        }
+
+        let mut graph = Graph::new();
+        let id = NodeId::next();
+        graph.add_node(id, Box::new(FinishedNode));
+        let plan = graph.compile().unwrap();
+
+        let mut proc = GraphProcessor::new(1, 44100, 128);
+        assert!(!proc.is_finished());
+        let handle = proc.swap_handle();
+        handle.swap(plan);
+        proc.process();
+        assert!(proc.is_finished());
+    }
+
+    #[test]
+    fn linear_chain_processes_correctly() {
+        let mut graph = Graph::new();
+        let src = NodeId::next();
+        let gain_node = NodeId::next();
+
+        graph.add_node(src, Box::new(GeneratorNode { value: 1.0 }));
+        graph.add_node(gain_node, Box::new(GainNode { gain: 0.5 }));
+        graph.connect(src, gain_node);
+
+        let plan = graph.compile().unwrap();
+        let mut proc = GraphProcessor::new(1, 44100, 64);
+        let handle = proc.swap_handle();
+        handle.swap(plan);
+
+        let output = proc.process().unwrap();
+        // Generator outputs 1.0, gain multiplies by 0.5
+        assert!(output.samples.iter().all(|&s| (s - 0.5).abs() < f32::EPSILON));
+    }
+
+    #[test]
+    fn default_graph() {
+        let graph = Graph::default();
+        assert_eq!(graph.node_count(), 0);
+    }
+
+    #[test]
+    fn swap_handle_clone() {
+        let proc = GraphProcessor::new(1, 44100, 128);
+        let handle1 = proc.swap_handle();
+        let _handle2 = handle1.clone();
+    }
 }
