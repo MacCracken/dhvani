@@ -6,8 +6,11 @@ pub mod deesser;
 pub mod delay;
 pub mod envelope;
 pub mod eq;
+pub mod gain_smoother;
+pub mod graphic_eq;
 pub mod lfo;
 pub mod limiter;
+#[cfg(feature = "analysis")]
 pub mod noise_reduction;
 pub mod oscillator;
 pub mod pan;
@@ -21,8 +24,11 @@ pub use deesser::{DeEsser, DeEsserParams};
 pub use delay::{DelayLine, ModulatedDelay, ModulatedDelayParams};
 pub use envelope::{AdsrParams, Envelope, EnvelopeState};
 pub use eq::{BandType, EqBandConfig, ParametricEq};
+pub use gain_smoother::{GainSmoother, GainSmootherParams};
+pub use graphic_eq::{GraphicEq, GraphicEqSettings, ISO_BANDS};
 pub use lfo::{Lfo, LfoShape};
 pub use limiter::{EnvelopeLimiter, LimiterParams};
+#[cfg(feature = "analysis")]
 pub use noise_reduction::noise_reduce;
 pub use oscillator::{Oscillator, Waveform};
 pub use pan::StereoPanner;

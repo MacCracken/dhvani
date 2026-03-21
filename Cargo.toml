@@ -1,6 +1,6 @@
 [package]
 name = "dhvani"
-version = "0.20.3"
+version = "0.20.4"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -12,10 +12,18 @@ keywords = ["audio", "dsp", "mixing", "resampling", "pipewire"]
 categories = ["multimedia", "multimedia::audio"]
 
 [features]
-default = ["simd"]
+default = ["simd", "dsp", "analysis", "midi", "graph"]
+# Core (always available): AudioBuffer, format conversion, mixing, resampling, clock, error types
+# Module features
+dsp = []
+analysis = ["dsp"]                      # R128 K-weighting uses biquad, dynamics uses dB conversion
+midi = []
+graph = []
+# Platform
 simd = []
 pipewire = ["dep:pipewire"]
-full = ["simd", "pipewire"]
+# Bundles
+full = ["simd", "dsp", "analysis", "midi", "graph", "pipewire"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

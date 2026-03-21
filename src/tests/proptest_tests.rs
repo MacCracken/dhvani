@@ -3,7 +3,6 @@
 use proptest::prelude::*;
 
 use crate::buffer::AudioBuffer;
-use crate::dsp;
 
 // Strategy: generate valid audio buffers
 fn arb_audio_buffer() -> impl Strategy<Value = AudioBuffer> {
@@ -60,33 +59,37 @@ proptest! {
         prop_assert!(buf.rms() >= 0.0);
     }
 
+    #[cfg(feature = "dsp")]
     #[test]
     fn normalize_reaches_target(buf in arb_audio_buffer()) {
         let mut buf = buf;
         if buf.peak() > 0.0 {
-            dsp::normalize(&mut buf, 0.95);
+            crate::dsp::normalize(&mut buf, 0.95);
             prop_assert!((buf.peak() - 0.95).abs() < 0.01);
         }
     }
 
+    #[cfg(feature = "dsp")]
     #[test]
     fn noise_gate_output_finite(buf in arb_audio_buffer(), threshold in 0.0f32..1.0) {
         let mut buf = buf;
-        dsp::noise_gate(&mut buf, threshold);
+        crate::dsp::noise_gate(&mut buf, threshold);
         prop_assert!(buf.samples.iter().all(|s| s.is_finite()));
     }
 
+    #[cfg(feature = "dsp")]
     #[test]
     fn hard_limiter_bounds_output(buf in arb_audio_buffer(), ceiling in 0.01f32..2.0) {
         let mut buf = buf;
-        dsp::hard_limiter(&mut buf, ceiling);
+        crate::dsp::hard_limiter(&mut buf, ceiling);
         prop_assert!(buf.samples.iter().all(|&s| s.abs() <= ceiling + f32::EPSILON));
     }
 
+    #[cfg(feature = "dsp")]
     #[test]
     fn db_roundtrip_accurate(amp in 0.001f32..10.0) {
-        let db = dsp::amplitude_to_db(amp);
-        let back = dsp::db_to_amplitude(db);
+        let db = crate::dsp::amplitude_to_db(amp);
+        let back = crate::dsp::db_to_amplitude(db);
         prop_assert!((amp - back).abs() < amp * 0.001);
     }
 
@@ -99,6 +102,7 @@ proptest! {
         }
     }
 
+    #[cfg(feature = "midi")]
     #[test]
     fn velocity_roundtrip(v in 0u8..=127) {
         let v16 = crate::midi::translate::velocity_7_to_16(v);

@@ -125,6 +125,38 @@ pub fn is_silent(buf: &AudioBuffer, threshold_db: f32) -> bool {
     peak_db < threshold_db
 }
 
+/// Suggest a normalization gain to reach a target RMS level.
+///
+/// Returns a linear gain factor clamped to `0.1..=10.0` to prevent
+/// extreme amplification or attenuation. Returns `1.0` for silence.
+///
+/// This is the per-buffer gain computation that media players need for
+/// volume normalization. Pair with [`GainSmoother`](crate::dsp::GainSmoother)
+/// to prevent pumping.
+///
+/// # Arguments
+///
+/// * `buf` — audio buffer to analyze
+/// * `target_rms` — desired RMS level in linear scale (e.g., 0.125 for ~-18 dBFS)
+///
+/// # Example
+///
+/// ```rust
+/// use dhvani::buffer::AudioBuffer;
+/// use dhvani::analysis::suggest_gain;
+///
+/// let buf = AudioBuffer::from_interleaved(vec![0.5; 1024], 1, 44100).unwrap();
+/// let gain = suggest_gain(&buf, 0.125);
+/// assert!(gain < 1.0); // loud signal → attenuate
+/// ```
+pub fn suggest_gain(buf: &AudioBuffer, target_rms: f32) -> f32 {
+    let rms = buf.rms();
+    if rms < 1e-6 {
+        return 1.0;
+    }
+    (target_rms / rms).clamp(0.1, 10.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +215,37 @@ mod tests {
             (dominant - 440.0).abs() < spec.freq_resolution * 2.0,
             "dominant={dominant}, expected ~440"
         );
+    }
+
+    #[test]
+    fn suggest_gain_loud_signal() {
+        // Full-scale signal → should attenuate toward target
+        let buf = AudioBuffer::from_interleaved(vec![0.8; 1024], 1, 44100).unwrap();
+        let gain = suggest_gain(&buf, 0.125);
+        assert!(gain < 1.0, "loud signal should get gain < 1.0, got {gain}");
+    }
+
+    #[test]
+    fn suggest_gain_quiet_signal() {
+        // Very quiet signal → should amplify
+        let buf = AudioBuffer::from_interleaved(vec![0.01; 1024], 1, 44100).unwrap();
+        let gain = suggest_gain(&buf, 0.125);
+        assert!(gain > 1.0, "quiet signal should get gain > 1.0, got {gain}");
+        assert!(gain <= 10.0, "gain should be clamped to 10.0");
+    }
+
+    #[test]
+    fn suggest_gain_silence() {
+        let buf = AudioBuffer::silence(1, 1024, 44100);
+        let gain = suggest_gain(&buf, 0.125);
+        assert_eq!(gain, 1.0, "silence should return 1.0");
+    }
+
+    #[test]
+    fn suggest_gain_clamps_extreme() {
+        // Extremely quiet → gain would be huge, should clamp to 10.0
+        let buf = AudioBuffer::from_interleaved(vec![0.0001; 1024], 1, 44100).unwrap();
+        let gain = suggest_gain(&buf, 0.125);
+        assert_eq!(gain, 10.0);
     }
 }

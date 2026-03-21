@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.4] — 2026-03-20
+
+### Added
+
+#### DSP
+- `GainSmoother` — exponential moving average with configurable attack/release coefficients for smooth gain transitions. Prevents pumping in volume normalization workflows
+- `GainSmootherParams` — serde-compatible parameters (default: attack 0.3, release 0.05)
+- `GraphicEq` — 10-band ISO graphic equalizer (31 Hz–16 kHz) wrapping `ParametricEq` with per-band gain control
+- `GraphicEqSettings` — settings with 9 named presets (rock, pop, jazz, classical, bass, treble, vocal, electronic, acoustic)
+- `ISO_BANDS` constant — standard 10-band center frequencies
+
+#### Analysis
+- `suggest_gain(buf, target_rms) → f32` — per-buffer normalization gain suggestion with 0.1–10.0x clamping. Convenience for media player volume normalization
+
+#### Crate Structure
+- Feature flags for module-level compilation: `dsp`, `analysis`, `midi`, `graph` (all default-on)
+- `analysis` feature implies `dsp` (R128 K-weighting needs biquad, dynamics needs dB conversion)
+- `dsp::noise_reduction` gated behind `analysis` feature (needs FFT)
+- Core always available: `buffer`, `capture`, `clock`, `ffi`, `error`
+- Consumers can now select only what they need (e.g., `default-features = false, features = ["dsp", "simd"]`)
+
+#### Documentation
+- Comprehensive documentation audit and cleanup across all docs
+- Updated roadmap: collapsed v0.21–v0.23 into 2 dense releases targeting v1.0
+- Architecture overview updated with full module tree
+- Migration guide updated with planned v0.21.3 breaking changes
+
+### Fixed
+- Sanskrit character: नाद (Nāda) → ध्वनि (Dhvani) in README and docs
+- README Quick Start: replaced nonexistent `dsp::compress()` with `Compressor` struct
+- README: `spectrum_dft` → `spectrum_fft` in examples
+- Roadmap: marked already-completed items (oscillator, envelope, LFO, noise_reduction, waveform, anyhow removal, serde_json)
+- Stale version references removed from capability table and roadmap
+
+---
+
 ## [0.20.3] — 2026-03-20
 
 ### Added

@@ -15,14 +15,14 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | [`buffer`] | Audio buffers, mixing, resampling (linear + sinc), format conversion |
-//! | [`dsp`] | Biquad filters, parametric EQ, compressor, limiter, reverb, delay, de-esser, panner |
-//! | [`analysis`] | FFT, STFT spectrograms, EBU R128 loudness, dynamics, chromagram, onset detection |
 //! | [`clock`] | Sample-accurate transport clock, tempo, beats, PTS, A/V sync |
-//! | [`midi`] | MIDI 1.0/2.0 events, clips, translation, voice management, routing |
-//! | [`graph`] | RT-safe audio graph with topological execution and double-buffered plan swap |
-//! | [`meter`] | Lock-free peak metering via atomics (no mutex) |
-//! | [`capture`] | PipeWire capture/output, ring-buffer recording (requires `pipewire` feature) |
 //! | [`ffi`] | C-compatible FFI for AudioBuffer operations |
+//! | [`dsp`] | Biquad filters, parametric EQ, compressor, limiter, reverb, delay, de-esser, panner *(feature: `dsp`)* |
+//! | [`analysis`] | FFT, STFT spectrograms, EBU R128 loudness, dynamics, chromagram, onset detection *(feature: `analysis`)* |
+//! | [`midi`] | MIDI 1.0/2.0 events, clips, translation, voice management, routing *(feature: `midi`)* |
+//! | [`graph`] | RT-safe audio graph with topological execution and double-buffered plan swap *(feature: `graph`)* |
+//! | [`meter`] | Lock-free peak metering via atomics (no mutex) *(feature: `graph`)* |
+//! | [`capture`] | PipeWire capture/output, ring-buffer recording *(feature: `pipewire`)* |
 //!
 //! # Quick Start
 //!
@@ -218,24 +218,36 @@
 //!
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
-//! | `simd` | Yes | SSE2/AVX2 (x86_64) and NEON (aarch64) acceleration for buffer ops, mixing, format conversion |
-//! | `pipewire` | No | PipeWire audio capture/output backend (Linux only, requires `libpipewire-0.3-dev`) |
-//! | `full` | No | All features enabled |
+//! | `dsp` | Yes | DSP effects (EQ, compressor, limiter, reverb, delay, de-esser, panner, oscillator, LFO, envelope) |
+//! | `analysis` | Yes | Audio analysis (FFT, STFT, R128, dynamics, chromagram, onsets). Implies `dsp` |
+//! | `midi` | Yes | MIDI 1.0/2.0 events, voice management, routing, translation |
+//! | `graph` | Yes | RT-safe audio graph and lock-free metering |
+//! | `simd` | Yes | SSE2/AVX2 (x86_64) and NEON (aarch64) acceleration |
+//! | `pipewire` | No | PipeWire audio capture/output backend (Linux only) |
+//! | `full` | No | All features including PipeWire |
 //!
-//! Disable SIMD for scalar-only builds (e.g., WASM or embedded):
+//! Core-only build (buffers, mixing, resampling, clock — no DSP/MIDI/analysis):
 //! ```toml
 //! dhvani = { version = "0.20", default-features = false }
 //! ```
 
-pub mod analysis;
+// Core (always available)
 pub mod buffer;
 pub mod capture;
 pub mod clock;
-pub mod dsp;
 pub mod ffi;
-pub mod graph;
-pub mod meter;
+
+// Feature-gated modules
+#[cfg(feature = "dsp")]
+pub mod dsp;
+#[cfg(feature = "analysis")]
+pub mod analysis;
+#[cfg(feature = "midi")]
 pub mod midi;
+#[cfg(feature = "graph")]
+pub mod graph;
+#[cfg(feature = "graph")]
+pub mod meter;
 
 #[cfg(feature = "simd")]
 pub(crate) mod simd;

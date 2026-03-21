@@ -82,13 +82,23 @@ println!("PTS: {} us", clock.pts_us());
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `simd` | Yes | SSE2/AVX2/NEON acceleration for mixing and DSP |
-| `pipewire` | No | PipeWire audio capture/output backend |
-| `full` | No | All features |
+| `dsp` | Yes | DSP effects (EQ, compressor, limiter, reverb, delay, de-esser, panner, oscillator, LFO, envelope) |
+| `analysis` | Yes | Audio analysis (FFT, STFT, R128 loudness, dynamics, chromagram, onset detection). Implies `dsp` |
+| `midi` | Yes | MIDI 1.0/2.0 events, voice management, routing, translation |
+| `graph` | Yes | RT-safe audio graph, lock-free metering |
+| `simd` | Yes | SSE2/AVX2/NEON acceleration for mixing, gain, peak, RMS, format conversion |
+| `pipewire` | No | PipeWire audio capture/output backend (Linux only) |
+| `full` | No | All features including PipeWire |
 
 ```toml
-# Minimal (no system deps)
+# Everything (default)
+dhvani = "0.20"
+
+# Core only — buffers, mixing, resampling, clock (no DSP/MIDI/analysis/graph)
 dhvani = { version = "0.20", default-features = false }
+
+# Media player — DSP + analysis, no MIDI or graph
+dhvani = { version = "0.20", default-features = false, features = ["dsp", "analysis", "simd"] }
 
 # With PipeWire capture (Linux)
 dhvani = { version = "0.20", features = ["pipewire"] }

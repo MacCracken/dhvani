@@ -4,54 +4,9 @@
 
 ---
 
-## v0.20.3 (current) — Complete Engine
+## v0.20.4 (current) — Consumer-Driven Features
 
-Everything below was implemented in the initial build-out.
-
-### Core
-- [x] AudioBuffer (f32 interleaved), SampleFormat, Layout, mixing, linear + sinc resampling
-- [x] AudioClock (position, tempo, beats, PTS, seek)
-- [x] NadaError with `#[non_exhaustive]`, Result type alias
-
-### DSP
-- [x] Biquad filter (8 types — Bristow-Johnson cookbook)
-- [x] Parametric EQ (N-band cascade), StereoPanner (constant-power)
-- [x] Reverb (Schroeder/Freeverb), Delay (fixed + modulated chorus/flanger)
-- [x] Compressor (envelope follower, soft knee, makeup), EnvelopeLimiter (brick-wall)
-- [x] De-esser, noise gate, hard limiter, normalize, dB conversions
-
-### Analysis
-- [x] Radix-2 FFT (O(n log n)), STFT spectrograms
-- [x] EBU R128 loudness (K-weighting + gating + LRA)
-- [x] DynamicsAnalysis (true peak 4x oversampled, crest factor, dynamic range)
-- [x] Chromagram (12 pitch classes), onset detection (spectral flux)
-
-### MIDI
-- [x] MIDI 1.0: NoteEvent, ControlChange, MidiEvent enum, MidiClip (sorted insert, binary search, merge, transpose, quantize)
-- [x] MIDI 2.0 / UMP: NoteOnV2, NoteOffV2, ControlChangeV2, per-note expression, UmpMessageType
-- [x] Translation: velocity/CC/pitch bend 1.0↔2.0 with roundtrip tests
-- [x] Voice management: VoiceManager, 4 steal modes, polyphonic pool
-- [x] Routing: VelocityCurve, MidiRoute, CcMapping
-
-### SIMD
-- [x] SSE2/AVX2/NEON kernels: mix, gain, clamp, peak, RMS, noise gate, i16/f32, weighted sum
-- [x] Platform dispatch with scalar fallback, runtime AVX2 detection
-
-### RT Infrastructure
-- [x] Lock-free metering (PeakMeter, MeterBank, SharedMeterBank via AtomicU32)
-- [x] Audio graph (AudioNode trait, Graph → ExecutionPlan → GraphProcessor with double-buffered swap)
-- [x] Ring-buffer recording (RecordManager, LoopRecordManager with take splitting)
-
-### Capture
-- [x] PipeWire capture/output (PwCapture, PwOutput, enumerate_devices, hot-plug events)
-- [x] Device types, config structs, CaptureEvent
-
-### Crate Quality
-- [x] Format conversion: i16/i32/f32, interleaved/planar, mono/stereo, 5.1 downmix
-- [x] FFI module (C-compatible AudioBuffer API)
-- [x] CONTRIBUTING.md, SECURITY.md, deny.toml
-- [x] Fuzz targets (mix, resample, DSP), cargo-vet/semver-checks in CI
-- [x] 265+ tests, 7 benchmark suites, zero clippy warnings
+See CHANGELOG.md for full v0.20.3 and v0.20.4 release notes.
 
 ---
 
@@ -80,6 +35,7 @@ Everything needed to make the public API production-safe and v1.0-ready.
 - [ ] **f64 ↔ f32**: Double-precision for mastering buses and scientific analysis
 - [ ] **u8 ↔ f32**: Unsigned 8-bit PCM (WAV 8-bit, legacy formats). Center at 128, range 0–255
 - [ ] Add `I24`, `F64`, `U8` to `SampleFormat` enum
+- [ ] **Dithering (TPDF + noise-shaped)**: Required for any bit-depth reduction (f32→i16, i24→i16). TPDF for flat noise, noise-shaped for perceptual weighting
 
 ### Parameter validation
 
@@ -96,17 +52,16 @@ Everything needed to make the public API production-safe and v1.0-ready.
 - [ ] **Zero-copy buffer views**: `AudioBufferRef<'a>` for read-only DSP (analysis, metering)
 - [ ] **STFT window caching**: Pre-compute Hann window once, reuse across calls
 
+### Buffer utilities
+
+- [ ] **Crossfade**: Linear and equal-power crossfade between two buffers — needed by jalwa (track transitions), aethersafta (stream switching), shruti (clip editing)
+- [ ] **Fade in / fade out**: Linear and exponential ramp applied to buffer head/tail
+- [ ] **Target loudness normalization**: Normalize to a target LUFS (e.g. -14 LUFS for streaming). Combines `measure_r128()` + gain application. jalwa and tarang need this for Spotify/YouTube/Apple compliance
 ### Robustness
 
 - [ ] **NaN propagation audit**: All DSP effects handle NaN input → 0.0; add `debug_assert!(is_finite())` in test builds
 - [ ] **Reverb dead field**: Remove unused `_sample_rate` from Reverb struct
 - [ ] Audit `tracing` — instrument key functions or remove
-
-### Completed in v0.20.3
-
-- [x] Remove `anyhow` dep — `NadaError::Other` now uses `Box<dyn Error>`
-- [x] `serde_json` already in dev-dependencies
-- [x] Spectral noise reduction, waveform extraction, oscillator, ADSR envelope, LFO
 
 ---
 
@@ -141,11 +96,19 @@ Ship-quality validation, close SIMD gaps, documentation for v1.0, and get consum
 - [ ] **Node bypass**: Skip processing without removing from graph
 - [ ] **Latency compensation**: Nodes report I/O delay, graph compensates
 
-### Cross-project features
+### Analysis additions
+
+- [ ] **Beat/tempo detection**: Autocorrelation of onset function → BPM estimate. jalwa and tarang need this for music analysis
+- [ ] **Key detection**: Krumhansl-Schmuckler profile matching on existing chromagram output. Small addition, high value
+- [ ] **Spectral rolloff** — frequency below which 95% of spectral energy sits
+- [ ] **Zero-crossing rate** — simple feature useful for speech/music discrimination
+
+### DSP additions
 
 - [ ] **SVF Filter (Cytomic topology)** — alternative to biquad, better for modulated synthesis
-- [ ] **Spectral rolloff** — frequency below which 95% of spectral energy sits
-- [ ] **EQ presets** — convenience layer over parametric EQ (consumers can also define their own)
+- [ ] **Sample-accurate automation curves**: Linear/exponential/bezier interpolation between timestamped breakpoints. shruti needs this for DAW parameter automation
+- [ ] **Channel routing matrix**: NxM routing with per-crosspoint gain. aethersafta needs this for multi-stream mixing
+- [x] ~~EQ presets~~ — shipped as `GraphicEq` with 9 presets in v0.20.4
 
 ### Documentation
 

@@ -153,6 +153,7 @@ pub unsafe extern "C" fn nada_buffer_clamp(ptr: *mut NadaBuffer) {
 ///
 /// # Safety
 /// `ptr` must be a valid mutable NadaBuffer pointer.
+#[cfg(feature = "dsp")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nada_buffer_noise_gate(ptr: *mut NadaBuffer, threshold: f32) {
     if !ptr.is_null() {
@@ -164,6 +165,7 @@ pub unsafe extern "C" fn nada_buffer_noise_gate(ptr: *mut NadaBuffer, threshold:
 ///
 /// # Safety
 /// `ptr` must be a valid mutable NadaBuffer pointer.
+#[cfg(feature = "dsp")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nada_buffer_hard_limiter(ptr: *mut NadaBuffer, ceiling: f32) {
     if !ptr.is_null() {

@@ -5,8 +5,11 @@ mod serde_tests;
 
 use crate::buffer::{AudioBuffer, mix, resample_linear};
 use crate::clock::AudioClock;
+
+#[cfg(feature = "dsp")]
 use crate::dsp;
 
+#[cfg(feature = "dsp")]
 #[test]
 fn full_pipeline_mix_compress_normalize() {
     use crate::dsp::{Compressor, CompressorParams};
@@ -56,6 +59,7 @@ fn clock_syncs_with_buffer() {
     assert!((clock.position_ms() - expected_ms).abs() < 0.1);
 }
 
+#[cfg(all(feature = "dsp", feature = "analysis"))]
 #[test]
 fn noise_gate_then_analyze() {
     use crate::analysis;
@@ -73,6 +77,7 @@ fn noise_gate_then_analyze() {
     assert!(!analysis::is_silent(&buf, -60.0));
 }
 
+#[cfg(feature = "dsp")]
 #[test]
 fn db_roundtrip() {
     let amp = 0.707;
@@ -81,6 +86,7 @@ fn db_roundtrip() {
     assert!((amp - back).abs() < 0.001);
 }
 
+#[cfg(feature = "dsp")]
 #[test]
 fn full_dsp_chain_eq_compress_reverb_delay() {
     use crate::dsp::{
@@ -148,6 +154,7 @@ fn full_dsp_chain_eq_compress_reverb_delay() {
     assert!(buf.peak() >= 0.9);
 }
 
+#[cfg(feature = "dsp")]
 #[test]
 fn format_conversion_pipeline() {
     use crate::buffer::convert::{f32_to_i16, i16_to_f32, mono_to_stereo, stereo_to_mono};
@@ -178,6 +185,7 @@ fn format_conversion_pipeline() {
     assert_eq!(back_i16.len(), original_i16.len());
 }
 
+#[cfg(feature = "analysis")]
 #[test]
 fn sinc_resample_preserves_frequency() {
     use crate::analysis::spectrum_dft;

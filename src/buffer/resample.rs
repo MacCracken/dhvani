@@ -171,8 +171,6 @@ fn windowed_sinc(x: f64, half_width: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::spectrum_dft;
-
     #[test]
     fn same_rate_identity() {
         let buf = AudioBuffer::from_interleaved(vec![0.5, -0.5, 0.3, -0.3], 1, 44100).unwrap();
@@ -235,8 +233,10 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "analysis")]
     #[test]
     fn sine_frequency_preserved() {
+        use crate::analysis::spectrum_dft;
         // 440Hz sine at 44100, resample to 48000, check dominant frequency
         let sr = 44100u32;
         let frames = 4096;
