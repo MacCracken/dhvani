@@ -54,6 +54,10 @@ pub enum Layout {
 }
 
 /// An audio buffer holding sample data in a known format.
+///
+/// Fields are public for the v0.20.x series. They will become private
+/// in v0.21.3 — use accessor methods (`samples()`, `channels()`, etc.)
+/// to prepare for the transition.
 #[derive(Debug, Clone)]
 pub struct AudioBuffer {
     /// Raw sample data (f32 internally, converted on input/output).
@@ -66,6 +70,40 @@ pub struct AudioBuffer {
     pub frames: usize,
 }
 
+// Accessor methods — use these instead of direct field access.
+// Fields will become private in v0.21.3.
+impl AudioBuffer {
+    /// Immutable reference to the raw sample data.
+    #[inline]
+    pub fn samples(&self) -> &[f32] {
+        &self.samples
+    }
+
+    /// Mutable reference to the raw sample data.
+    #[inline]
+    pub fn samples_mut(&mut self) -> &mut [f32] {
+        &mut self.samples
+    }
+
+    /// Number of channels.
+    #[inline]
+    pub fn channels(&self) -> u32 {
+        self.channels
+    }
+
+    /// Sample rate in Hz.
+    #[inline]
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// Number of frames (samples per channel).
+    #[inline]
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+}
+
 impl AudioBuffer {
     /// Create a new buffer from f32 interleaved samples.
     pub fn from_interleaved(
@@ -74,10 +112,12 @@ impl AudioBuffer {
         sample_rate: u32,
     ) -> Result<Self, NadaError> {
         if channels == 0 {
+            tracing::warn!(channels, "AudioBuffer: invalid channel count");
             return Err(NadaError::InvalidChannels(0));
         }
-        if sample_rate == 0 {
-            return Err(NadaError::InvalidSampleRate(0));
+        if sample_rate == 0 || sample_rate > 384000 {
+            tracing::warn!(sample_rate, "AudioBuffer: invalid sample rate");
+            return Err(NadaError::InvalidSampleRate(sample_rate));
         }
         let frames = samples.len() / channels as usize;
         Ok(Self {

@@ -34,6 +34,16 @@ impl Default for DeEsserParams {
     }
 }
 
+impl DeEsserParams {
+    /// Validate parameters.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.freq_hz <= 0.0 { return Err("freq_hz must be > 0.0"); }
+        if self.reduction_db < 0.0 { return Err("reduction_db must be >= 0.0"); }
+        if self.q <= 0.0 { return Err("q must be > 0.0"); }
+        Ok(())
+    }
+}
+
 /// Sibilance reduction processor.
 #[derive(Debug, Clone)]
 pub struct DeEsser {

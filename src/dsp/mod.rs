@@ -13,9 +13,6 @@ pub mod oscillator;
 pub mod pan;
 pub mod reverb;
 
-use serde::{Deserialize, Serialize};
-
-use crate::NadaError;
 use crate::buffer::AudioBuffer;
 
 pub use biquad::{BiquadCoeffs, BiquadFilter, FilterType};
@@ -30,26 +27,6 @@ pub use noise_reduction::noise_reduce;
 pub use oscillator::{Oscillator, Waveform};
 pub use pan::StereoPanner;
 pub use reverb::{Reverb, ReverbParams};
-
-/// Parametric EQ band.
-#[deprecated(since = "0.21.3", note = "use `EqBandConfig` with `ParametricEq` instead")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EqBand {
-    /// Center frequency in Hz.
-    pub freq_hz: f32,
-    /// Gain in dB (-24 to +24).
-    pub gain_db: f32,
-    /// Q factor (bandwidth).
-    pub q: f32,
-}
-
-/// Apply a simple gain-based EQ band (approximation — proper biquad in v0.21).
-#[deprecated(since = "0.21.3", note = "use `ParametricEq` instead")]
-#[allow(deprecated)]
-pub fn apply_eq_band(_buf: &mut AudioBuffer, _band: &EqBand) -> Result<(), NadaError> {
-    // Placeholder — full biquad filter implementation in next version
-    Ok(())
-}
 
 /// Noise gate: silence samples below threshold.
 pub fn noise_gate(buf: &mut AudioBuffer, threshold: f32) {
@@ -82,22 +59,6 @@ pub fn hard_limiter(buf: &mut AudioBuffer, ceiling: f32) {
     }
 }
 
-/// Simple compressor: reduce dynamic range above threshold.
-#[deprecated(since = "0.21.3", note = "use `Compressor` struct for envelope-aware compression")]
-pub fn compress(buf: &mut AudioBuffer, threshold: f32, ratio: f32) {
-    if ratio <= 1.0 {
-        return;
-    }
-    for s in &mut buf.samples {
-        let abs = s.abs();
-        if abs > threshold {
-            let excess = abs - threshold;
-            let compressed = threshold + excess / ratio;
-            *s = compressed.copysign(*s);
-        }
-    }
-}
-
 /// Normalize buffer to peak at target level.
 pub fn normalize(buf: &mut AudioBuffer, target_peak: f32) {
     let peak = buf.peak();
@@ -121,7 +82,6 @@ pub fn db_to_amplitude(db: f32) -> f32 {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -142,16 +102,6 @@ mod tests {
         assert_eq!(buf.samples[0], 1.0);
         assert_eq!(buf.samples[1], -1.0);
         assert!((buf.samples[2] - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn compressor_reduces_peaks() {
-        let mut buf = AudioBuffer::from_interleaved(vec![1.0, -1.0, 0.3], 1, 44100).unwrap();
-        compress(&mut buf, 0.5, 4.0);
-        // 1.0 above 0.5 threshold: excess=0.5, compressed=0.5+0.5/4=0.625
-        assert!((buf.samples[0] - 0.625).abs() < 0.01);
-        // 0.3 below threshold: unchanged
-        assert!((buf.samples[2] - 0.3).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -33,6 +33,12 @@ pub enum NadaError {
     #[error("conversion error: {0}")]
     Conversion(String),
 
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    #[error("{0}")]
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for NadaError {
+    fn from(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        Self::Other(err)
+    }
 }

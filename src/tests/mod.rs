@@ -1,7 +1,5 @@
 //! Integration and property-based tests for nada.
 
-#![allow(deprecated)]
-
 mod proptest_tests;
 mod serde_tests;
 
@@ -11,12 +9,18 @@ use crate::dsp;
 
 #[test]
 fn full_pipeline_mix_compress_normalize() {
+    use crate::dsp::{Compressor, CompressorParams};
+
     let a = AudioBuffer::from_interleaved(vec![0.8, 0.8, 0.7, 0.7], 2, 44100).unwrap();
     let b = AudioBuffer::from_interleaved(vec![0.6, 0.6, 0.5, 0.5], 2, 44100).unwrap();
 
     let mut mixed = mix(&[&a, &b]).unwrap();
     // Mixed peaks at 1.4 — compress then normalize
-    dsp::compress(&mut mixed, 0.8, 4.0);
+    let mut comp = Compressor::new(
+        CompressorParams { threshold_db: -4.0, ratio: 4.0, attack_ms: 0.01, release_ms: 0.01, makeup_gain_db: 0.0, knee_db: 0.0 },
+        44100,
+    );
+    comp.process(&mut mixed);
     dsp::normalize(&mut mixed, 0.95);
 
     assert!(mixed.peak() <= 0.96);

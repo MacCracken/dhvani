@@ -28,6 +28,16 @@ pub struct ReverbParams {
     pub mix: f32,
 }
 
+impl ReverbParams {
+    /// Validate parameters.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(0.0..=1.0).contains(&self.room_size) { return Err("room_size must be 0.0–1.0"); }
+        if !(0.0..=1.0).contains(&self.damping) { return Err("damping must be 0.0–1.0"); }
+        if !(0.0..=1.0).contains(&self.mix) { return Err("mix must be 0.0–1.0"); }
+        Ok(())
+    }
+}
+
 impl Default for ReverbParams {
     fn default() -> Self {
         Self {

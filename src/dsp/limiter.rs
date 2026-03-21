@@ -27,6 +27,16 @@ impl Default for LimiterParams {
     }
 }
 
+impl LimiterParams {
+    /// Validate parameters.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.ceiling_db > 0.0 { return Err("ceiling_db should be <= 0.0"); }
+        if self.release_ms < 0.0 { return Err("release_ms must be >= 0.0"); }
+        if self.knee_db < 0.0 { return Err("knee_db must be >= 0.0"); }
+        Ok(())
+    }
+}
+
 /// Brick-wall limiter with envelope follower.
 ///
 /// Ensures output never exceeds the ceiling. Uses instant attack

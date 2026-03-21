@@ -182,6 +182,7 @@ impl GraphProcessor {
         if let Ok(mut pending) = self.pending_plan.try_lock()
             && let Some(new_plan) = pending.take()
         {
+            tracing::debug!(nodes = new_plan.order.len(), "GraphProcessor: swapped to new plan");
             self.current_plan = Some(new_plan);
             self.node_outputs.clear();
         }

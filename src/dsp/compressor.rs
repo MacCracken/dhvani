@@ -39,6 +39,17 @@ impl Default for CompressorParams {
     }
 }
 
+impl CompressorParams {
+    /// Validate parameters. Returns an error description if invalid.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.ratio < 1.0 { return Err("ratio must be >= 1.0"); }
+        if self.attack_ms < 0.0 { return Err("attack_ms must be >= 0.0"); }
+        if self.release_ms < 0.0 { return Err("release_ms must be >= 0.0"); }
+        if self.knee_db < 0.0 { return Err("knee_db must be >= 0.0"); }
+        Ok(())
+    }
+}
+
 /// Envelope-following dynamic range compressor.
 #[derive(Debug, Clone)]
 pub struct Compressor {
