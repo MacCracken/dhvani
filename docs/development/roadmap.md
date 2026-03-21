@@ -94,12 +94,18 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [ ] `LoopRecordManager` — loop-aware recording with sentinel-based take splitting
       _Source: shruti-engine/src/record.rs_
 
-#### DSP gaps
-- [ ] `StereoPanner` — constant-power panning
-- [ ] `EnvelopeLimiter` — soft-knee limiter with envelope follower
-- [ ] `DynamicsAnalysis` — peak, RMS, true peak (4x oversampled), crest factor, dynamic range
-- [ ] FFT spectrum — radix-2 FFT replacing O(n^2) DFT
-- [ ] Full PipeWire event loop integration (complete capture/output stubs)
+#### DSP (completed)
+- [x] `StereoPanner` — constant-power (sin/cos) panning
+- [x] `EnvelopeLimiter` — soft-knee brick-wall limiter with instant attack, configurable release
+- [x] `DynamicsAnalysis` — peak, RMS, true peak (4x oversampled), crest factor, dynamic range
+- [x] FFT spectrum — radix-2 Cooley-Tukey FFT replacing O(n^2) DFT
+- [x] Full PipeWire event loop integration (capture + output + enumerate_devices)
+
+#### Analysis (completed)
+- [x] STFT (short-time Fourier transform) for spectrograms — Spectrogram struct with time-frequency matrix
+- [x] Full EBU R128 loudness — K-weighting (high shelf + high pass), 400ms blocks, absolute + relative gating, LRA
+- [x] Chromagram — 12 pitch classes mapped from FFT bins
+- [x] Onset detection — spectral flux with peak-picking
 
 ---
 
@@ -115,12 +121,6 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [ ] Zero-copy buffer views (borrow slices for read-only DSP)
 - [ ] Buffer pool (reuse allocations across frames — arena allocator)
 - [ ] Parallel DSP chain (rayon for independent effects)
-
-#### Analysis
-- [ ] STFT (short-time Fourier transform) for spectrograms
-- [ ] Full EBU R128 loudness (K-weighting + gating)
-- [ ] Chromagram (pitch class distribution)
-- [ ] Onset detection (transient analysis)
 
 #### Quality
 - [ ] Property-based tests (proptest: random buffers, sample rates, channels)

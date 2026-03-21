@@ -5,6 +5,8 @@ pub mod compressor;
 pub mod deesser;
 pub mod delay;
 pub mod eq;
+pub mod limiter;
+pub mod pan;
 pub mod reverb;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,8 @@ pub use compressor::{Compressor, CompressorParams};
 pub use deesser::{DeEsser, DeEsserParams};
 pub use delay::{DelayLine, ModulatedDelay, ModulatedDelayParams};
 pub use eq::{BandType, EqBandConfig, ParametricEq};
+pub use limiter::{EnvelopeLimiter, LimiterParams};
+pub use pan::StereoPanner;
 pub use reverb::{Reverb, ReverbParams};
 
 /// Parametric EQ band.

@@ -1,0 +1,202 @@
+//! Envelope limiter — soft-knee brick-wall limiter with envelope follower.
+
+use serde::{Deserialize, Serialize};
+
+use crate::buffer::AudioBuffer;
+use crate::dsp::{amplitude_to_db, db_to_amplitude};
+
+/// Limiter parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LimiterParams {
+    /// Ceiling in dB (maximum output level, typically -0.1 to -1.0 dBFS).
+    pub ceiling_db: f32,
+    /// Release time in milliseconds.
+    pub release_ms: f32,
+    /// Knee width in dB (0.0 = hard knee).
+    pub knee_db: f32,
+}
+
+impl Default for LimiterParams {
+    fn default() -> Self {
+        Self {
+            ceiling_db: -0.3,
+            release_ms: 50.0,
+            knee_db: 0.0,
+        }
+    }
+}
+
+/// Brick-wall limiter with envelope follower.
+///
+/// Ensures output never exceeds the ceiling. Uses instant attack
+/// (true peak limiting) and configurable release.
+#[derive(Debug, Clone)]
+pub struct EnvelopeLimiter {
+    params: LimiterParams,
+    envelope_db: f32,
+    sample_rate: u32,
+}
+
+impl EnvelopeLimiter {
+    /// Create a new limiter.
+    pub fn new(params: LimiterParams, sample_rate: u32) -> Self {
+        Self {
+            params,
+            envelope_db: -120.0,
+            sample_rate,
+        }
+    }
+
+    /// Process an audio buffer in-place.
+    pub fn process(&mut self, buf: &mut AudioBuffer) {
+        let ch = buf.channels as usize;
+        let release_coeff = Self::time_constant(self.params.release_ms, self.sample_rate);
+        let ceiling_lin = db_to_amplitude(self.params.ceiling_db);
+
+        for frame in 0..buf.frames {
+            // Detect peak across channels
+            let mut peak = 0.0f32;
+            for c in 0..ch {
+                peak = peak.max(buf.samples[frame * ch + c].abs());
+            }
+
+            let input_db = amplitude_to_db(peak).max(-120.0);
+
+            // Instant attack, smooth release
+            if input_db > self.envelope_db {
+                self.envelope_db = input_db; // Instant attack
+            } else {
+                self.envelope_db =
+                    release_coeff * self.envelope_db + (1.0 - release_coeff) * input_db;
+            }
+
+            // Compute gain reduction
+            let gain_db = self.compute_gain(self.envelope_db);
+
+            if gain_db < 0.0 && gain_db.is_finite() {
+                let gain_lin = db_to_amplitude(gain_db);
+                for c in 0..ch {
+                    let idx = frame * ch + c;
+                    buf.samples[idx] *= gain_lin;
+                }
+            }
+
+            // Hard clamp as safety net
+            for c in 0..ch {
+                let idx = frame * ch + c;
+                buf.samples[idx] = buf.samples[idx].clamp(-ceiling_lin, ceiling_lin);
+            }
+        }
+    }
+
+    fn compute_gain(&self, env_db: f32) -> f32 {
+        let ceiling = self.params.ceiling_db;
+        let knee = self.params.knee_db;
+
+        if knee > 0.0 {
+            let half_knee = knee / 2.0;
+            let lower = ceiling - half_knee;
+            if env_db <= lower {
+                0.0
+            } else if env_db >= ceiling {
+                ceiling - env_db
+            } else {
+                let x = env_db - lower;
+                (-x * x) / (2.0 * knee)
+            }
+        } else if env_db <= ceiling {
+            0.0
+        } else {
+            ceiling - env_db
+        }
+    }
+
+    fn time_constant(time_ms: f32, sample_rate: u32) -> f32 {
+        let samples = (time_ms * 0.001 * sample_rate as f32).max(1.0);
+        (-1.0f32 / samples).exp()
+    }
+
+    /// Current gain reduction in dB.
+    pub fn gain_reduction_db(&self) -> f32 {
+        self.compute_gain(self.envelope_db)
+    }
+
+    /// Update parameters.
+    pub fn set_params(&mut self, params: LimiterParams) {
+        self.params = params;
+    }
+
+    /// Reset envelope state.
+    pub fn reset(&mut self) {
+        self.envelope_db = -120.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_sine(amplitude: f32, frames: usize) -> AudioBuffer {
+        let samples: Vec<f32> = (0..frames)
+            .map(|i| {
+                amplitude * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin()
+            })
+            .collect();
+        AudioBuffer::from_interleaved(samples, 1, 44100).unwrap()
+    }
+
+    #[test]
+    fn below_ceiling_unchanged() {
+        let params = LimiterParams {
+            ceiling_db: 0.0,
+            release_ms: 50.0,
+            knee_db: 0.0,
+        };
+        let mut limiter = EnvelopeLimiter::new(params, 44100);
+        let mut buf = make_sine(0.5, 4096);
+        let original_rms = buf.rms();
+        limiter.process(&mut buf);
+        assert!(
+            (buf.rms() - original_rms).abs() < original_rms * 0.05,
+            "Below ceiling should be mostly unchanged"
+        );
+    }
+
+    #[test]
+    fn above_ceiling_limited() {
+        let params = LimiterParams {
+            ceiling_db: -6.0, // ~0.5 linear
+            release_ms: 10.0,
+            knee_db: 0.0,
+        };
+        let mut limiter = EnvelopeLimiter::new(params, 44100);
+        let mut buf = make_sine(1.0, 4096);
+        limiter.process(&mut buf);
+        let ceiling_lin = db_to_amplitude(-6.0);
+        // All samples should be at or below ceiling
+        assert!(
+            buf.peak() <= ceiling_lin + 0.01,
+            "Peak {} should be <= ceiling {}",
+            buf.peak(),
+            ceiling_lin
+        );
+    }
+
+    #[test]
+    fn output_finite() {
+        let mut limiter = EnvelopeLimiter::new(LimiterParams::default(), 44100);
+        let mut buf = make_sine(2.0, 4096);
+        limiter.process(&mut buf);
+        assert!(buf.samples.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn reset_clears_state() {
+        let mut limiter = EnvelopeLimiter::new(LimiterParams::default(), 44100);
+        let mut buf = make_sine(1.0, 1024);
+        limiter.process(&mut buf);
+        limiter.reset();
+        assert!((limiter.envelope_db + 120.0).abs() < f32::EPSILON);
+    }
+}

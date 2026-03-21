@@ -1,4 +1,18 @@
-//! Audio analysis — FFT, spectrum, loudness (LUFS), peak, RMS.
+//! Audio analysis — FFT, spectrum, loudness (LUFS), peak, RMS, dynamics, chromagram, onset detection.
+
+pub mod chroma;
+pub mod dynamics;
+pub mod fft;
+pub mod loudness;
+pub mod onset;
+pub mod stft;
+
+pub use chroma::{Chromagram, chromagram};
+pub use dynamics::{DynamicsAnalysis, analyze_dynamics};
+pub use fft::spectrum_fft;
+pub use loudness::{R128Loudness, measure_r128};
+pub use onset::{OnsetResult, detect_onsets};
+pub use stft::{Spectrogram, stft as compute_stft};
 
 use crate::buffer::AudioBuffer;
 
