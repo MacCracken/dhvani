@@ -90,9 +90,9 @@ fn db_roundtrip() {
 #[cfg(feature = "dsp")]
 #[test]
 fn full_dsp_chain_eq_compress_reverb_delay() {
-    use crate::dsp::{self,
-        BandType, Compressor, CompressorParams, DelayLine, EqBandConfig, ParametricEq, Reverb,
-        ReverbParams,
+    use crate::dsp::{
+        self, BandType, Compressor, CompressorParams, DelayLine, EqBandConfig, ParametricEq,
+        Reverb, ReverbParams,
     };
 
     // Generate a 440Hz sine, stereo, 1 second
