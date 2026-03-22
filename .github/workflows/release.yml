@@ -27,6 +27,9 @@ jobs:
             os: ubuntu-latest
             name: linux-arm64
             cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: macos-amd64
           - target: aarch64-apple-darwin
             os: macos-latest
             name: macos-arm64
