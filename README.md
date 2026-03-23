@@ -55,7 +55,7 @@ let mut mixed = mix(&[&vocals, &drums])?;
 // Process
 let mut comp = Compressor::new(CompressorParams {
     threshold_db: -18.0, ratio: 4.0, attack_ms: 10.0, release_ms: 100.0,
-    makeup_gain_db: 3.0, knee_db: 6.0,
+    makeup_gain_db: 3.0, knee_db: 6.0, ..Default::default()
 }, 44100)?;
 comp.process(&mut mixed);
 dsp::normalize(&mut mixed, 0.95);

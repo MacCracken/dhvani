@@ -47,7 +47,7 @@
 //! // Compress and normalize
 //! let mut comp = Compressor::new(CompressorParams {
 //!     threshold_db: -18.0, ratio: 4.0, attack_ms: 10.0, release_ms: 100.0,
-//!     makeup_gain_db: 3.0, knee_db: 6.0,
+//!     makeup_gain_db: 3.0, knee_db: 6.0, ..Default::default()
 //! }, 44100).unwrap();
 //! comp.process(&mut mixed);
 //! dsp::normalize(&mut mixed, 0.95);
@@ -258,5 +258,56 @@ pub use error::NadaError;
 /// Result type alias for dhvani operations.
 pub type Result<T> = std::result::Result<T, NadaError>;
 
+// Re-export primary types for convenience.
+pub use buffer::AudioBuffer;
+pub use clock::AudioClock;
+
+#[cfg(feature = "dsp")]
+pub use dsp::{
+    BiquadFilter, Compressor, CompressorParams, EnvelopeLimiter, LimiterParams, ParametricEq,
+    Reverb, ReverbParams, amplitude_to_db, db_to_amplitude,
+};
+
+#[cfg(feature = "analysis")]
+pub use analysis::{Spectrum, spectrum_fft};
+
+#[cfg(feature = "midi")]
+pub use midi::MidiEvent;
+
+#[cfg(feature = "graph")]
+pub use graph::{AudioNode, Graph, GraphProcessor, NodeId};
+
 #[cfg(test)]
 mod tests;
+
+// Compile-time assertions: core public types are Send + Sync.
+#[cfg(test)]
+mod assert_traits {
+    fn _assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn core_types_are_send_sync() {
+        _assert_send_sync::<super::AudioBuffer>();
+        _assert_send_sync::<super::AudioClock>();
+        _assert_send_sync::<super::NadaError>();
+    }
+
+    #[cfg(feature = "dsp")]
+    #[test]
+    fn dsp_types_are_send_sync() {
+        _assert_send_sync::<super::dsp::BiquadFilter>();
+        _assert_send_sync::<super::dsp::Compressor>();
+        _assert_send_sync::<super::dsp::EnvelopeLimiter>();
+        _assert_send_sync::<super::dsp::Reverb>();
+        _assert_send_sync::<super::dsp::ParametricEq>();
+        _assert_send_sync::<super::dsp::Oscillator>();
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_types_are_send() {
+        fn _assert_send<T: Send>() {}
+        _assert_send::<super::graph::Graph>();
+        _assert_send_sync::<super::graph::NodeId>();
+    }
+}

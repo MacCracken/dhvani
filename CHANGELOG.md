@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.4] — 2026-03-22
+
+### Changed — BREAKING
+
+#### API Encapsulation
+- `AudioClock` fields (`position_samples`, `sample_rate`, `tempo_bpm`, `running`) are now private — use accessor methods `position_samples()`, `sample_rate()`, `tempo_bpm()`, `is_running()`, `set_tempo()`
+
+### Added
+
+#### Abaco Integration
+- Added `abaco` 0.22.4 as dependency — shared DSP math crate for the AGNOS ecosystem
+- `dsp::amplitude_to_db`, `db_to_amplitude`, `sanitize_sample` now re-exported from `abaco::dsp`
+- Biquad filter design uses `abaco::dsp::{angular_frequency, db_gain_factor}`
+- Compressor/limiter time constants use `abaco::dsp::time_constant`
+- Oscillator uses `abaco::dsp::poly_blep`
+- Panner uses `abaco::dsp::constant_power_pan`
+- Crossfade uses `abaco::dsp::equal_power_crossfade`
+- MIDI voice frequency uses `abaco::dsp::midi_to_freq`
+- MIDI constants (`A4_FREQUENCY`, `A4_MIDI_NOTE`, `SEMITONES_PER_OCTAVE`) re-exported from abaco
+
+#### DSP Consistency
+- `set_sample_rate()` on all stateful DSP effects: BiquadFilter, Compressor, EnvelopeLimiter, ParametricEq, DeEsser, Reverb, ModulatedDelay, Envelope, Lfo
+- `set_bypass()`/`is_bypassed()` on all dynamic effects: BiquadFilter, Compressor, EnvelopeLimiter, ParametricEq, DeEsser, Reverb, DelayLine, ModulatedDelay
+- `ParametricEq::set_params()` — bulk band replacement
+- `ModulatedDelay::set_params()` — runtime parameter updates
+- `DelayLine::latency_frames()` and `ModulatedDelay::latency_frames()` — latency reporting for PDC
+- `AudioClock::set_tempo()` — runtime BPM changes
+
+#### Refactoring
+- `dsp::soft_knee_gain()` — shared soft-knee gain computation used by Compressor and EnvelopeLimiter
+- Removed duplicated `time_constant()` from Compressor and EnvelopeLimiter (now delegates to `abaco::dsp`)
+- Removed inline `poly_blep()` from oscillator (now uses `abaco::dsp`)
+
+#### Tooling
+- `scripts/bench-history.sh` — benchmark runner with CSV history + 3-point Markdown tracking
+
+#### Tests
+- 15 new tests: bypass, set_sample_rate, soft_knee_gain, clock getters, latency_frames, set_params (431 total)
+
 ## [0.21.4] — 2026-03-21
 
 ### Changed — BREAKING

@@ -120,7 +120,10 @@ impl Voice {
         abaco::dsp::midi_to_freq(self.note as f64)
     }
 
-    /// Apply a per-note CC. Currently handles CC#74 (brightness).
+    /// Apply a per-note CC.
+    ///
+    /// Currently only CC#74 (brightness / MPE timbre) is handled.
+    /// Other controller numbers are silently ignored.
     pub fn apply_per_note_cc(&mut self, controller: u8, value_normalized: f32) {
         if controller == 74 {
             self.brightness = value_normalized.clamp(0.0, 1.0);

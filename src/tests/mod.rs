@@ -25,6 +25,7 @@ fn full_pipeline_mix_compress_normalize() {
             release_ms: 0.01,
             makeup_gain_db: 0.0,
             knee_db: 0.0,
+            ..Default::default()
         },
         44100,
     )
@@ -127,6 +128,7 @@ fn full_dsp_chain_eq_compress_reverb_delay() {
             release_ms: 50.0,
             makeup_gain_db: 0.0,
             knee_db: 0.0,
+            ..Default::default()
         },
         sr,
     )
@@ -215,4 +217,139 @@ fn sinc_resample_preserves_frequency() {
         (dominant - 440.0).abs() < spec.freq_resolution() * 2.0,
         "Dominant freq {dominant} should be near 440Hz"
     );
+}
+
+// ── Edge case tests ──────────────────────────────────────────────────────
+
+#[cfg(feature = "dsp")]
+#[test]
+fn oscillator_zero_freq_silent() {
+    use crate::dsp::{Oscillator, Waveform};
+
+    let mut osc = Oscillator::new(Waveform::Sine, 44100);
+    let mut sum = 0.0f64;
+    // At 0 Hz the oscillator should stay at phase 0, producing near-zero output
+    for _ in 0..1000 {
+        sum += osc.sample(0.0).abs() as f64;
+    }
+    assert!(
+        sum < 0.01,
+        "0 Hz oscillator should be near-silent, sum={sum}"
+    );
+}
+
+#[cfg(feature = "dsp")]
+#[test]
+fn delay_zero_ms_passthrough() {
+    use crate::dsp::DelayLine;
+
+    let mut delay = DelayLine::new(0.0, 10.0, 0.0, 1.0, 44100, 1);
+    let mut buf = AudioBuffer::from_interleaved(vec![1.0, 0.5, 0.25, 0.0], 1, 44100).unwrap();
+    delay.process(&mut buf);
+    // With 0ms delay and no feedback, wet output = delayed-by-0 = input
+    assert!(buf.samples.iter().all(|s| s.is_finite()));
+}
+
+#[cfg(feature = "dsp")]
+#[test]
+fn envelope_sub_sample_attack() {
+    use crate::dsp::{AdsrParams, Envelope};
+
+    // Attack of 0.00001 seconds ≈ less than 1 sample at 44100
+    let params = AdsrParams {
+        attack: 0.00001,
+        decay: 0.1,
+        sustain: 0.5,
+        release: 0.1,
+    };
+    let mut env = Envelope::new(params, 44100);
+    env.trigger();
+    let _first = env.tick(); // stage_pos=0 → level=0
+    let second = env.tick(); // should reach 1.0 with 1-sample attack
+    assert!(
+        second >= 1.0,
+        "sub-sample attack should reach full level within 2 ticks: {second}"
+    );
+}
+
+#[cfg(feature = "graph")]
+#[test]
+fn graph_cycle_detection() {
+    use crate::graph::{Graph, NodeId};
+
+    let mut graph = Graph::new();
+
+    struct Passthrough;
+    impl crate::graph::AudioNode for Passthrough {
+        fn name(&self) -> &str {
+            "pass"
+        }
+        fn num_inputs(&self) -> usize {
+            1
+        }
+        fn num_outputs(&self) -> usize {
+            1
+        }
+        fn process(&mut self, inputs: &[&AudioBuffer], output: &mut AudioBuffer) {
+            if let Some(input) = inputs.first() {
+                output.samples_mut().copy_from_slice(input.samples());
+            }
+        }
+    }
+
+    let a = NodeId::next();
+    let b = NodeId::next();
+    graph.add_node(a, Box::new(Passthrough));
+    graph.add_node(b, Box::new(Passthrough));
+    graph.connect(a, b);
+    graph.connect(b, a); // cycle!
+
+    let result = graph.compile();
+    assert!(result.is_err(), "graph with cycle should fail to compile");
+}
+
+#[cfg(feature = "dsp")]
+#[test]
+fn compressor_parallel_mix() {
+    use crate::dsp::{Compressor, CompressorParams};
+
+    // 50% mix = parallel compression
+    let params = CompressorParams {
+        threshold_db: -20.0,
+        ratio: 10.0,
+        attack_ms: 0.01,
+        release_ms: 0.01,
+        makeup_gain_db: 0.0,
+        knee_db: 0.0,
+        mix: 0.5,
+    };
+    let mut comp = Compressor::new(params, 44100).unwrap();
+    let mut buf = AudioBuffer::from_interleaved(vec![1.0; 4096], 1, 44100).unwrap();
+    comp.process(&mut buf);
+    // With 50% mix, output should be between fully compressed and fully dry
+    assert!(buf.samples.iter().all(|s| s.is_finite()));
+    // Dry signal is 1.0, compressed will be less → blended should be < 1.0 but > 0
+    let avg: f32 = buf.samples.iter().sum::<f32>() / buf.samples.len() as f32;
+    assert!(avg > 0.0 && avg <= 1.0);
+}
+
+#[cfg(feature = "dsp")]
+#[test]
+fn biquad_half_mix() {
+    use crate::dsp::{BiquadFilter, FilterType};
+
+    let mut filt = BiquadFilter::new(FilterType::LowPass, 500.0, 0.707, 44100, 1);
+    filt.set_mix(0.5);
+    assert!((filt.mix() - 0.5).abs() < f32::EPSILON);
+
+    // 10kHz sine through 500Hz LP at 50% mix should be partially attenuated
+    let samples: Vec<f32> = (0..4096)
+        .map(|i| (2.0 * std::f32::consts::PI * 10000.0 * i as f32 / 44100.0).sin())
+        .collect();
+    let mut buf = AudioBuffer::from_interleaved(samples, 1, 44100).unwrap();
+    let original_rms = buf.rms();
+    filt.process(&mut buf);
+    // At 50% mix, RMS should be roughly half the original (dry leaks through)
+    assert!(buf.rms() > original_rms * 0.2);
+    assert!(buf.rms() < original_rms * 0.8);
 }

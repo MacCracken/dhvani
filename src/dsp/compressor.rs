@@ -24,6 +24,8 @@ pub struct CompressorParams {
     pub makeup_gain_db: f32,
     /// Soft knee width in dB (0.0 = hard knee).
     pub knee_db: f32,
+    /// Dry/wet mix (0.0 = fully dry, 1.0 = fully wet). Enables parallel compression.
+    pub mix: f32,
 }
 
 impl Default for CompressorParams {
@@ -35,6 +37,7 @@ impl Default for CompressorParams {
             release_ms: 100.0,
             makeup_gain_db: 0.0,
             knee_db: 0.0,
+            mix: 1.0,
         }
     }
 }
@@ -100,6 +103,8 @@ impl Compressor {
         let attack_coeff = Self::time_constant(self.params.attack_ms, self.sample_rate);
         let release_coeff = Self::time_constant(self.params.release_ms, self.sample_rate);
         let makeup_lin = db_to_amplitude(self.params.makeup_gain_db);
+        let mix = self.params.mix.clamp(0.0, 1.0);
+        let dry = 1.0 - mix;
 
         for frame in 0..buf.frames {
             // Detect peak across channels for this frame
@@ -122,13 +127,14 @@ impl Compressor {
             let gain_db = self.compute_gain(self.envelope_db);
             self.gain_reduction_db = gain_db;
 
-            // Apply gain + makeup
+            // Apply gain + makeup, blend dry/wet
             if gain_db.is_finite() {
                 let gain_lin = db_to_amplitude(gain_db) * makeup_lin;
                 for c in 0..ch {
                     let idx = frame * ch + c;
-                    buf.samples[idx] *= gain_lin;
-                    // Guard against NaN/Inf
+                    let dry_sample = buf.samples[idx];
+                    let wet_sample = dry_sample * gain_lin;
+                    buf.samples[idx] = dry_sample * dry + wet_sample * mix;
                     if !buf.samples[idx].is_finite() {
                         buf.samples[idx] = 0.0;
                     }
@@ -213,6 +219,7 @@ mod tests {
             release_ms: 0.01,
             makeup_gain_db: 0.0,
             knee_db: 0.0,
+            ..Default::default()
         };
         let mut comp = Compressor::new(params, 44100).unwrap();
         // -20 dBFS signal (amplitude ~0.1)
@@ -235,6 +242,7 @@ mod tests {
             release_ms: 0.01,
             makeup_gain_db: 0.0,
             knee_db: 0.0,
+            ..Default::default()
         };
         let mut comp = Compressor::new(params, 44100).unwrap();
         // 0 dBFS signal (amplitude 1.0) — well above -20 dB threshold
@@ -259,6 +267,7 @@ mod tests {
             release_ms: 0.01,
             makeup_gain_db: 12.0,
             knee_db: 0.0,
+            ..Default::default()
         };
         let mut comp = Compressor::new(params, 44100).unwrap();
         let mut buf = make_sine(0.1, 4096);
@@ -278,6 +287,7 @@ mod tests {
             release_ms: 50.0,
             makeup_gain_db: 0.0,
             knee_db: 12.0,
+            ..Default::default()
         };
         let mut comp = Compressor::new(params, 44100).unwrap();
         let mut buf = make_sine(1.0, 4096);

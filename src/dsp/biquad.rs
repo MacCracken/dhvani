@@ -153,6 +153,8 @@ pub struct BiquadFilter {
     q: f32,
     sample_rate: u32,
     bypassed: bool,
+    /// Dry/wet mix (0.0 = fully dry, 1.0 = fully wet).
+    mix: f32,
 }
 
 impl BiquadFilter {
@@ -172,6 +174,7 @@ impl BiquadFilter {
             q,
             sample_rate,
             bypassed: false,
+            mix: 1.0,
         }
     }
 
@@ -191,11 +194,14 @@ impl BiquadFilter {
             return;
         }
         let ch = buf.channels as usize;
+        let mix = self.mix;
+        let dry = 1.0 - mix;
         for frame in 0..buf.frames {
             for c in 0..ch {
                 let idx = frame * ch + c;
                 let input = buf.samples[idx] as f64;
-                buf.samples[idx] = self.states[c].process(input, &self.coeffs) as f32;
+                let wet = self.states[c].process(input, &self.coeffs) as f32;
+                buf.samples[idx] = buf.samples[idx] * dry + wet * mix;
             }
         }
     }
@@ -238,6 +244,16 @@ impl BiquadFilter {
     /// Current Q factor.
     pub fn q(&self) -> f32 {
         self.q
+    }
+
+    /// Set the dry/wet mix (0.0 = fully dry, 1.0 = fully wet).
+    pub fn set_mix(&mut self, mix: f32) {
+        self.mix = mix.clamp(0.0, 1.0);
+    }
+
+    /// Current dry/wet mix.
+    pub fn mix(&self) -> f32 {
+        self.mix
     }
 
     /// Update the sample rate and recompute coefficients.

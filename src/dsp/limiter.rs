@@ -15,6 +15,8 @@ pub struct LimiterParams {
     pub release_ms: f32,
     /// Knee width in dB (0.0 = hard knee).
     pub knee_db: f32,
+    /// Dry/wet mix (0.0 = fully dry, 1.0 = fully wet).
+    pub mix: f32,
 }
 
 impl Default for LimiterParams {
@@ -23,6 +25,7 @@ impl Default for LimiterParams {
             ceiling_db: -0.3,
             release_ms: 50.0,
             knee_db: 0.0,
+            mix: 1.0,
         }
     }
 }
@@ -91,6 +94,8 @@ impl EnvelopeLimiter {
         let ch = buf.channels as usize;
         let release_coeff = Self::time_constant(self.params.release_ms, self.sample_rate);
         let ceiling_lin = db_to_amplitude(self.params.ceiling_db);
+        let mix = self.params.mix.clamp(0.0, 1.0);
+        let dry = 1.0 - mix;
 
         for frame in 0..buf.frames {
             // Detect peak across channels
@@ -116,7 +121,8 @@ impl EnvelopeLimiter {
                 let gain_lin = db_to_amplitude(gain_db);
                 for c in 0..ch {
                     let idx = frame * ch + c;
-                    buf.samples[idx] *= gain_lin;
+                    let dry_sample = buf.samples[idx];
+                    buf.samples[idx] = dry_sample * dry + (dry_sample * gain_lin) * mix;
                 }
             }
 
@@ -175,6 +181,7 @@ mod tests {
             ceiling_db: 0.0,
             release_ms: 50.0,
             knee_db: 0.0,
+            ..Default::default()
         };
         let mut limiter = EnvelopeLimiter::new(params, 44100).unwrap();
         let mut buf = make_sine(0.5, 4096);
@@ -192,6 +199,7 @@ mod tests {
             ceiling_db: -6.0, // ~0.5 linear
             release_ms: 10.0,
             knee_db: 0.0,
+            ..Default::default()
         };
         let mut limiter = EnvelopeLimiter::new(params, 44100).unwrap();
         let mut buf = make_sine(1.0, 4096);
@@ -229,6 +237,7 @@ mod tests {
             ceiling_db: -6.0,
             release_ms: 10.0,
             knee_db: 6.0, // soft knee
+            ..Default::default()
         };
         let mut limiter = EnvelopeLimiter::new(params, 44100).unwrap();
         let mut buf = make_sine(1.0, 4096);
@@ -244,6 +253,7 @@ mod tests {
             ceiling_db: -12.0,
             release_ms: 10.0,
             knee_db: 0.0,
+            ..Default::default()
         };
         let mut limiter = EnvelopeLimiter::new(params, 44100).unwrap();
         let mut buf = make_sine(1.0, 4096);
@@ -259,6 +269,7 @@ mod tests {
             ceiling_db: -3.0,
             release_ms: 100.0,
             knee_db: 3.0,
+            ..Default::default()
         });
         let mut buf = make_sine(1.0, 2048);
         limiter.process(&mut buf);
@@ -271,6 +282,7 @@ mod tests {
             ceiling_db: -6.0,
             release_ms: 10.0,
             knee_db: 0.0,
+            ..Default::default()
         };
         let mut limiter = EnvelopeLimiter::new(params, 44100).unwrap();
         let samples: Vec<f32> = (0..8192)

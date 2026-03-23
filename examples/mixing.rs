@@ -53,6 +53,7 @@ fn main() {
             release_ms: 80.0,
             makeup_gain_db: 2.0,
             knee_db: 6.0,
+            ..Default::default()
         },
         sr,
     )

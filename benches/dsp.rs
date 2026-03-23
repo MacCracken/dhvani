@@ -105,6 +105,7 @@ fn bench_compressor_1s(c: &mut Criterion) {
             release_ms: 100.0,
             makeup_gain_db: 3.0,
             knee_db: 6.0,
+            ..Default::default()
         },
         44100,
     )
@@ -145,6 +146,7 @@ fn bench_limiter_1s(c: &mut Criterion) {
             ceiling_db: -1.0,
             release_ms: 50.0,
             knee_db: 3.0,
+            ..Default::default()
         },
         44100,
     )

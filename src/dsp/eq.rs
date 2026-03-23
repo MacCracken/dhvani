@@ -55,6 +55,8 @@ pub struct ParametricEq {
     sample_rate: u32,
     channels: u32,
     bypassed: bool,
+    /// Dry/wet mix (0.0 = fully dry, 1.0 = fully wet).
+    mix: f32,
 }
 
 impl ParametricEq {
@@ -79,6 +81,7 @@ impl ParametricEq {
             sample_rate,
             channels,
             bypassed: false,
+            mix: 1.0,
         }
     }
 
@@ -97,9 +100,23 @@ impl ParametricEq {
         if self.bypassed {
             return;
         }
-        for (cfg, filt) in &mut self.bands {
-            if cfg.enabled {
-                filt.process(buf);
+        let mix = self.mix;
+        if mix < 1.0 {
+            let dry_samples = buf.samples.clone();
+            for (cfg, filt) in &mut self.bands {
+                if cfg.enabled {
+                    filt.process(buf);
+                }
+            }
+            let dry = 1.0 - mix;
+            for (s, d) in buf.samples.iter_mut().zip(dry_samples.iter()) {
+                *s = d * dry + *s * mix;
+            }
+        } else {
+            for (cfg, filt) in &mut self.bands {
+                if cfg.enabled {
+                    filt.process(buf);
+                }
             }
         }
     }
@@ -156,6 +173,16 @@ impl ParametricEq {
                 (cfg, filt)
             })
             .collect();
+    }
+
+    /// Set the dry/wet mix (0.0 = fully dry, 1.0 = fully wet).
+    pub fn set_mix(&mut self, mix: f32) {
+        self.mix = mix.clamp(0.0, 1.0);
+    }
+
+    /// Current dry/wet mix.
+    pub fn mix(&self) -> f32 {
+        self.mix
     }
 
     /// Update the sample rate and rebuild all filter coefficients.
