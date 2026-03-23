@@ -144,6 +144,7 @@ pub struct Reverb {
     /// Right channel allpass filters.
     allpasses_r: Vec<AllpassFilter>,
     params: ReverbParams,
+    bypassed: bool,
 }
 
 impl Reverb {
@@ -179,6 +180,7 @@ impl Reverb {
             allpasses_l,
             allpasses_r,
             params: params.clone(),
+            bypassed: false,
         };
         reverb.update_params(&params);
         Ok(reverb)
@@ -189,6 +191,9 @@ impl Reverb {
     /// Mono buffers are processed through the left channel path only.
     /// Stereo and multichannel buffers use L/R decorrelated paths.
     pub fn process(&mut self, buf: &mut AudioBuffer) {
+        if self.bypassed {
+            return;
+        }
         let ch = buf.channels as usize;
         let dry = 1.0 - self.params.mix;
         let wet = self.params.mix;
@@ -274,10 +279,32 @@ impl Reverb {
         }
     }
 
+    /// Set whether this reverb is bypassed.
+    pub fn set_bypass(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    /// Returns `true` if this reverb is currently bypassed.
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
+    }
+
     /// Update reverb parameters.
     pub fn set_params(&mut self, params: ReverbParams) {
         self.update_params(&params);
         self.params = params;
+    }
+
+    /// Rebuild the reverb for a new sample rate.
+    ///
+    /// This reallocates internal buffers — call during session changes, not per-buffer.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        // Rebuild with current params at new rate (ignore Result — params already validated)
+        let was_bypassed = self.bypassed;
+        if let Ok(new) = Self::new(self.params.clone(), sample_rate) {
+            *self = new;
+        }
+        self.bypassed = was_bypassed;
     }
 
     /// Reset all internal state.

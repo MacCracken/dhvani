@@ -52,6 +52,7 @@ pub struct EnvelopeLimiter {
     params: LimiterParams,
     envelope_db: f32,
     sample_rate: u32,
+    bypassed: bool,
 }
 
 impl EnvelopeLimiter {
@@ -68,11 +69,25 @@ impl EnvelopeLimiter {
             params,
             envelope_db: -120.0,
             sample_rate,
+            bypassed: false,
         })
+    }
+
+    /// Set whether this limiter is bypassed.
+    pub fn set_bypass(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    /// Returns `true` if this limiter is currently bypassed.
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
     }
 
     /// Process an audio buffer in-place.
     pub fn process(&mut self, buf: &mut AudioBuffer) {
+        if self.bypassed {
+            return;
+        }
         let ch = buf.channels as usize;
         let release_coeff = Self::time_constant(self.params.release_ms, self.sample_rate);
         let ceiling_lin = db_to_amplitude(self.params.ceiling_db);
@@ -114,30 +129,12 @@ impl EnvelopeLimiter {
     }
 
     fn compute_gain(&self, env_db: f32) -> f32 {
-        let ceiling = self.params.ceiling_db;
-        let knee = self.params.knee_db;
-
-        if knee > 0.0 {
-            let half_knee = knee / 2.0;
-            let lower = ceiling - half_knee;
-            if env_db <= lower {
-                0.0
-            } else if env_db >= ceiling {
-                ceiling - env_db
-            } else {
-                let x = env_db - lower;
-                (-x * x) / (2.0 * knee)
-            }
-        } else if env_db <= ceiling {
-            0.0
-        } else {
-            ceiling - env_db
-        }
+        // Limiter is effectively ∞:1 compression → slope = -1.0
+        super::soft_knee_gain(env_db, self.params.ceiling_db, self.params.knee_db, -1.0)
     }
 
     fn time_constant(time_ms: f32, sample_rate: u32) -> f32 {
-        let samples = (time_ms * 0.001 * sample_rate as f32).max(1.0);
-        (-1.0f32 / samples).exp()
+        abaco::dsp::time_constant(time_ms, sample_rate)
     }
 
     /// Current gain reduction in dB.
@@ -148,6 +145,11 @@ impl EnvelopeLimiter {
     /// Update parameters.
     pub fn set_params(&mut self, params: LimiterParams) {
         self.params = params;
+    }
+
+    /// Update the sample rate.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate;
     }
 
     /// Reset envelope state.

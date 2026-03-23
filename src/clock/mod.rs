@@ -5,14 +5,10 @@ use serde::{Deserialize, Serialize};
 /// Audio transport clock — tracks position in samples, with tempo awareness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioClock {
-    /// Current position in samples (from start of timeline).
-    pub position_samples: u64,
-    /// Sample rate in Hz.
-    pub sample_rate: u32,
-    /// Tempo in BPM (beats per minute). 0 = no tempo.
-    pub tempo_bpm: f64,
-    /// Whether the clock is running.
-    pub running: bool,
+    position_samples: u64,
+    sample_rate: u32,
+    tempo_bpm: f64,
+    running: bool,
 }
 
 impl AudioClock {
@@ -93,6 +89,31 @@ impl AudioClock {
     pub fn pts_us(&self) -> u64 {
         (self.position_secs() * 1_000_000.0) as u64
     }
+
+    /// Current position in samples.
+    pub fn position_samples(&self) -> u64 {
+        self.position_samples
+    }
+
+    /// Sample rate in Hz.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// Tempo in BPM (0 = no tempo).
+    pub fn tempo_bpm(&self) -> f64 {
+        self.tempo_bpm
+    }
+
+    /// Set the tempo in BPM.
+    pub fn set_tempo(&mut self, bpm: f64) {
+        self.tempo_bpm = bpm;
+    }
+
+    /// Whether the clock is running.
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
 }
 
 #[cfg(test)]
@@ -102,8 +123,8 @@ mod tests {
     #[test]
     fn clock_basic() {
         let mut clock = AudioClock::new(44100);
-        assert_eq!(clock.position_samples, 0);
-        assert!(!clock.running);
+        assert_eq!(clock.position_samples(), 0);
+        assert!(!clock.is_running());
         clock.start();
         clock.advance(44100);
         assert!((clock.position_secs() - 1.0).abs() < 0.001);
@@ -113,14 +134,14 @@ mod tests {
     fn clock_no_advance_when_stopped() {
         let mut clock = AudioClock::new(44100);
         clock.advance(44100);
-        assert_eq!(clock.position_samples, 0);
+        assert_eq!(clock.position_samples(), 0);
     }
 
     #[test]
     fn clock_seek() {
         let mut clock = AudioClock::new(48000);
         clock.seek_secs(2.5);
-        assert_eq!(clock.position_samples, 120000);
+        assert_eq!(clock.position_samples(), 120000);
         assert!((clock.position_secs() - 2.5).abs() < 0.001);
     }
 
@@ -161,7 +182,7 @@ mod tests {
         clock.start();
         clock.advance(44100);
         clock.reset();
-        assert_eq!(clock.position_samples, 0);
+        assert_eq!(clock.position_samples(), 0);
     }
 
     #[test]

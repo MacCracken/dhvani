@@ -60,6 +60,7 @@ pub struct DeEsser {
     sidechain: Vec<f32>,
     sample_rate: u32,
     channels: u32,
+    bypassed: bool,
 }
 
 impl DeEsser {
@@ -85,11 +86,25 @@ impl DeEsser {
             sidechain: Vec::new(),
             sample_rate,
             channels,
+            bypassed: false,
         })
+    }
+
+    /// Set whether this de-esser is bypassed.
+    pub fn set_bypass(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    /// Returns `true` if this de-esser is currently bypassed.
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
     }
 
     /// Process an audio buffer in-place.
     pub fn process(&mut self, buf: &mut AudioBuffer) {
+        if self.bypassed {
+            return;
+        }
         let ch = buf.channels as usize;
         // Reuse pre-allocated sidechain buffer (no heap allocation in hot path)
         self.sidechain.resize(buf.samples.len(), 0.0);
@@ -131,6 +146,18 @@ impl DeEsser {
 
         // Reclaim sidechain buffer for reuse
         self.sidechain = sidechain.samples;
+    }
+
+    /// Update the sample rate and rebuild the detector filter.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate;
+        self.detector = BiquadFilter::new(
+            FilterType::BandPass,
+            self.params.freq_hz,
+            self.params.q,
+            sample_rate,
+            self.channels,
+        );
     }
 
     /// Reset filter state.

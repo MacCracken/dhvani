@@ -54,6 +54,7 @@ pub struct ParametricEq {
     bands: Vec<(EqBandConfig, BiquadFilter)>,
     sample_rate: u32,
     channels: u32,
+    bypassed: bool,
 }
 
 impl ParametricEq {
@@ -77,11 +78,25 @@ impl ParametricEq {
             bands,
             sample_rate,
             channels,
+            bypassed: false,
         }
+    }
+
+    /// Set whether this EQ is bypassed.
+    pub fn set_bypass(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    /// Returns `true` if this EQ is currently bypassed.
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
     }
 
     /// Process an audio buffer through all enabled bands in series.
     pub fn process(&mut self, buf: &mut AudioBuffer) {
+        if self.bypassed {
+            return;
+        }
         for (cfg, filt) in &mut self.bands {
             if cfg.enabled {
                 filt.process(buf);
@@ -124,6 +139,32 @@ impl ParametricEq {
     /// Get a band's current configuration.
     pub fn band(&self, index: usize) -> Option<&EqBandConfig> {
         self.bands.get(index).map(|(cfg, _)| cfg)
+    }
+
+    /// Replace all bands at once. Rebuilds all filter coefficients.
+    pub fn set_params(&mut self, bands: Vec<EqBandConfig>) {
+        self.bands = bands
+            .into_iter()
+            .map(|cfg| {
+                let filt = BiquadFilter::new(
+                    cfg.to_filter_type(),
+                    cfg.freq_hz,
+                    cfg.q,
+                    self.sample_rate,
+                    self.channels,
+                );
+                (cfg, filt)
+            })
+            .collect();
+    }
+
+    /// Update the sample rate and rebuild all filter coefficients.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate;
+        for (cfg, filt) in &mut self.bands {
+            filt.set_sample_rate(sample_rate);
+            filt.set_params(cfg.to_filter_type(), cfg.freq_hz, cfg.q);
+        }
     }
 
     /// Reset all filter states.

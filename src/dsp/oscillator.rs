@@ -115,25 +115,7 @@ impl Oscillator {
     }
 }
 
-/// PolyBLEP correction value for a discontinuity at phase boundary.
-///
-/// `t` is the normalized phase (0.0–1.0), `dt` is the phase increment per sample.
-fn poly_blep(t: f64, dt: f64) -> f64 {
-    if dt <= 0.0 {
-        return 0.0;
-    }
-    if t < dt {
-        // Just past discontinuity
-        let t = t / dt;
-        2.0 * t - t * t - 1.0
-    } else if t > 1.0 - dt {
-        // Just before discontinuity
-        let t = (t - 1.0) / dt;
-        t * t + 2.0 * t + 1.0
-    } else {
-        0.0
-    }
-}
+use abaco::dsp::poly_blep;
 
 #[cfg(test)]
 mod tests {

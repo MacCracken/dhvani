@@ -2,12 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A4 reference frequency in Hz.
-pub const A4_FREQUENCY: f64 = 440.0;
-/// A4 MIDI note number.
-pub const A4_MIDI_NOTE: f64 = 69.0;
-/// Semitones per octave.
-pub const SEMITONES_PER_OCTAVE: f64 = 12.0;
+// Re-export MIDI constants from abaco.
+pub use abaco::dsp::{A4_FREQUENCY, A4_MIDI_NOTE, SEMITONES_PER_OCTAVE};
 
 /// Voice state in the synthesis lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,7 +117,7 @@ impl Voice {
 
     /// Frequency in Hz for this voice's note (12-TET, A4=440).
     pub fn frequency(&self) -> f64 {
-        A4_FREQUENCY * 2.0f64.powf((self.note as f64 - A4_MIDI_NOTE) / SEMITONES_PER_OCTAVE)
+        abaco::dsp::midi_to_freq(self.note as f64)
     }
 
     /// Apply a per-note CC. Currently handles CC#74 (brightness).

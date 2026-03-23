@@ -16,6 +16,7 @@ pub struct DelayLine {
     feedback: f32,
     /// Dry/wet mix (0.0 = fully dry, 1.0 = fully wet).
     mix: f32,
+    bypassed: bool,
 }
 
 impl DelayLine {
@@ -42,11 +43,15 @@ impl DelayLine {
             max_delay_samples: max_samples,
             feedback: feedback.clamp(0.0, 0.99),
             mix: mix.clamp(0.0, 1.0),
+            bypassed: false,
         }
     }
 
     /// Process an audio buffer in-place.
     pub fn process(&mut self, buf: &mut AudioBuffer) {
+        if self.bypassed {
+            return;
+        }
         let ch = buf.channels as usize;
         for frame in 0..buf.frames {
             for c in 0..ch {
@@ -80,6 +85,21 @@ impl DelayLine {
         let pos1 =
             (self.write_pos + self.max_delay_samples - delay_int - 1) % self.max_delay_samples;
         buf[pos0] * (1.0 - frac) + buf[pos1] * frac
+    }
+
+    /// Set whether this delay is bypassed.
+    pub fn set_bypass(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    /// Returns `true` if this delay is currently bypassed.
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
+    }
+
+    /// Latency in frames introduced by this delay.
+    pub fn latency_frames(&self) -> usize {
+        self.delay_samples
     }
 
     /// Set delay time in milliseconds.
@@ -157,6 +177,7 @@ pub struct ModulatedDelay {
     params: ModulatedDelayParams,
     lfo_phase: f64,
     sample_rate: u32,
+    bypassed: bool,
 }
 
 impl ModulatedDelay {
@@ -175,11 +196,15 @@ impl ModulatedDelay {
             params,
             lfo_phase: 0.0,
             sample_rate,
+            bypassed: false,
         }
     }
 
     /// Process an audio buffer in-place.
     pub fn process(&mut self, buf: &mut AudioBuffer) {
+        if self.bypassed {
+            return;
+        }
         let ch = buf.channels as usize;
         let phase_inc = self.params.rate_hz as f64 / self.sample_rate as f64;
 
@@ -205,6 +230,44 @@ impl ModulatedDelay {
             self.delay.write_pos = (self.delay.write_pos + 1) % self.delay.max_delay_samples;
             self.lfo_phase = (self.lfo_phase + phase_inc) % 1.0;
         }
+    }
+
+    /// Latency in frames introduced by the base delay.
+    pub fn latency_frames(&self) -> usize {
+        ((self.params.base_delay_ms / 1000.0) * self.sample_rate as f32) as usize
+    }
+
+    /// Set whether this modulated delay is bypassed.
+    pub fn set_bypass(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    /// Returns `true` if this modulated delay is currently bypassed.
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
+    }
+
+    /// Update parameters. Updates feedback, mix, and LFO settings.
+    /// Base delay and depth changes take effect immediately.
+    pub fn set_params(&mut self, params: ModulatedDelayParams) {
+        self.delay.feedback = params.feedback.clamp(0.0, 0.99);
+        self.delay.mix = params.mix.clamp(0.0, 1.0);
+        self.params = params;
+    }
+
+    /// Update the sample rate. Rebuilds internal delay buffers.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate;
+        let channels = self.delay.buffers.len() as u32;
+        self.delay = DelayLine::new(
+            self.params.base_delay_ms,
+            self.params.base_delay_ms + self.params.depth_ms + 1.0,
+            self.params.feedback,
+            self.params.mix,
+            sample_rate,
+            channels,
+        );
+        self.lfo_phase = 0.0;
     }
 
     /// Reset delay buffers and LFO phase.

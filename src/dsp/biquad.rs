@@ -4,9 +4,9 @@
 //! for all common filter types. Coefficients computed in f64 for precision.
 
 use serde::{Deserialize, Serialize};
-use std::f64::consts::PI;
 
 use crate::buffer::AudioBuffer;
+use abaco::dsp::{angular_frequency, db_gain_factor};
 
 /// Filter type with associated parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ impl BiquadCoeffs {
         let sr = sample_rate as f64;
         let f0 = (freq_hz as f64).clamp(1.0, sr * 0.499);
         let q = (q as f64).max(0.01);
-        let w0 = 2.0 * PI * f0 / sr;
+        let w0 = angular_frequency(f0, sr);
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
         let alpha = sin_w0 / (2.0 * q);
@@ -75,14 +75,14 @@ impl BiquadCoeffs {
                 (b0, b1, b2, 1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha)
             }
             FilterType::Peaking { gain_db } => {
-                let a = 10.0f64.powf(gain_db as f64 / 40.0);
+                let a = db_gain_factor(gain_db as f64);
                 let b0 = 1.0 + alpha * a;
                 let b1 = -2.0 * cos_w0;
                 let b2 = 1.0 - alpha * a;
                 (b0, b1, b2, 1.0 + alpha / a, -2.0 * cos_w0, 1.0 - alpha / a)
             }
             FilterType::LowShelf { gain_db } => {
-                let a = 10.0f64.powf(gain_db as f64 / 40.0);
+                let a = db_gain_factor(gain_db as f64);
                 let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
                 let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
                 let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0);
@@ -93,7 +93,7 @@ impl BiquadCoeffs {
                 (b0, b1, b2, a0, a1, a2)
             }
             FilterType::HighShelf { gain_db } => {
-                let a = 10.0f64.powf(gain_db as f64 / 40.0);
+                let a = db_gain_factor(gain_db as f64);
                 let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
                 let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
                 let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
@@ -152,6 +152,7 @@ pub struct BiquadFilter {
     freq_hz: f32,
     q: f32,
     sample_rate: u32,
+    bypassed: bool,
 }
 
 impl BiquadFilter {
@@ -170,11 +171,25 @@ impl BiquadFilter {
             freq_hz,
             q,
             sample_rate,
+            bypassed: false,
         }
+    }
+
+    /// Set whether this filter is bypassed.
+    pub fn set_bypass(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    /// Returns `true` if this filter is currently bypassed.
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
     }
 
     /// Process an entire audio buffer in-place.
     pub fn process(&mut self, buf: &mut AudioBuffer) {
+        if self.bypassed {
+            return;
+        }
         let ch = buf.channels as usize;
         for frame in 0..buf.frames {
             for c in 0..ch {
@@ -223,6 +238,12 @@ impl BiquadFilter {
     /// Current Q factor.
     pub fn q(&self) -> f32 {
         self.q
+    }
+
+    /// Update the sample rate and recompute coefficients.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate;
+        self.coeffs = BiquadCoeffs::design(self.filter_type, self.freq_hz, self.q, sample_rate);
     }
 }
 

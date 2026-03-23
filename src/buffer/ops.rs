@@ -60,10 +60,7 @@ pub fn crossfade(
 
         let (gain_a, gain_b) = match kind {
             CrossfadeType::Linear => (1.0 - t, t),
-            CrossfadeType::EqualPower => {
-                let angle = t * std::f32::consts::FRAC_PI_2;
-                (angle.cos(), angle.sin())
-            }
+            CrossfadeType::EqualPower => abaco::dsp::equal_power_crossfade(t),
         };
 
         samples[i] = sa * gain_a + sb * gain_b;
@@ -154,7 +151,7 @@ pub fn normalize_to_lufs(buf: &mut AudioBuffer, target_lufs: f32) -> crate::Resu
     }
 
     let gain_db = target_lufs - current_lufs;
-    let gain_lin = 10.0f32.powf(gain_db / 20.0);
+    let gain_lin = abaco::dsp::db_to_amplitude(gain_db);
     buf.apply_gain(gain_lin);
 
     Ok(gain_db)

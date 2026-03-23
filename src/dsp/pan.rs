@@ -27,11 +27,9 @@ impl StereoPanner {
     /// Set pan position (-1.0 = left, 0.0 = center, +1.0 = right).
     pub fn set_pan(&mut self, pan: f32) {
         self.pan = pan.clamp(-1.0, 1.0);
-        // Constant-power: L = cos(theta), R = sin(theta)
-        // where theta = (pan + 1) * PI/4 maps [-1,1] to [0, PI/2]
-        let theta = (self.pan + 1.0) * std::f32::consts::FRAC_PI_4;
-        self.gain_l = theta.cos();
-        self.gain_r = theta.sin();
+        let (l, r) = abaco::dsp::constant_power_pan(self.pan);
+        self.gain_l = l;
+        self.gain_r = r;
     }
 
     /// Current pan position.

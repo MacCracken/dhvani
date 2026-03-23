@@ -163,6 +163,11 @@ impl Envelope {
         self.state == EnvelopeState::Idle
     }
 
+    /// Update the sample rate.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate as f32;
+    }
+
     /// Reset to idle.
     pub fn reset(&mut self) {
         self.state = EnvelopeState::Idle;

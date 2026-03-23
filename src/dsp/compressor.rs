@@ -65,6 +65,7 @@ pub struct Compressor {
     envelope_db: f32,
     gain_reduction_db: f32,
     sample_rate: u32,
+    bypassed: bool,
 }
 
 impl Compressor {
@@ -82,12 +83,16 @@ impl Compressor {
             envelope_db: -120.0,
             gain_reduction_db: 0.0,
             sample_rate,
+            bypassed: false,
         })
     }
 
     /// Process an audio buffer in-place.
     pub fn process(&mut self, buf: &mut AudioBuffer) {
         if self.params.ratio <= 1.0 {
+            return;
+        }
+        if self.bypassed {
             return;
         }
 
@@ -134,44 +139,13 @@ impl Compressor {
 
     /// Compute gain curve for a given envelope level in dB.
     fn compute_gain(&self, env_db: f32) -> f32 {
-        let threshold = self.params.threshold_db;
-        let ratio = self.params.ratio;
-        let knee = self.params.knee_db;
-
-        if knee > 0.0 {
-            // Soft knee
-            let half_knee = knee / 2.0;
-            let lower = threshold - half_knee;
-            let upper = threshold + half_knee;
-
-            if env_db <= lower {
-                0.0
-            } else if env_db >= upper {
-                let over = env_db - threshold;
-                let compressed_over = over / ratio;
-                compressed_over - over
-            } else {
-                // Quadratic interpolation in knee region
-                let x = env_db - lower;
-                let slope = 1.0 / ratio - 1.0;
-                (slope * x * x) / (2.0 * knee)
-            }
-        } else {
-            // Hard knee
-            if env_db <= threshold {
-                0.0
-            } else {
-                let over = env_db - threshold;
-                let compressed_over = over / ratio;
-                compressed_over - over
-            }
-        }
+        let slope = 1.0 / self.params.ratio - 1.0;
+        super::soft_knee_gain(env_db, self.params.threshold_db, self.params.knee_db, slope)
     }
 
     /// Time constant from milliseconds.
     fn time_constant(time_ms: f32, sample_rate: u32) -> f32 {
-        let samples = (time_ms * 0.001 * sample_rate as f32).max(1.0);
-        (-1.0f32 / samples).exp()
+        abaco::dsp::time_constant(time_ms, sample_rate)
     }
 
     /// Current gain reduction in dB (for metering).
@@ -179,9 +153,24 @@ impl Compressor {
         self.gain_reduction_db
     }
 
+    /// Set whether this compressor is bypassed.
+    pub fn set_bypass(&mut self, bypassed: bool) {
+        self.bypassed = bypassed;
+    }
+
+    /// Returns `true` if this compressor is currently bypassed.
+    pub fn is_bypassed(&self) -> bool {
+        self.bypassed
+    }
+
     /// Update parameters.
     pub fn set_params(&mut self, params: CompressorParams) {
         self.params = params;
+    }
+
+    /// Update the sample rate.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate;
     }
 
     /// Reset envelope state.
