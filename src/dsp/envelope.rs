@@ -55,10 +55,15 @@ impl Default for AdsrParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EnvelopeState {
+    /// Envelope is inactive (before trigger or after release completes).
     Idle,
+    /// Attack phase — level rising toward 1.0.
     Attack,
+    /// Decay phase — level falling toward sustain level.
     Decay,
+    /// Sustain phase — level held at sustain level.
     Sustain,
+    /// Release phase — level falling toward 0.0.
     Release,
 }
 

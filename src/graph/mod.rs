@@ -73,7 +73,9 @@ pub trait AudioNode: Send {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct Connection {
+    /// Source node.
     pub from: NodeId,
+    /// Destination node.
     pub to: NodeId,
 }
 
@@ -89,6 +91,7 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// Create an empty audio graph.
     pub fn new() -> Self {
         Self {
             nodes: HashMap::new(),
@@ -293,6 +296,7 @@ pub struct GraphProcessor {
 }
 
 impl GraphProcessor {
+    /// Create a new graph processor with the given audio format.
     pub fn new(channels: u32, sample_rate: u32, buffer_frames: usize) -> Self {
         Self {
             current_plan: None,

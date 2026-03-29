@@ -80,45 +80,75 @@ impl ControlChange {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MidiEvent {
+    /// A note-on event.
     NoteOn {
+        /// Frame position within the buffer.
         position: FramePos,
+        /// MIDI note number (0–127).
         note: u8,
+        /// Note-on velocity (0–127).
         velocity: u8,
+        /// MIDI channel (0–15).
         channel: u8,
     },
+    /// A note-off event.
     NoteOff {
+        /// Frame position within the buffer.
         position: FramePos,
+        /// MIDI note number (0–127).
         note: u8,
+        /// Release velocity (0–127).
         velocity: u8,
+        /// MIDI channel (0–15).
         channel: u8,
     },
+    /// A control-change (CC) event.
     ControlChange {
+        /// Frame position within the buffer.
         position: FramePos,
+        /// Controller number (0–127).
         controller: u8,
+        /// Controller value (0–127).
         value: u8,
+        /// MIDI channel (0–15).
         channel: u8,
     },
+    /// A pitch-bend event.
     PitchBend {
+        /// Frame position within the buffer.
         position: FramePos,
         /// 14-bit value (0–16383, center = 8192).
         value: u16,
+        /// MIDI channel (0–15).
         channel: u8,
     },
+    /// A channel aftertouch event.
     Aftertouch {
+        /// Frame position within the buffer.
         position: FramePos,
         /// Channel pressure (0–127).
         pressure: u8,
+        /// MIDI channel (0–15).
         channel: u8,
     },
+    /// A polyphonic aftertouch event.
     PolyAftertouch {
+        /// Frame position within the buffer.
         position: FramePos,
+        /// MIDI note number (0–127).
         note: u8,
+        /// Per-note pressure (0–127).
         pressure: u8,
+        /// MIDI channel (0–15).
         channel: u8,
     },
+    /// A program-change event.
     ProgramChange {
+        /// Frame position within the buffer.
         position: FramePos,
+        /// Program number (0–127).
         program: u8,
+        /// MIDI channel (0–15).
         channel: u8,
     },
 }

@@ -9,12 +9,19 @@ use crate::dsp::biquad::{BiquadFilter, FilterType};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum BandType {
+    /// Peaking (bell) EQ.
     Peaking,
+    /// Low-shelf EQ.
     LowShelf,
+    /// High-shelf EQ.
     HighShelf,
+    /// Low-pass filter.
     LowPass,
+    /// High-pass filter.
     HighPass,
+    /// Band-pass filter.
     BandPass,
+    /// Notch (band-reject) filter.
     Notch,
 }
 
@@ -23,10 +30,15 @@ pub enum BandType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct EqBandConfig {
+    /// Filter type for this band.
     pub band_type: BandType,
+    /// Center/corner frequency in Hz.
     pub freq_hz: f32,
+    /// Gain in decibels (used by peaking/shelf types).
     pub gain_db: f32,
+    /// Quality factor (bandwidth).
     pub q: f32,
+    /// Whether this band is active.
     pub enabled: bool,
 }
 

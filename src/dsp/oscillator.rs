@@ -10,10 +10,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Waveform {
+    /// Pure sine wave.
     Sine,
+    /// Sawtooth wave (PolyBLEP anti-aliased).
     Saw,
+    /// Square wave (PolyBLEP anti-aliased).
     Square,
+    /// Triangle wave (integrated from square).
     Triangle,
+    /// White noise.
     Noise,
 }
 

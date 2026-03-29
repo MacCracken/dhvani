@@ -12,24 +12,46 @@ use abaco::dsp::{angular_frequency, db_gain_factor};
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum FilterType {
+    /// Second-order low-pass filter.
     LowPass,
+    /// Second-order high-pass filter.
     HighPass,
+    /// Band-pass filter (constant skirt gain).
     BandPass,
+    /// Notch (band-reject) filter.
     Notch,
+    /// All-pass filter (phase shift only).
     AllPass,
-    Peaking { gain_db: f32 },
-    LowShelf { gain_db: f32 },
-    HighShelf { gain_db: f32 },
+    /// Peaking EQ filter.
+    Peaking {
+        /// Boost/cut in decibels.
+        gain_db: f32,
+    },
+    /// Low-shelf filter.
+    LowShelf {
+        /// Boost/cut in decibels.
+        gain_db: f32,
+    },
+    /// High-shelf filter.
+    HighShelf {
+        /// Boost/cut in decibels.
+        gain_db: f32,
+    },
 }
 
 /// Biquad filter coefficients (Direct Form II Transposed).
 #[must_use]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BiquadCoeffs {
+    /// Feedforward coefficient b0.
     pub b0: f64,
+    /// Feedforward coefficient b1.
     pub b1: f64,
+    /// Feedforward coefficient b2.
     pub b2: f64,
+    /// Feedback coefficient a1 (negated/normalized).
     pub a1: f64,
+    /// Feedback coefficient a2 (negated/normalized).
     pub a2: f64,
 }
 

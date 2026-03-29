@@ -109,7 +109,10 @@ pub enum CaptureEvent {
     /// A new device was connected.
     DeviceAdded(AudioDevice),
     /// A device was disconnected.
-    DeviceRemoved { id: u32 },
+    DeviceRemoved {
+        /// PipeWire device ID that was removed.
+        id: u32,
+    },
     /// Capture buffer overflow (data was lost).
     Overflow,
     /// Output buffer underrun (silence was inserted).

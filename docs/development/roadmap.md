@@ -52,7 +52,7 @@
 - [x] **SIMD module docs**: `docs/guides/simd.md` — platform coverage, speedups, adding kernels
 - [x] **FFI usage guide**: `docs/guides/ffi.md` — C and Python examples, memory model
 - [x] **Thread-safety annotations**: Send+Sync compile-time assertions for all DSP types
-- [ ] **Complete docs.rs**: Every public type has doc comment + example
+- [x] **Complete docs.rs**: Every public type, variant, field, and function documented (0 missing_docs warnings)
 
 ### Consumer adoption (post-v1)
 

@@ -9,10 +9,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum LfoShape {
+    /// Sine wave.
     Sine,
+    /// Triangle wave.
     Triangle,
+    /// Square wave.
     Square,
+    /// Rising sawtooth.
     SawUp,
+    /// Falling sawtooth.
     SawDown,
     /// Random value held until next cycle.
     SampleAndHold,
