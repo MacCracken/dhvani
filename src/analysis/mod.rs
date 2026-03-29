@@ -1,20 +1,27 @@
-//! Audio analysis — FFT, spectrum, loudness (LUFS), peak, RMS, dynamics, chromagram, onset detection.
+//! Audio analysis — FFT, spectrum, loudness (LUFS), peak, RMS, dynamics, chromagram,
+//! onset detection, beat/tempo detection, key detection, zero-crossing rate.
 
+pub mod beat;
 pub mod chroma;
 pub mod dynamics;
 pub mod fft;
+pub mod key;
 pub mod loudness;
 pub mod onset;
 pub mod stft;
 pub mod waveform;
+pub mod zcr;
 
+pub use beat::{BeatResult, detect_tempo};
 pub use chroma::{Chromagram, chromagram};
 pub use dynamics::{DynamicsAnalysis, analyze_dynamics};
 pub use fft::spectrum_fft;
+pub use key::{KeyResult, detect_key, detect_key_from_chroma};
 pub use loudness::{R128Loudness, measure_r128};
 pub use onset::{OnsetResult, detect_onsets};
 pub use stft::{Spectrogram, StftProcessor, stft as compute_stft};
 pub use waveform::{WaveformData, compute_waveform};
+pub use zcr::{ZcrResult, zero_crossing_rate};
 
 use crate::buffer::AudioBuffer;
 use crate::error::NadaError;

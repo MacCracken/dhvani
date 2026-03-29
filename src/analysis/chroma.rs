@@ -17,6 +17,13 @@ pub struct Chromagram {
 }
 
 impl Chromagram {
+    /// Create a chromagram from a pre-computed pitch class energy array.
+    ///
+    /// Values should be in the range [0.0, 1.0].
+    pub fn from_array(chroma: [f32; 12]) -> Self {
+        Self { chroma }
+    }
+
     /// Energy per pitch class (0=C, 1=C#, ..., 11=B). Normalized 0–1.
     pub fn chroma(&self) -> &[f32; 12] {
         &self.chroma
