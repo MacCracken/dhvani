@@ -20,6 +20,12 @@ allow = [
     "Zlib",
 ]
 
+# goonj 1.1.0 uses deprecated "GPL-3.0" SPDX identifier instead of "GPL-3.0-only"
+# TODO: remove when goonj publishes a fix
+exceptions = [
+    { allow = ["GPL-3.0"], name = "goonj", version = "1.1.0" },
+]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

@@ -2,12 +2,12 @@
 
 **Core audio engine for Rust.**
 
-Buffers, DSP, resampling, mixing, analysis, and capture — in a single crate. The audio equivalent of [ranga](https://crates.io/crates/ranga) (image processing) and [tarang](https://crates.io/crates/tarang) (media framework).
+Buffers, DSP, resampling, mixing, analysis, synthesis, and capture — in a single crate. The audio equivalent of [ranga](https://crates.io/crates/ranga) (image processing) and [tarang](https://crates.io/crates/tarang) (media framework).
 
 > **Name**: Dhvani (ध्वनि, Sanskrit) — sound, resonance.
-> Extracted from [shruti](https://github.com/MacCracken/shruti) (DAW) as a standalone, reusable engine.
 
 [![Crates.io](https://img.shields.io/crates/v/dhvani.svg)](https://crates.io/crates/dhvani)
+[![docs.rs](https://docs.rs/dhvani/badge.svg)](https://docs.rs/dhvani)
 [![CI](https://github.com/MacCracken/dhvani/actions/workflows/ci.yml/badge.svg)](https://github.com/MacCracken/dhvani/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
@@ -19,16 +19,21 @@ dhvani is the **audio processing core** — it owns the audio math so nobody els
 
 | Capability | Details |
 |------------|---------|
-| **Audio buffers** | Unified `AudioBuffer` type — f32 interleaved, channel-aware, sample-rate-aware |
+| **Audio buffers** | `AudioBuffer` — f32 interleaved, channel-aware, sample-rate-aware, buffer pool |
 | **Mixing** | Sum N sources with channel/rate validation |
-| **Resampling** | Linear + sinc (Blackman-Harris window); 44.1k ↔ 48k ↔ 96k |
-| **DSP effects** | Biquad EQ, compressor, limiter, reverb, delay, de-esser, panner, noise gate, normalize |
-| **Analysis** | FFT spectrum, STFT, EBU R128 loudness, dynamics, chromagram, onset detection |
-| **MIDI** | MIDI 1.0/2.0, voice management, clip operations, routing |
+| **Resampling** | Linear + sinc (Blackman-Harris window, Draft/Good/Best quality) |
+| **Format conversion** | i16, i24, i32, f32, f64, u8 with roundtrip fidelity; dithering (TPDF + noise-shaped) |
+| **DSP effects** | Biquad EQ, SVF filter, parametric/graphic EQ, compressor, limiter, reverb, convolution reverb, delay, de-esser, panner, noise gate, automation curves, routing matrix |
+| **Analysis** | FFT spectrum, STFT, EBU R128 loudness, dynamics (true peak), chromagram, onset/beat/key detection |
+| **Synthesis** | Subtractive, FM, additive, wavetable, granular, physical modeling, drum, vocoder, sampler (via [naad](https://crates.io/crates/naad)/[nidhi](https://crates.io/crates/nidhi)) |
+| **Voice synthesis** | Glottal source, formant filtering, phoneme sequencing, prosody (via [svara](https://crates.io/crates/svara)) |
+| **Acoustics** | Room IR generation, convolution/FDN reverb, ambisonics decode, room presets (via [goonj](https://crates.io/crates/goonj)) |
+| **MIDI** | MIDI 1.0/2.0, voice management, clip operations, routing, translation |
 | **Transport clock** | Sample-accurate position, tempo/beats, PTS timestamps for A/V sync |
-| **Audio graph** | RT-safe graph with topological execution and double-buffered plan swap |
-| **PipeWire capture** | Per-source audio capture and output (feature-gated) |
-| **SIMD** | SSE2/AVX2/NEON acceleration for mixing, gain, clamp, peak, RMS |
+| **Audio graph** | RT-safe graph with topological execution, latency compensation, double-buffered plan swap |
+| **Metering** | Lock-free peak/RMS/LUFS metering via atomics, peak hold with decay |
+| **PipeWire capture** | Device enumeration, per-source capture, output, hot-plug detection |
+| **SIMD** | SSE2/AVX2/NEON acceleration — mixing, gain, clamp, peak, RMS, format conversion, biquad stereo |
 
 ---
 
@@ -36,7 +41,7 @@ dhvani is the **audio processing core** — it owns the audio math so nobody els
 
 ```toml
 [dependencies]
-dhvani = "0.20"
+dhvani = "0.22"
 ```
 
 ```rust
@@ -59,21 +64,14 @@ let mut comp = Compressor::new(CompressorParams {
 }, 44100)?;
 comp.process(&mut mixed);
 dsp::normalize(&mut mixed, 0.95);
-dsp::noise_gate(&mut mixed, 0.01);
 
 // Analyze
-let spectrum = analysis::spectrum_fft(&mixed, 4096).unwrap();
-let loudness = analysis::loudness_lufs(&mixed);
-println!("Peak: {:.2}, LUFS: {:.1}", mixed.peak(), loudness);
+let spectrum = analysis::spectrum_fft(&mixed, 4096)?;
+let r128 = analysis::measure_r128(&mixed)?;
+println!("Peak: {:.2}, LUFS: {:.1}", mixed.peak(), r128.integrated_lufs());
 
 // Resample for output
 let output = resample_linear(&mixed, 48000)?;
-
-// Sync with video via clock
-let mut clock = AudioClock::new(48000);
-clock.start();
-clock.advance(output.frames as u64);
-println!("PTS: {} us", clock.pts_us());
 ```
 
 ---
@@ -82,116 +80,92 @@ println!("PTS: {} us", clock.pts_us());
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `dsp` | Yes | DSP effects (EQ, compressor, limiter, reverb, delay, de-esser, panner, oscillator, LFO, envelope) |
-| `analysis` | Yes | Audio analysis (FFT, STFT, R128 loudness, dynamics, chromagram, onset detection). Implies `dsp` |
+| `dsp` | Yes | DSP effects (EQ, compressor, limiter, reverb, convolution, delay, de-esser, panner, oscillator, LFO, envelope, SVF, automation, routing) |
+| `analysis` | Yes | Audio analysis (FFT, STFT, R128 loudness, dynamics, chromagram, onset/beat/key detection). Implies `dsp` |
 | `midi` | Yes | MIDI 1.0/2.0 events, voice management, routing, translation |
 | `graph` | Yes | RT-safe audio graph, lock-free metering |
-| `simd` | Yes | SSE2/AVX2/NEON acceleration for mixing, gain, peak, RMS, format conversion |
-| `pipewire` | No | PipeWire audio capture/output backend (Linux only) |
-| `full` | No | All features including PipeWire |
+| `simd` | Yes | SSE2/AVX2/NEON acceleration |
+| `synthesis` | No | Synthesis engines via [naad](https://crates.io/crates/naad) |
+| `voice` | No | Voice synthesis via [svara](https://crates.io/crates/svara). Implies `synthesis` |
+| `creature` | No | Creature/animal vocals via [prani](https://crates.io/crates/prani). Implies `synthesis` |
+| `environment` | No | Environmental sounds via [garjan](https://crates.io/crates/garjan). Implies `synthesis` |
+| `mechanical` | No | Mechanical sounds via [ghurni](https://crates.io/crates/ghurni). Implies `synthesis` |
+| `sampler` | No | Sample playback via [nidhi](https://crates.io/crates/nidhi) |
+| `acoustics` | No | Room acoustics via [goonj](https://crates.io/crates/goonj). Implies `analysis` |
+| `g2p` | No | Grapheme-to-phoneme via [shabda](https://crates.io/crates/shabda). Implies `voice` |
+| `pipewire` | No | PipeWire audio capture/output (Linux) |
+| `parallel` | No | Parallel graph execution via rayon. Implies `graph` |
+| `full` | No | All features |
 
 ```toml
-# Everything (default)
-dhvani = "0.20"
+# Everything (default: dsp + analysis + midi + graph + simd)
+dhvani = "0.22"
 
-# Core only — buffers, mixing, resampling, clock (no DSP/MIDI/analysis/graph)
-dhvani = { version = "0.20", default-features = false }
+# Core only — buffers, mixing, resampling, clock
+dhvani = { version = "0.22", default-features = false }
 
 # Media player — DSP + analysis, no MIDI or graph
-dhvani = { version = "0.20", default-features = false, features = ["dsp", "analysis", "simd"] }
+dhvani = { version = "0.22", default-features = false, features = ["dsp", "analysis", "simd"] }
 
-# With PipeWire capture (Linux)
-dhvani = { version = "0.20", features = ["pipewire"] }
+# Full synthesis + acoustics
+dhvani = { version = "0.22", features = ["full"] }
 ```
 
 ---
 
-## Key types
+## Architecture
 
-### `AudioBuffer`
-
-Core sample buffer. Holds f32 interleaved samples with channel count and sample rate.
-
-```rust
-let mut buf = AudioBuffer::silence(2, 44100, 44100); // 1 second stereo
-buf.apply_gain(0.5);
-buf.clamp();
-println!("Peak: {:.3}, RMS: {:.3}, Duration: {:.2}s",
-    buf.peak(), buf.rms(), buf.duration_secs());
+```
+dhvani
+├── buffer/        AudioBuffer, format conversion, mixing, resampling, dithering
+├── clock/         Sample-accurate transport, tempo, beats, PTS
+├── dsp/           Biquad, SVF, EQ, compressor, limiter, reverb, convolution, delay, automation, routing
+├── analysis/      FFT, STFT, R128 loudness, dynamics, chromagram, onset/beat/key detection
+├── midi/          MIDI 1.0/2.0, voice management, clips, routing, translation
+├── graph/         RT-safe audio graph, topological execution, latency compensation
+├── meter/         Lock-free peak/RMS/LUFS metering
+├── capture/       PipeWire capture/output, device enumeration
+├── simd/          SSE2/AVX2/NEON kernels with scalar fallback
+├── synthesis/     Synth engines via naad (subtractive, FM, additive, wavetable, granular, drum, vocoder)
+├── voice_synth/   Voice synthesis via svara (glottal, formant, phoneme, prosody)
+├── acoustics/     Room acoustics via goonj (IR generation, convolution, FDN, ambisonics, presets)
+├── creature/      Animal vocals via prani
+├── environment/   Nature sounds via garjan
+├── mechanical/    Mechanical sounds via ghurni
+├── sampler/       Sample playback via nidhi
+├── g2p/           Text-to-phoneme via shabda
+└── ffi/           C-compatible API
 ```
 
-### `AudioClock`
-
-Sample-accurate transport with tempo awareness and PTS generation for A/V sync.
-
-```rust
-let mut clock = AudioClock::with_tempo(44100, 120.0); // 120 BPM
-clock.start();
-clock.advance(44100); // 1 second
-println!("Position: {:.2}s, Beat: {:.1}, PTS: {} us",
-    clock.position_secs(),
-    clock.position_beats().unwrap(),
-    clock.pts_us());
-```
-
-### DSP
-
-```rust
-dsp::noise_gate(&mut buf, 0.01);        // silence below threshold
-dsp::hard_limiter(&mut buf, 0.95);       // prevent clipping
-dsp::normalize(&mut buf, 1.0);           // peak normalize
-
-let db = dsp::amplitude_to_db(0.5);      // -6.02 dB
-let amp = dsp::db_to_amplitude(-6.0);    // ~0.501
-```
-
-### Analysis
-
-```rust
-let spectrum = analysis::spectrum_fft(&buf, 4096).unwrap();
-if let Some(freq) = spectrum.dominant_frequency() {
-    println!("Dominant: {:.0} Hz", freq);
-}
-
-let lufs = analysis::loudness_lufs(&buf);
-let silent = analysis::is_silent(&buf, -60.0);
-```
+Full details: [docs/architecture/overview.md](docs/architecture/overview.md)
 
 ---
 
-## The Sanskrit Stack
-
-```
-shruti (श्रुति — that which is heard) creates music
-  └── with dhvani (ध्वनि — sound, resonance) as its audio engine
-       └── carried by tarang (तरंग — wave) as its media framework
-            └── colored by ranga (रंग — color) for visual processing
-```
-
----
-
-## Who uses this
+## Consumers
 
 | Project | Usage |
 |---------|-------|
-| **[shruti](https://github.com/MacCracken/shruti)** | DAW — all audio math (mix, DSP, analysis, transport) |
-| **[jalwa](https://github.com/MacCracken/jalwa)** | Media player — playback EQ, spectrum visualizer, resampling |
+| **[shruti](https://github.com/MacCracken/shruti)** | DAW — all audio math (mix, DSP, analysis, transport, synthesis) |
+| **[jalwa](https://github.com/MacCracken/jalwa)** | Media player — playback EQ, spectrum visualizer, resampling, normalization |
 | **[aethersafta](https://github.com/MacCracken/aethersafta)** | Compositor — PipeWire capture, audio mixing for streams |
-| **[tarang](https://crates.io/crates/tarang)** | Media framework — audio analysis, fingerprint input |
-| **[hoosh](https://github.com/MacCracken/hoosh)** | Inference gateway — audio preprocessing for whisper STT |
+| **[kiran](https://github.com/MacCracken/kiran)** | Game engine — game audio, spatial sound, creature/environment synthesis |
 
 ---
 
-## Roadmap
+## Dependency stack
 
-| Version | Milestone | Key features |
-|---------|-----------|--------------|
-| **0.20.3** | Complete engine | Buffers, DSP (EQ/reverb/compressor/delay), MIDI 1.0/2.0, SIMD, FFT, R128, graph, PipeWire, 265+ tests |
-| **0.21.3** | Hardening & API freeze | Safety comments on all unsafe, API encapsulation, 24-bit/f64/u8 formats, panic elimination, buffer pool |
-| **0.22.3** | Testing, SIMD & adoption | SIMD completeness (AVX2/NEON gaps), 90%+ coverage, docs.rs, consumer integration, golden benchmarks |
-| **1.0.0** | Stable | Frozen API, 3+ consumers, reference-quality DSP, full platform parity |
-
-Full details: [docs/development/roadmap.md](docs/development/roadmap.md)
+```
+dhvani (audio engine)
+├── abaco (DSP math: amplitude/dB, poly_blep, panning, filters)
+├── naad (synthesis engines)         [feature: synthesis]
+├── svara (voice synthesis)          [feature: voice]
+├── goonj (room acoustics)           [feature: acoustics]
+├── prani (creature vocals)          [feature: creature]
+├── garjan (environmental sounds)    [feature: environment]
+├── ghurni (mechanical sounds)       [feature: mechanical]
+├── nidhi (sample playback)          [feature: sampler]
+└── shabda (grapheme-to-phoneme)     [feature: g2p]
+```
 
 ---
 
@@ -201,29 +175,12 @@ Full details: [docs/development/roadmap.md](docs/development/roadmap.md)
 git clone https://github.com/MacCracken/dhvani.git
 cd dhvani
 
-# Build (no system deps needed)
-cargo build
-
-# Build with PipeWire (Linux, requires libpipewire-dev)
-sudo apt install libpipewire-0.3-dev
-cargo build --features pipewire
-
-# Run tests
-cargo test
-
-# Run benchmarks
-cargo bench
-
-# Run all CI checks locally
-make check
+cargo build                          # default features
+cargo build --features full          # everything
+cargo build --features pipewire      # with PipeWire (Linux, requires libpipewire-dev)
+cargo test --features full           # 597 tests + 22 doctests
+cargo bench --features full          # 51 benchmarks
 ```
-
----
-
-## Versioning
-
-Pre-1.0 releases use `0.D.M` (day.month) SemVer — e.g. `0.20.3` = March 20th.
-Post-1.0 follows standard SemVer.
 
 ---
 
