@@ -170,6 +170,101 @@ pub fn weighted_sum(samples: &[f32], weights: &[f32]) -> (f32, f32) {
     weighted_sum_scalar(samples, weights)
 }
 
+// ── 24-bit conversion ──────────────────────────────────────────────
+
+/// Convert i24 (stored as i32, lower 24 bits) to f32.
+/// Sign-extends from 24 bits then scales to [-1.0, 1.0).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn i24_to_f32(src: &[i32], dst: &mut [f32]) {
+    x86::i24_to_f32(src, dst)
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn i24_to_f32(src: &[i32], dst: &mut [f32]) {
+    aarch64::i24_to_f32(src, dst)
+}
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline]
+pub fn i24_to_f32(src: &[i32], dst: &mut [f32]) {
+    i24_to_f32_scalar(src, dst)
+}
+
+/// Convert f32 to i24 (stored as i32, clamped to 24-bit range).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn f32_to_i24(src: &[f32], dst: &mut [i32]) {
+    x86::f32_to_i24(src, dst)
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn f32_to_i24(src: &[f32], dst: &mut [i32]) {
+    aarch64::f32_to_i24(src, dst)
+}
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline]
+pub fn f32_to_i24(src: &[f32], dst: &mut [i32]) {
+    f32_to_i24_scalar(src, dst)
+}
+
+// ── u8 conversion ──────────────────────────────────────────────────
+
+/// Convert unsigned 8-bit PCM to f32. u8 [0,255] → f32 [-1.0, 1.0).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn u8_to_f32(src: &[u8], dst: &mut [f32]) {
+    x86::u8_to_f32(src, dst)
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn u8_to_f32(src: &[u8], dst: &mut [f32]) {
+    aarch64::u8_to_f32(src, dst)
+}
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline]
+pub fn u8_to_f32(src: &[u8], dst: &mut [f32]) {
+    u8_to_f32_scalar(src, dst)
+}
+
+/// Convert f32 to unsigned 8-bit PCM. f32 [-1.0, 1.0] → u8 [0, 255].
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn f32_to_u8(src: &[f32], dst: &mut [u8]) {
+    x86::f32_to_u8(src, dst)
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn f32_to_u8(src: &[f32], dst: &mut [u8]) {
+    aarch64::f32_to_u8(src, dst)
+}
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline]
+pub fn f32_to_u8(src: &[f32], dst: &mut [u8]) {
+    f32_to_u8_scalar(src, dst)
+}
+
+// ── Stereo biquad (2×f64 cross-channel) ────────────────────────────
+
+/// Process stereo interleaved samples through a biquad filter using SIMD.
+///
+/// Processes L and R channels simultaneously using 2×f64 SIMD registers.
+/// `coeffs` = [b0, b1, b2, a1, a2], `state` = [z1_L, z2_L, z1_R, z2_R].
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn biquad_stereo(samples: &mut [f32], coeffs: &[f64; 5], state: &mut [f64; 4]) {
+    x86::biquad_stereo(samples, coeffs, state)
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub fn biquad_stereo(samples: &mut [f32], coeffs: &[f64; 5], state: &mut [f64; 4]) {
+    aarch64::biquad_stereo(samples, coeffs, state)
+}
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline]
+pub fn biquad_stereo(samples: &mut [f32], coeffs: &[f64; 5], state: &mut [f64; 4]) {
+    biquad_stereo_scalar(samples, coeffs, state)
+}
+
 // ── Scalar fallbacks ────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -238,6 +333,62 @@ fn f32_to_i16_scalar(src: &[f32], dst: &mut [i16]) {
     let len = src.len().min(dst.len());
     for i in 0..len {
         dst[i] = (src[i].clamp(-1.0, 1.0) * 32767.0) as i16;
+    }
+}
+
+#[allow(dead_code)]
+fn i24_to_f32_scalar(src: &[i32], dst: &mut [f32]) {
+    let len = src.len().min(dst.len());
+    for i in 0..len {
+        let extended = (src[i] << 8) >> 8;
+        dst[i] = extended as f32 / 8388608.0;
+    }
+}
+
+#[allow(dead_code)]
+fn f32_to_i24_scalar(src: &[f32], dst: &mut [i32]) {
+    let len = src.len().min(dst.len());
+    for i in 0..len {
+        let clamped = src[i].clamp(-1.0, 1.0);
+        dst[i] = (clamped * 8388607.0) as i32;
+    }
+}
+
+#[allow(dead_code)]
+fn u8_to_f32_scalar(src: &[u8], dst: &mut [f32]) {
+    let len = src.len().min(dst.len());
+    for i in 0..len {
+        dst[i] = (f32::from(src[i]) - 128.0) / 128.0;
+    }
+}
+
+#[allow(dead_code)]
+fn f32_to_u8_scalar(src: &[f32], dst: &mut [u8]) {
+    let len = src.len().min(dst.len());
+    for i in 0..len {
+        let clamped = src[i].clamp(-1.0, 1.0);
+        dst[i] = ((clamped * 128.0) + 128.0).clamp(0.0, 255.0) as u8;
+    }
+}
+
+#[allow(dead_code)]
+fn biquad_stereo_scalar(samples: &mut [f32], coeffs: &[f64; 5], state: &mut [f64; 4]) {
+    let [b0, b1, b2, a1, a2] = *coeffs;
+    let frames = samples.len() / 2;
+    for f in 0..frames {
+        let idx = f * 2;
+        // Left channel
+        let in_l = samples[idx] as f64;
+        let out_l = b0 * in_l + state[0];
+        state[0] = b1 * in_l - a1 * out_l + state[1];
+        state[1] = b2 * in_l - a2 * out_l;
+        samples[idx] = out_l as f32;
+        // Right channel
+        let in_r = samples[idx + 1] as f64;
+        let out_r = b0 * in_r + state[2];
+        state[2] = b1 * in_r - a1 * out_r + state[3];
+        state[3] = b2 * in_r - a2 * out_r;
+        samples[idx + 1] = out_r as f32;
     }
 }
 
@@ -432,6 +583,131 @@ mod tests {
             (simd_wt - scalar_wt).abs() < 1e-2,
             "weight_sum: simd={simd_wt} scalar={scalar_wt}"
         );
+    }
+
+    #[test]
+    fn i24_f32_roundtrip() {
+        let src_i24: Vec<i32> = vec![0, 4194304, -4194304, 8388607, -8388608];
+        let mut f32_buf = vec![0.0f32; 5];
+        i24_to_f32(&src_i24, &mut f32_buf);
+        let mut back_i24 = vec![0i32; 5];
+        f32_to_i24(&f32_buf, &mut back_i24);
+        for (a, b) in src_i24.iter().zip(back_i24.iter()) {
+            assert!((*a - *b).abs() <= 1, "i24 roundtrip: {a} != {b}");
+        }
+    }
+
+    #[test]
+    fn u8_f32_roundtrip() {
+        let src_u8: Vec<u8> = vec![0, 64, 128, 192, 255];
+        let mut f32_buf = vec![0.0f32; 5];
+        u8_to_f32(&src_u8, &mut f32_buf);
+        // 128 should map to ~0.0
+        assert!(f32_buf[2].abs() < 0.01, "u8 128 → {}", f32_buf[2]);
+        // 0 should map to ~-1.0
+        assert!((f32_buf[0] + 1.0).abs() < 0.01, "u8 0 → {}", f32_buf[0]);
+        let mut back_u8 = vec![0u8; 5];
+        f32_to_u8(&f32_buf, &mut back_u8);
+        for (a, b) in src_u8.iter().zip(back_u8.iter()) {
+            assert!(
+                (*a as i16 - *b as i16).abs() <= 1,
+                "u8 roundtrip: {a} != {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn i24_parity() {
+        let data: Vec<i32> = (0..1025)
+            .map(|i| ((i * 7919) % 16777216) - 8388608)
+            .collect();
+        let mut simd_dst = vec![0.0f32; data.len()];
+        let mut scalar_dst = vec![0.0f32; data.len()];
+        i24_to_f32(&data, &mut simd_dst);
+        super::i24_to_f32_scalar(&data, &mut scalar_dst);
+        for (i, (s, sc)) in simd_dst.iter().zip(scalar_dst.iter()).enumerate() {
+            assert!(
+                (s - sc).abs() < 1e-6,
+                "i24_to_f32[{i}]: simd={s} scalar={sc}"
+            );
+        }
+
+        let mut simd_back = vec![0i32; simd_dst.len()];
+        let mut scalar_back = vec![0i32; scalar_dst.len()];
+        f32_to_i24(&simd_dst, &mut simd_back);
+        super::f32_to_i24_scalar(&scalar_dst, &mut scalar_back);
+        for (i, (s, sc)) in simd_back.iter().zip(scalar_back.iter()).enumerate() {
+            assert!(
+                (*s - *sc).abs() <= 1,
+                "f32_to_i24[{i}]: simd={s} scalar={sc}"
+            );
+        }
+    }
+
+    #[test]
+    fn u8_parity() {
+        let data: Vec<u8> = (0..=255).collect();
+        let mut simd_dst = vec![0.0f32; data.len()];
+        let mut scalar_dst = vec![0.0f32; data.len()];
+        u8_to_f32(&data, &mut simd_dst);
+        super::u8_to_f32_scalar(&data, &mut scalar_dst);
+        for (i, (s, sc)) in simd_dst.iter().zip(scalar_dst.iter()).enumerate() {
+            assert!(
+                (s - sc).abs() < 1e-6,
+                "u8_to_f32[{i}]: simd={s} scalar={sc}"
+            );
+        }
+
+        let mut simd_back = vec![0u8; simd_dst.len()];
+        let mut scalar_back = vec![0u8; scalar_dst.len()];
+        f32_to_u8(&simd_dst, &mut simd_back);
+        super::f32_to_u8_scalar(&scalar_dst, &mut scalar_back);
+        for (i, (s, sc)) in simd_back.iter().zip(scalar_back.iter()).enumerate() {
+            assert!(
+                (*s as i16 - *sc as i16).abs() <= 1,
+                "f32_to_u8[{i}]: simd={s} scalar={sc}"
+            );
+        }
+    }
+
+    #[test]
+    fn biquad_stereo_parity() {
+        // Lowpass biquad coefficients (pre-computed for 1kHz, Q=0.707, sr=44100)
+        let coeffs: [f64; 5] = [
+            0.004836739652368523, // b0
+            0.009673479304737046, // b1
+            0.004836739652368523, // b2
+            -1.9029109205028356,  // a1
+            0.9222578791123097,   // a2
+        ];
+
+        // Generate test stereo signal
+        let mut simd_samples: Vec<f32> = (0..2048)
+            .map(|i| {
+                let t = (i / 2) as f32 / 44100.0;
+                (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.8
+            })
+            .collect();
+        let mut scalar_samples = simd_samples.clone();
+
+        let mut simd_state = [0.0f64; 4];
+        let mut scalar_state = [0.0f64; 4];
+
+        biquad_stereo(&mut simd_samples, &coeffs, &mut simd_state);
+        super::biquad_stereo_scalar(&mut scalar_samples, &coeffs, &mut scalar_state);
+
+        for (i, (s, sc)) in simd_samples.iter().zip(scalar_samples.iter()).enumerate() {
+            assert!(
+                (s - sc).abs() < 1e-5,
+                "biquad_stereo[{i}]: simd={s} scalar={sc}"
+            );
+        }
+        for (i, (s, sc)) in simd_state.iter().zip(scalar_state.iter()).enumerate() {
+            assert!(
+                (s - sc).abs() < 1e-10,
+                "biquad_state[{i}]: simd={s} scalar={sc}"
+            );
+        }
     }
 
     #[test]

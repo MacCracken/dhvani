@@ -166,27 +166,38 @@ pub fn stereo_to_mono(buf: &AudioBuffer) -> Result<AudioBuffer, NadaError> {
 /// Range: [-8388608, 8388607] -> [-1.0, 1.0)
 #[must_use]
 pub fn i24_to_f32(samples: &[i32]) -> Vec<f32> {
-    samples
-        .iter()
-        .map(|&s| {
-            // Sign-extend from 24 bits
+    let mut dst = vec![0.0f32; samples.len()];
+    #[cfg(feature = "simd")]
+    {
+        crate::simd::i24_to_f32(samples, &mut dst);
+    }
+    #[cfg(not(feature = "simd"))]
+    {
+        for (i, &s) in samples.iter().enumerate() {
             let extended = (s << 8) >> 8;
-            extended as f32 / 8388608.0
-        })
-        .collect()
+            dst[i] = extended as f32 / 8388608.0;
+        }
+    }
+    dst
 }
 
 /// Convert f32 to 24-bit signed integers (stored as i32).
 /// Input clamped to [-1.0, 1.0].
 #[must_use]
 pub fn f32_to_i24(samples: &[f32]) -> Vec<i32> {
-    samples
-        .iter()
-        .map(|&s| {
+    let mut dst = vec![0i32; samples.len()];
+    #[cfg(feature = "simd")]
+    {
+        crate::simd::f32_to_i24(samples, &mut dst);
+    }
+    #[cfg(not(feature = "simd"))]
+    {
+        for (i, &s) in samples.iter().enumerate() {
             let clamped = s.clamp(-1.0, 1.0);
-            (clamped * 8388607.0) as i32
-        })
-        .collect()
+            dst[i] = (clamped * 8388607.0) as i32;
+        }
+    }
+    dst
 }
 
 /// Convert 24-bit packed bytes (3 bytes per sample, little-endian) to f32.
@@ -234,23 +245,37 @@ pub fn f32_to_f64(samples: &[f32]) -> Vec<f64> {
 /// u8 range [0, 255] maps to f32 range [-1.0, 1.0), centered at 128.
 #[must_use]
 pub fn u8_to_f32(samples: &[u8]) -> Vec<f32> {
-    samples
-        .iter()
-        .map(|&s| (f32::from(s) - 128.0) / 128.0)
-        .collect()
+    let mut dst = vec![0.0f32; samples.len()];
+    #[cfg(feature = "simd")]
+    {
+        crate::simd::u8_to_f32(samples, &mut dst);
+    }
+    #[cfg(not(feature = "simd"))]
+    {
+        for (i, &s) in samples.iter().enumerate() {
+            dst[i] = (f32::from(s) - 128.0) / 128.0;
+        }
+    }
+    dst
 }
 
 /// Convert f32 to unsigned 8-bit PCM.
 /// f32 range [-1.0, 1.0] maps to u8 range [0, 255], centered at 128.
 #[must_use]
 pub fn f32_to_u8(samples: &[f32]) -> Vec<u8> {
-    samples
-        .iter()
-        .map(|&s| {
+    let mut dst = vec![0u8; samples.len()];
+    #[cfg(feature = "simd")]
+    {
+        crate::simd::f32_to_u8(samples, &mut dst);
+    }
+    #[cfg(not(feature = "simd"))]
+    {
+        for (i, &s) in samples.iter().enumerate() {
             let clamped = s.clamp(-1.0, 1.0);
-            ((clamped * 128.0) + 128.0).clamp(0.0, 255.0) as u8
-        })
-        .collect()
+            dst[i] = ((clamped * 128.0) + 128.0).clamp(0.0, 255.0) as u8;
+        }
+    }
+    dst
 }
 
 /// Downmix 5.1 surround (6 channels) to stereo using ITU-R BS.775 coefficients.

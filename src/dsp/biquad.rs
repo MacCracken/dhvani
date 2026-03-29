@@ -198,6 +198,31 @@ impl BiquadFilter {
         }
         let ch = buf.channels as usize;
         let mix = self.mix;
+
+        // Fast path: stereo, full wet, SIMD available — use cross-channel SIMD biquad
+        #[cfg(feature = "simd")]
+        if ch == 2 && (mix - 1.0).abs() < f32::EPSILON {
+            let coeffs = [
+                self.coeffs.b0,
+                self.coeffs.b1,
+                self.coeffs.b2,
+                self.coeffs.a1,
+                self.coeffs.a2,
+            ];
+            let mut state = [
+                self.states[0].z1,
+                self.states[0].z2,
+                self.states[1].z1,
+                self.states[1].z2,
+            ];
+            crate::simd::biquad_stereo(&mut buf.samples, &coeffs, &mut state);
+            self.states[0].z1 = state[0];
+            self.states[0].z2 = state[1];
+            self.states[1].z1 = state[2];
+            self.states[1].z2 = state[3];
+            return;
+        }
+
         let dry = 1.0 - mix;
         for frame in 0..buf.frames {
             for c in 0..ch {
