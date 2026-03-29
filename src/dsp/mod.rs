@@ -1,5 +1,6 @@
-//! DSP effects — EQ, compressor, limiter, gate, noise suppression.
+//! DSP effects — EQ, compressor, limiter, gate, noise suppression, SVF, automation, routing.
 
+pub mod automation;
 pub mod biquad;
 pub mod compressor;
 pub mod deesser;
@@ -15,9 +16,12 @@ pub mod noise_reduction;
 pub mod oscillator;
 pub mod pan;
 pub mod reverb;
+pub mod routing;
+pub mod svf;
 
 use crate::buffer::AudioBuffer;
 
+pub use automation::{AutomationLane, Breakpoint, CurveType};
 pub use biquad::{BiquadCoeffs, BiquadFilter, FilterType};
 pub use compressor::{Compressor, CompressorParams};
 pub use deesser::{DeEsser, DeEsserParams};
@@ -33,6 +37,8 @@ pub use noise_reduction::noise_reduce;
 pub use oscillator::{Oscillator, Waveform};
 pub use pan::StereoPanner;
 pub use reverb::{Reverb, ReverbParams};
+pub use routing::RoutingMatrix;
+pub use svf::{SvfFilter, SvfMode};
 
 /// Noise gate: silence samples below threshold.
 pub fn noise_gate(buf: &mut AudioBuffer, threshold: f32) {

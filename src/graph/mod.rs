@@ -46,6 +46,24 @@ pub trait AudioNode: Send {
     fn is_finished(&self) -> bool {
         false
     }
+    /// Whether this node is currently bypassed.
+    ///
+    /// When bypassed, the graph processor passes the first input directly
+    /// to the output without calling `process()`.
+    fn is_bypassed(&self) -> bool {
+        false
+    }
+    /// Set the bypass state. Returns `false` if the node doesn't support bypass.
+    fn set_bypass(&mut self, _bypassed: bool) -> bool {
+        false
+    }
+    /// Latency introduced by this node, in frames.
+    ///
+    /// Used by the graph processor for latency compensation across parallel paths.
+    /// Default is 0 (no latency).
+    fn latency_frames(&self) -> usize {
+        0
+    }
 }
 
 // ── Connection ──────────────────────────────────────────────────────
@@ -101,10 +119,52 @@ impl Graph {
             input_map.entry(conn.to).or_default().push(conn.from);
         }
 
+        // Compute latency compensation: for nodes with multiple inputs,
+        // shorter paths need delay to align with the longest path.
+        let mut path_latency: HashMap<NodeId, usize> = HashMap::new();
+        for &id in &order {
+            let own = self.nodes.get(&id).map(|n| n.latency_frames()).unwrap_or(0);
+            let input_max = input_map
+                .get(&id)
+                .map(|inputs| {
+                    inputs
+                        .iter()
+                        .filter_map(|inp| path_latency.get(inp))
+                        .copied()
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            path_latency.insert(id, input_max + own);
+        }
+
+        // For each node, compute how much compensation delay its inputs need
+        let mut latency_comp: HashMap<NodeId, usize> = HashMap::new();
+        for &id in &order {
+            if let Some(inputs) = input_map.get(&id)
+                && inputs.len() > 1
+            {
+                let max_input_latency = inputs
+                    .iter()
+                    .filter_map(|inp| path_latency.get(inp))
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+                for inp in inputs {
+                    let inp_lat = path_latency.get(inp).copied().unwrap_or(0);
+                    let comp = max_input_latency - inp_lat;
+                    if comp > 0 {
+                        latency_comp.insert(*inp, comp);
+                    }
+                }
+            }
+        }
+
         Ok(ExecutionPlan {
             order,
             nodes: self.nodes,
             input_map,
+            latency_comp,
         })
     }
 
@@ -133,6 +193,8 @@ pub struct ExecutionPlan {
     order: Vec<NodeId>,
     nodes: HashMap<NodeId, Box<dyn AudioNode>>,
     input_map: HashMap<NodeId, Vec<NodeId>>,
+    /// Per-node latency compensation delay (frames to add before this node's output).
+    latency_comp: HashMap<NodeId, usize>,
 }
 
 impl ExecutionPlan {
@@ -147,6 +209,56 @@ impl ExecutionPlan {
             .last()
             .and_then(|id| self.nodes.get(id))
             .is_some_and(|n| n.is_finished())
+    }
+
+    /// Set bypass state for a node. Returns `false` if the node doesn't exist or doesn't support bypass.
+    pub fn set_bypass(&mut self, id: NodeId, bypassed: bool) -> bool {
+        self.nodes
+            .get_mut(&id)
+            .is_some_and(|n| n.set_bypass(bypassed))
+    }
+
+    /// Query bypass state for a node.
+    pub fn is_bypassed(&self, id: NodeId) -> bool {
+        self.nodes.get(&id).is_some_and(|n| n.is_bypassed())
+    }
+
+    /// Query latency for a node (frames).
+    pub fn latency_frames(&self, id: NodeId) -> usize {
+        self.nodes.get(&id).map(|n| n.latency_frames()).unwrap_or(0)
+    }
+
+    /// Latency compensation delay for a node's output (frames).
+    ///
+    /// In parallel paths, shorter paths need extra delay to align with longer ones.
+    /// Returns 0 if no compensation is needed.
+    #[must_use]
+    pub fn compensation_delay(&self, id: NodeId) -> usize {
+        self.latency_comp.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Total pipeline latency (maximum path latency from source to sink).
+    #[must_use]
+    pub fn total_latency(&self) -> usize {
+        // Compute max accumulated latency through the graph
+        let mut node_latency: HashMap<NodeId, usize> = HashMap::new();
+        for &id in &self.order {
+            let own = self.nodes.get(&id).map(|n| n.latency_frames()).unwrap_or(0);
+            let input_max = self
+                .input_map
+                .get(&id)
+                .map(|inputs| {
+                    inputs
+                        .iter()
+                        .filter_map(|inp| node_latency.get(inp))
+                        .copied()
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            node_latency.insert(id, input_max + own);
+        }
+        node_latency.values().copied().max().unwrap_or(0)
     }
 }
 
@@ -241,7 +353,14 @@ impl GraphProcessor {
             output.samples_mut().fill(0.0);
 
             if let Some(node) = plan.nodes.get_mut(&node_id) {
-                node.process(&input_refs, &mut output);
+                if node.is_bypassed() {
+                    // Bypass: pass first input directly to output
+                    if let Some(first) = input_refs.first() {
+                        output.samples_mut().copy_from_slice(first.samples());
+                    }
+                } else {
+                    node.process(&input_refs, &mut output);
+                }
             }
 
             self.node_outputs[idx] = Some(output);
@@ -613,5 +732,163 @@ mod tests {
         let proc = GraphProcessor::new(1, 44100, 128);
         let handle1 = proc.swap_handle();
         let _handle2 = handle1.clone();
+    }
+
+    // ── Bypass tests ───────────────────────────────────────────────
+
+    struct BypassableGainNode {
+        gain: f32,
+        bypassed: bool,
+    }
+    impl AudioNode for BypassableGainNode {
+        fn name(&self) -> &str {
+            "bypassable_gain"
+        }
+        fn num_inputs(&self) -> usize {
+            1
+        }
+        fn num_outputs(&self) -> usize {
+            1
+        }
+        fn process(&mut self, inputs: &[&AudioBuffer], output: &mut AudioBuffer) {
+            if let Some(input) = inputs.first() {
+                for (i, s) in output.samples.iter_mut().enumerate() {
+                    *s = input.samples.get(i).copied().unwrap_or(0.0) * self.gain;
+                }
+            }
+        }
+        fn is_bypassed(&self) -> bool {
+            self.bypassed
+        }
+        fn set_bypass(&mut self, bypassed: bool) -> bool {
+            self.bypassed = bypassed;
+            true
+        }
+    }
+
+    #[test]
+    fn node_bypass_passes_input() {
+        let mut graph = Graph::new();
+        let src = NodeId::next();
+        let gain_id = NodeId::next();
+
+        graph.add_node(src, Box::new(GeneratorNode { value: 1.0 }));
+        graph.add_node(
+            gain_id,
+            Box::new(BypassableGainNode {
+                gain: 0.5,
+                bypassed: true,
+            }),
+        );
+        graph.connect(src, gain_id);
+
+        let plan = graph.compile().unwrap();
+        let mut proc = GraphProcessor::new(1, 44100, 64);
+        proc.swap_handle().swap(plan);
+
+        let output = proc.process().unwrap();
+        // Bypassed gain node should pass input (1.0) unchanged, not multiply by 0.5
+        assert!(
+            output
+                .samples
+                .iter()
+                .all(|&s| (s - 1.0).abs() < f32::EPSILON),
+            "bypass didn't pass through: got {}",
+            output.samples[0]
+        );
+    }
+
+    #[test]
+    fn node_bypass_toggle() {
+        let mut graph = Graph::new();
+        let src = NodeId::next();
+        let gain_id = NodeId::next();
+
+        graph.add_node(src, Box::new(GeneratorNode { value: 1.0 }));
+        graph.add_node(
+            gain_id,
+            Box::new(BypassableGainNode {
+                gain: 0.5,
+                bypassed: false,
+            }),
+        );
+        graph.connect(src, gain_id);
+
+        let mut plan = graph.compile().unwrap();
+
+        // Initially not bypassed
+        assert!(!plan.is_bypassed(gain_id));
+
+        // Enable bypass
+        assert!(plan.set_bypass(gain_id, true));
+        assert!(plan.is_bypassed(gain_id));
+
+        // Disable bypass
+        assert!(plan.set_bypass(gain_id, false));
+        assert!(!plan.is_bypassed(gain_id));
+    }
+
+    // ── Latency tests ──────────────────────────────────────────────
+
+    struct LatencyNode {
+        latency: usize,
+    }
+    impl AudioNode for LatencyNode {
+        fn name(&self) -> &str {
+            "latency"
+        }
+        fn num_inputs(&self) -> usize {
+            1
+        }
+        fn num_outputs(&self) -> usize {
+            1
+        }
+        fn process(&mut self, inputs: &[&AudioBuffer], output: &mut AudioBuffer) {
+            if let Some(input) = inputs.first() {
+                output.samples.copy_from_slice(&input.samples);
+            }
+        }
+        fn latency_frames(&self) -> usize {
+            self.latency
+        }
+    }
+
+    #[test]
+    fn latency_single_node() {
+        let mut graph = Graph::new();
+        let id = NodeId::next();
+        graph.add_node(id, Box::new(LatencyNode { latency: 256 }));
+        let plan = graph.compile().unwrap();
+        assert_eq!(plan.total_latency(), 256);
+        assert_eq!(plan.latency_frames(id), 256);
+    }
+
+    #[test]
+    fn latency_chain_accumulates() {
+        let mut graph = Graph::new();
+        let a = NodeId::next();
+        let b = NodeId::next();
+        let c = NodeId::next();
+
+        graph.add_node(a, Box::new(LatencyNode { latency: 100 }));
+        graph.add_node(b, Box::new(LatencyNode { latency: 200 }));
+        graph.add_node(c, Box::new(LatencyNode { latency: 50 }));
+
+        graph.connect(a, b);
+        graph.connect(b, c);
+
+        let plan = graph.compile().unwrap();
+        // Total = 100 + 200 + 50 = 350
+        assert_eq!(plan.total_latency(), 350);
+    }
+
+    #[test]
+    fn latency_zero_by_default() {
+        let mut graph = Graph::new();
+        let id = NodeId::next();
+        graph.add_node(id, Box::new(PassthroughNode));
+        let plan = graph.compile().unwrap();
+        assert_eq!(plan.total_latency(), 0);
+        assert_eq!(plan.latency_frames(id), 0);
     }
 }
