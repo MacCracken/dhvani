@@ -28,9 +28,10 @@ sampler = ["dep:nidhi"]                 # Sample playback engine: key/velocity z
 # Platform
 simd = []
 pipewire = ["dep:pipewire"]
+parallel = ["dep:rayon", "graph"]        # Parallel graph execution for independent branches
 # Bundles
 g2p = ["dep:shabda", "voice"]            # Grapheme-to-phoneme: text to phoneme sequences for vocal synthesis
-full = ["simd", "dsp", "analysis", "midi", "graph", "synthesis", "voice", "creature", "environment", "mechanical", "sampler", "g2p", "pipewire"]
+full = ["simd", "dsp", "analysis", "midi", "graph", "synthesis", "voice", "creature", "environment", "mechanical", "sampler", "g2p", "parallel", "pipewire"]
 
 [dependencies]
 abaco = { version = "1.1.0" }
@@ -46,6 +47,9 @@ nidhi = { version = "1.1.0", optional = true, default-features = false }
 garjan = { version = "1.0.0", optional = true, default-features = false, features = ["naad-backend"] }
 ghurni = { version = "1.0.0", optional = true, features = ["naad-backend"] }
 shabda = { version = "1.0.0", optional = true, default-features = false }
+
+# Parallel processing
+rayon = { version = "1", optional = true }
 
 # Audio capture
 pipewire = { version = "0.9", optional = true }

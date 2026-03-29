@@ -323,6 +323,12 @@ mod assert_traits {
         _assert_send_sync::<super::dsp::Reverb>();
         _assert_send_sync::<super::dsp::ParametricEq>();
         _assert_send_sync::<super::dsp::Oscillator>();
+        _assert_send_sync::<super::dsp::SvfFilter>();
+        _assert_send_sync::<super::dsp::AutomationLane>();
+        _assert_send_sync::<super::dsp::RoutingMatrix>();
+        _assert_send_sync::<super::dsp::GainSmoother>();
+        _assert_send_sync::<super::dsp::StereoPanner>();
+        _assert_send_sync::<super::dsp::DelayLine>();
     }
 
     #[cfg(feature = "graph")]

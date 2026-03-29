@@ -160,8 +160,13 @@ impl Graph {
             }
         }
 
+        // Compute level-grouped execution order for parallel processing.
+        // Nodes at the same level have no dependencies on each other.
+        let levels = compute_levels(&order, &input_map);
+
         Ok(ExecutionPlan {
             order,
+            levels,
             nodes: self.nodes,
             input_map,
             latency_comp,
@@ -191,6 +196,8 @@ impl Default for Graph {
 #[must_use]
 pub struct ExecutionPlan {
     order: Vec<NodeId>,
+    /// Level-grouped execution order: nodes within a level are independent and can run in parallel.
+    levels: Vec<Vec<NodeId>>,
     nodes: HashMap<NodeId, Box<dyn AudioNode>>,
     input_map: HashMap<NodeId, Vec<NodeId>>,
     /// Per-node latency compensation delay (frames to add before this node's output).
@@ -201,6 +208,11 @@ impl ExecutionPlan {
     /// Execution order (topologically sorted node IDs).
     pub fn order(&self) -> &[NodeId] {
         &self.order
+    }
+
+    /// Level-grouped execution order. Nodes within each level are independent.
+    pub fn levels(&self) -> &[Vec<NodeId>] {
+        &self.levels
     }
 
     /// Check if the last node is finished.
@@ -373,6 +385,138 @@ impl GraphProcessor {
             .and_then(|opt: &Option<AudioBuffer>| opt.as_ref())
     }
 
+    /// Process using level-parallel execution (requires `parallel` feature).
+    ///
+    /// Nodes at the same level in the DAG are processed in parallel using rayon.
+    /// Falls back to sequential processing for levels with a single node.
+    ///
+    /// Returns a reference to the output buffer, or None if no plan is active.
+    #[cfg(feature = "parallel")]
+    pub fn process_parallel(&mut self) -> Option<&AudioBuffer> {
+        use rayon::prelude::*;
+
+        // Try to pick up pending plan (same as sequential)
+        if let Ok(mut pending) = self.pending_plan.try_lock()
+            && let Some(new_plan) = pending.take()
+        {
+            tracing::debug!(
+                nodes = new_plan.order.len(),
+                levels = new_plan.levels.len(),
+                "GraphProcessor: swapped to new plan (parallel)"
+            );
+            let max_id = new_plan
+                .order
+                .iter()
+                .map(|id| id.0 as usize)
+                .max()
+                .unwrap_or(0);
+            self.node_outputs.clear();
+            self.node_outputs.resize_with(max_id + 1, || None);
+            self.current_plan = Some(new_plan);
+        }
+
+        let plan = self.current_plan.as_mut()?;
+
+        // Process levels sequentially; nodes within each level in parallel
+        for level_idx in 0..plan.levels.len() {
+            let level = &plan.levels[level_idx];
+
+            if level.len() == 1 {
+                // Single node — process sequentially (no rayon overhead)
+                let node_id = level[0];
+                let idx = node_id.0 as usize;
+
+                self.input_scratch.clear();
+                if let Some(ids) = plan.input_map.get(&node_id) {
+                    for id in ids {
+                        if let Some(Some(buf)) = self.node_outputs.get(id.0 as usize) {
+                            self.input_scratch.push(buf.clone());
+                        }
+                    }
+                }
+                let input_refs: Vec<&AudioBuffer> = self.input_scratch.iter().collect();
+
+                if idx >= self.node_outputs.len() {
+                    self.node_outputs.resize_with(idx + 1, || None);
+                }
+                let mut output = self.node_outputs[idx].take().unwrap_or_else(|| {
+                    AudioBuffer::silence(self.channels, self.buffer_frames, self.sample_rate)
+                });
+                output.samples_mut().fill(0.0);
+
+                if let Some(node) = plan.nodes.get_mut(&node_id) {
+                    if node.is_bypassed() {
+                        if let Some(first) = input_refs.first() {
+                            output.samples_mut().copy_from_slice(first.samples());
+                        }
+                    } else {
+                        node.process(&input_refs, &mut output);
+                    }
+                }
+                self.node_outputs[idx] = Some(output);
+            } else {
+                // Multiple independent nodes — temporarily extract nodes for parallel processing
+                #[allow(clippy::type_complexity)]
+                let mut work: Vec<(
+                    NodeId,
+                    Box<dyn AudioNode>,
+                    Vec<AudioBuffer>,
+                    AudioBuffer,
+                )> = Vec::with_capacity(level.len());
+
+                for &node_id in level {
+                    let idx = node_id.0 as usize;
+
+                    let mut inputs = Vec::new();
+                    if let Some(ids) = plan.input_map.get(&node_id) {
+                        for id in ids {
+                            if let Some(Some(buf)) = self.node_outputs.get(id.0 as usize) {
+                                inputs.push(buf.clone());
+                            }
+                        }
+                    }
+
+                    if idx >= self.node_outputs.len() {
+                        self.node_outputs.resize_with(idx + 1, || None);
+                    }
+                    let mut output = self.node_outputs[idx].take().unwrap_or_else(|| {
+                        AudioBuffer::silence(self.channels, self.buffer_frames, self.sample_rate)
+                    });
+                    output.samples_mut().fill(0.0);
+
+                    // Take node out of map for parallel ownership
+                    if let Some(node) = plan.nodes.remove(&node_id) {
+                        work.push((node_id, node, inputs, output));
+                    }
+                }
+
+                // Process in parallel — each item owns its node
+                work.par_iter_mut().for_each(|(_, node, inputs, output)| {
+                    let input_refs: Vec<&AudioBuffer> = inputs.iter().collect();
+                    if node.is_bypassed() {
+                        if let Some(first) = input_refs.first() {
+                            output.samples_mut().copy_from_slice(first.samples());
+                        }
+                    } else {
+                        node.process(&input_refs, output);
+                    }
+                });
+
+                // Put nodes and outputs back
+                for (node_id, node, _, output) in work {
+                    plan.nodes.insert(node_id, node);
+                    self.node_outputs[node_id.0 as usize] = Some(output);
+                }
+            }
+        }
+
+        // Return the last node's output
+        plan.order
+            .last()
+            .and_then(|id| self.node_outputs.get(id.0 as usize))
+            .and_then(|opt: &Option<AudioBuffer>| opt.as_ref())
+    }
+
     /// Whether the current plan's last node is finished.
     pub fn is_finished(&self) -> bool {
         self.current_plan.as_ref().is_some_and(|p| p.is_finished())
@@ -400,6 +544,42 @@ impl GraphSwapHandle {
             }
         }
     }
+}
+
+// ── Level computation ──────────────────────────────────────────────
+
+/// Group topologically sorted nodes into levels based on dependency depth.
+/// Nodes at the same level are independent and can be processed in parallel.
+fn compute_levels(order: &[NodeId], input_map: &HashMap<NodeId, Vec<NodeId>>) -> Vec<Vec<NodeId>> {
+    let mut depth: HashMap<NodeId, usize> = HashMap::new();
+
+    for &id in order {
+        let max_input_depth = input_map
+            .get(&id)
+            .map(|inputs| {
+                inputs
+                    .iter()
+                    .filter_map(|inp| depth.get(inp))
+                    .copied()
+                    .max()
+                    .map(|d| d + 1)
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        depth.insert(id, max_input_depth);
+    }
+
+    let max_depth = depth.values().copied().max().unwrap_or(0);
+    let mut levels = vec![Vec::new(); max_depth + 1];
+    for &id in order {
+        if let Some(&d) = depth.get(&id) {
+            levels[d].push(id);
+        }
+    }
+
+    // Remove empty levels
+    levels.retain(|l| !l.is_empty());
+    levels
 }
 
 // ── Topological Sort ────────────────────────────────────────────────
@@ -880,6 +1060,85 @@ mod tests {
         let plan = graph.compile().unwrap();
         // Total = 100 + 200 + 50 = 350
         assert_eq!(plan.total_latency(), 350);
+    }
+
+    #[test]
+    fn levels_computed_correctly() {
+        // Diamond graph: src → [gain_a, gain_b] → out
+        let mut graph = Graph::new();
+        let src = NodeId::next();
+        let a = NodeId::next();
+        let b = NodeId::next();
+        let out = NodeId::next();
+
+        graph.add_node(src, Box::new(GeneratorNode { value: 1.0 }));
+        graph.add_node(a, Box::new(GainNode { gain: 0.5 }));
+        graph.add_node(b, Box::new(GainNode { gain: 0.3 }));
+        graph.add_node(out, Box::new(PassthroughNode));
+
+        graph.connect(src, a);
+        graph.connect(src, b);
+        graph.connect(a, out);
+        graph.connect(b, out);
+
+        let plan = graph.compile().unwrap();
+        let levels = plan.levels();
+
+        // Level 0: src, Level 1: a + b (parallel), Level 2: out
+        assert_eq!(levels.len(), 3, "expected 3 levels, got {}", levels.len());
+        assert_eq!(levels[0].len(), 1, "level 0 should have 1 node (src)");
+        assert_eq!(levels[1].len(), 2, "level 1 should have 2 nodes (a, b)");
+        assert_eq!(levels[2].len(), 1, "level 2 should have 1 node (out)");
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_process_matches_sequential() {
+        // Build a diamond graph and verify parallel produces same result as sequential
+        let mut seq_graph = Graph::new();
+        let src1 = NodeId::next();
+        let ga = NodeId::next();
+        let gb = NodeId::next();
+
+        seq_graph.add_node(src1, Box::new(GeneratorNode { value: 1.0 }));
+        seq_graph.add_node(ga, Box::new(GainNode { gain: 0.5 }));
+        seq_graph.add_node(gb, Box::new(GainNode { gain: 0.3 }));
+
+        seq_graph.connect(src1, ga);
+        seq_graph.connect(src1, gb);
+
+        let plan = seq_graph.compile().unwrap();
+        let mut proc = GraphProcessor::new(1, 44100, 64);
+        proc.swap_handle().swap(plan);
+
+        // Sequential
+        let seq_output = proc.process().unwrap().samples().to_vec();
+
+        // Rebuild identical graph for parallel
+        let mut par_graph = Graph::new();
+        let src2 = NodeId::next();
+        let gc = NodeId::next();
+        let gd = NodeId::next();
+
+        par_graph.add_node(src2, Box::new(GeneratorNode { value: 1.0 }));
+        par_graph.add_node(gc, Box::new(GainNode { gain: 0.5 }));
+        par_graph.add_node(gd, Box::new(GainNode { gain: 0.3 }));
+
+        par_graph.connect(src2, gc);
+        par_graph.connect(src2, gd);
+
+        let plan2 = par_graph.compile().unwrap();
+        let mut proc2 = GraphProcessor::new(1, 44100, 64);
+        proc2.swap_handle().swap(plan2);
+
+        let par_output = proc2.process_parallel().unwrap().samples().to_vec();
+
+        // Both should produce the same last-node output
+        // (last node in topo order processes identically)
+        assert_eq!(seq_output.len(), par_output.len());
+        for (s, p) in seq_output.iter().zip(par_output.iter()) {
+            assert!((s - p).abs() < 1e-6, "parallel mismatch: seq={s} par={p}");
+        }
     }
 
     #[test]

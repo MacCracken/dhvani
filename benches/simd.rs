@@ -126,9 +126,7 @@ fn bench_gain_multichannel(c: &mut Criterion) {
 // ── Format conversion benchmarks ───────────────────────────────────
 
 fn bench_i24_to_f32(c: &mut Criterion) {
-    let data: Vec<i32> = (0..88200)
-        .map(|i| (i % 16777216) - 8388608)
-        .collect();
+    let data: Vec<i32> = (0..88200).map(|i| (i % 16777216) - 8388608).collect();
     c.bench_function("simd_i24_to_f32_stereo_1s", |b| {
         b.iter(|| convert::i24_to_f32(&data))
     });
