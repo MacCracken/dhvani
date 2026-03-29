@@ -22,30 +22,36 @@ graph = []
 synthesis = ["dep:naad"]                # Synthesis engines: subtractive, FM, additive, wavetable, granular, physical, drum, vocoder
 voice = ["dep:svara", "synthesis"]      # Voice synthesis: glottal source, formant, phoneme, prosody, vocal tract
 creature = ["dep:prani", "synthesis"]   # Creature/animal vocal synthesis: species-specific voice models, call patterns
+environment = ["dep:garjan", "synthesis"] # Environmental/nature sound synthesis: thunder, rain, wind, fire, impacts
+mechanical = ["dep:ghurni", "synthesis"]  # Mechanical sound synthesis: engines, gears, motors, turbines
 sampler = ["dep:nidhi"]                 # Sample playback engine: key/velocity zones, loop modes, time-stretching
 # Platform
 simd = []
 pipewire = ["dep:pipewire"]
 # Bundles
-full = ["simd", "dsp", "analysis", "midi", "graph", "synthesis", "voice", "creature", "sampler", "pipewire"]
+g2p = ["dep:shabda", "voice"]            # Grapheme-to-phoneme: text to phoneme sequences for vocal synthesis
+full = ["simd", "dsp", "analysis", "midi", "graph", "synthesis", "voice", "creature", "environment", "mechanical", "sampler", "g2p", "pipewire"]
 
 [dependencies]
-abaco = { version = "1.0.0", path = "../abaco" }
+abaco = { version = "1.1.0" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 
 # Synthesis
 naad = { version = "1.0.0", optional = true }
-svara = { version = "1.0.0", optional = true, default-features = false, features = ["naad-backend"] }
-prani = { version = "1.0.0", optional = true, default-features = false }
-nidhi = { version = "0.1.0", path = "../nidhi", optional = true, default-features = false }
+svara = { version = "1.1.0", optional = true, default-features = false, features = ["naad-backend"] }
+prani = { version = "1.1.0", optional = true, default-features = false }
+nidhi = { version = "1.0.0", optional = true, default-features = false }
+garjan = { version = "1.0.0", optional = true, default-features = false, features = ["naad-backend"] }
+ghurni = { version = "1.0.0", optional = true, features = ["naad-backend"] }
+shabda = { version = "1.0.0", optional = true, default-features = false }
 
 # Audio capture
 pipewire = { version = "0.9", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
 serde_json = "1"
 
