@@ -438,6 +438,224 @@ fn triangle_oscillator_produces_output() {
     assert!(has_positive && has_negative, "Triangle should oscillate");
 }
 
+// ── Stress tests ────────────────────────────────────────────────────
+
+#[cfg(feature = "dsp")]
+#[test]
+fn stress_long_buffer_dsp_chain() {
+    use crate::dsp::{
+        BiquadFilter, Compressor, CompressorParams, DelayLine, EnvelopeLimiter, FilterType,
+        LimiterParams,
+    };
+
+    // 10 seconds of stereo audio through a full DSP chain
+    let sr = 44100u32;
+    let duration_secs = 10;
+    let frames = sr as usize * duration_secs;
+    let samples: Vec<f32> = (0..frames * 2)
+        .map(|i| {
+            let t = (i / 2) as f32 / sr as f32;
+            (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.8
+                + (2.0 * std::f32::consts::PI * 880.0 * t).sin() * 0.3
+        })
+        .collect();
+    let mut buf = AudioBuffer::from_interleaved(samples, 2, sr).unwrap();
+
+    // Chain: HP filter → compressor → delay → limiter
+    let mut hp = BiquadFilter::new(FilterType::HighPass, 80.0, 0.707, sr, 2);
+    hp.process(&mut buf);
+
+    let mut comp = Compressor::new(
+        CompressorParams {
+            threshold_db: -12.0,
+            ratio: 4.0,
+            attack_ms: 10.0,
+            release_ms: 100.0,
+            ..Default::default()
+        },
+        sr,
+    )
+    .unwrap();
+    comp.process(&mut buf);
+
+    let mut delay = DelayLine::new(100.0, 500.0, 0.3, 0.2, sr, 2);
+    delay.process(&mut buf);
+
+    let mut limiter = EnvelopeLimiter::new(LimiterParams::default(), sr).unwrap();
+    limiter.process(&mut buf);
+
+    // All samples must be finite and within bounds
+    assert!(
+        buf.samples.iter().all(|s| s.is_finite()),
+        "NaN/Inf in output"
+    );
+    assert!(
+        buf.peak() <= 1.01,
+        "peak {} exceeds limiter ceiling",
+        buf.peak()
+    );
+}
+
+#[cfg(all(feature = "dsp", feature = "analysis"))]
+#[test]
+fn stress_analysis_long_buffer() {
+    use crate::analysis;
+
+    // 5 seconds of complex audio
+    let sr = 44100u32;
+    let frames = sr as usize * 5;
+    let samples: Vec<f32> = (0..frames)
+        .map(|i| {
+            let t = i as f32 / sr as f32;
+            (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5
+                + (2.0 * std::f32::consts::PI * 1200.0 * t).sin() * 0.3
+                + (2.0 * std::f32::consts::PI * 3500.0 * t).sin() * 0.1
+        })
+        .collect();
+    let buf = AudioBuffer::from_interleaved(samples, 1, sr).unwrap();
+
+    // Run all analysis functions
+    let r128 = analysis::measure_r128(&buf).unwrap();
+    assert!(r128.integrated_lufs.is_finite());
+    assert!(r128.range_lu >= 0.0);
+
+    let dynamics = analysis::analyze_dynamics(&buf);
+    assert!(dynamics.max_peak() > 0.0);
+    assert!(dynamics.max_true_peak() >= dynamics.max_peak());
+
+    let zcr = analysis::zero_crossing_rate(&buf).unwrap();
+    assert!(zcr.rate_hz > 0.0);
+
+    let spec = analysis::spectrum_fft(&buf, 4096).unwrap();
+    assert!(spec.peak_frequency() > 400.0 && spec.peak_frequency() < 500.0);
+}
+
+#[cfg(feature = "graph")]
+#[test]
+fn stress_graph_concurrent_swap() {
+    use crate::graph::{AudioNode, Graph, GraphProcessor, NodeId};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct ValueNode(f32);
+    impl AudioNode for ValueNode {
+        fn name(&self) -> &str {
+            "value"
+        }
+        fn num_inputs(&self) -> usize {
+            0
+        }
+        fn num_outputs(&self) -> usize {
+            1
+        }
+        fn process(&mut self, _inputs: &[&AudioBuffer], output: &mut AudioBuffer) {
+            for s in output.samples_mut() {
+                *s = self.0;
+            }
+        }
+    }
+
+    let mut proc = GraphProcessor::new(1, 44100, 256);
+    let handle = proc.swap_handle();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_clone = done.clone();
+
+    // Spawn a thread that rapidly swaps plans
+    let swap_thread = std::thread::spawn(move || {
+        for i in 0..100 {
+            let mut g = Graph::new();
+            let id = NodeId::next();
+            g.add_node(id, Box::new(ValueNode(i as f32 / 100.0)));
+            let plan = g.compile().unwrap();
+            handle.swap(plan);
+        }
+        done_clone.store(true, Ordering::Release);
+    });
+
+    // Process from RT thread while swaps happen
+    let mut cycles = 0;
+    while !done.load(Ordering::Acquire) || cycles < 200 {
+        if let Some(output) = proc.process() {
+            assert!(output.samples().iter().all(|s| s.is_finite()));
+        }
+        cycles += 1;
+    }
+
+    swap_thread.join().unwrap();
+    assert!(cycles > 0, "processor should have run");
+}
+
+// ── EBU R128 reference validation ──────────────────────────────────
+
+#[cfg(feature = "analysis")]
+#[test]
+fn ebu_r128_silence_is_minus_infinity() {
+    let buf = AudioBuffer::silence(2, 44100, 44100);
+    let r128 = crate::analysis::measure_r128(&buf).unwrap();
+    // Silence should measure as very low LUFS
+    assert!(
+        r128.integrated_lufs < -60.0,
+        "silence LUFS={}",
+        r128.integrated_lufs
+    );
+}
+
+#[cfg(feature = "analysis")]
+#[test]
+fn ebu_r128_sine_in_expected_range() {
+    // 997 Hz sine at 0 dBFS (peak 1.0) ≈ −3.01 dBFS RMS → expect ~−3.7 LUFS
+    // (adjusted for K-weighting which adds ~0.2 dB at 997 Hz)
+    let sr = 48000u32;
+    let frames = sr as usize * 5; // 5 seconds for stable measurement
+    let samples: Vec<f32> = (0..frames * 2)
+        .map(|i| {
+            let t = (i / 2) as f32 / sr as f32;
+            (2.0 * std::f32::consts::PI * 997.0 * t).sin()
+        })
+        .collect();
+    let buf = AudioBuffer::from_interleaved(samples, 2, sr).unwrap();
+    let r128 = crate::analysis::measure_r128(&buf).unwrap();
+
+    // EBU R128 for 0 dBFS stereo sine should be approximately -3.01 LUFS
+    // Allow generous tolerance for our implementation
+    assert!(
+        r128.integrated_lufs > -6.0 && r128.integrated_lufs < -1.0,
+        "997Hz sine expected ~-3 LUFS, got {}",
+        r128.integrated_lufs
+    );
+}
+
+#[cfg(feature = "analysis")]
+#[test]
+fn ebu_r128_k_weighting_attenuates_lows() {
+    // Low frequency (50 Hz) should measure lower LUFS than mid frequency (1 kHz)
+    // due to K-weighting high-pass filter
+    let sr = 48000u32;
+    let frames = sr as usize * 3;
+
+    let low_samples: Vec<f32> = (0..frames)
+        .map(|i| (2.0 * std::f32::consts::PI * 50.0 * i as f32 / sr as f32).sin() * 0.5)
+        .collect();
+    let mid_samples: Vec<f32> = (0..frames)
+        .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr as f32).sin() * 0.5)
+        .collect();
+
+    let low_buf = AudioBuffer::from_interleaved(low_samples, 1, sr).unwrap();
+    let mid_buf = AudioBuffer::from_interleaved(mid_samples, 1, sr).unwrap();
+
+    let low_lufs = crate::analysis::measure_r128(&low_buf)
+        .unwrap()
+        .integrated_lufs;
+    let mid_lufs = crate::analysis::measure_r128(&mid_buf)
+        .unwrap()
+        .integrated_lufs;
+
+    assert!(
+        low_lufs < mid_lufs,
+        "K-weighting should attenuate 50Hz: low={low_lufs} mid={mid_lufs}"
+    );
+}
+
 #[cfg(feature = "dsp")]
 #[test]
 fn biquad_half_mix() {

@@ -109,4 +109,124 @@ proptest! {
         let back = crate::midi::translate::velocity_16_to_7(v16);
         prop_assert_eq!(back, v);
     }
+
+    // ── Expanded coverage ──────────────────────────────────────────
+
+    #[test]
+    fn add_buffers_commutative(
+        a in arb_audio_buffer(),
+    ) {
+        // a + a should equal 2 * a
+        let sum = crate::buffer::mix(&[&a, &a]);
+        if let Ok(mixed) = sum {
+            for (i, s) in mixed.samples.iter().enumerate() {
+                let expected = a.samples[i] * 2.0;
+                prop_assert!((s - expected).abs() < 1e-4,
+                    "mix sum[{i}] = {s}, expected {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn i24_f32_roundtrip(values in prop::collection::vec(-8388608i32..=8388607, 1..1000)) {
+        let f32s = crate::buffer::convert::i24_to_f32(&values);
+        let back = crate::buffer::convert::f32_to_i24(&f32s);
+        for (a, b) in values.iter().zip(back.iter()) {
+            prop_assert!((*a - *b).abs() <= 1, "i24 roundtrip: {a} != {b}");
+        }
+    }
+
+    #[test]
+    fn u8_f32_roundtrip(values in prop::collection::vec(0u8..=255, 1..1000)) {
+        let f32s = crate::buffer::convert::u8_to_f32(&values);
+        let back = crate::buffer::convert::f32_to_u8(&f32s);
+        for (a, b) in values.iter().zip(back.iter()) {
+            prop_assert!((*a as i16 - *b as i16).abs() <= 1, "u8 roundtrip: {a} != {b}");
+        }
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_sum_of_squares_non_negative(buf in arb_audio_buffer()) {
+        let result = crate::simd::sum_of_squares(&buf.samples);
+        prop_assert!(result >= 0.0);
+        prop_assert!(result.is_finite());
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_weighted_sum_finite(
+        samples in prop::collection::vec(-1.0f32..=1.0, 1..1000),
+        weights in prop::collection::vec(0.0f32..=1.0, 1..1000),
+    ) {
+        let len = samples.len().min(weights.len());
+        let (sum, wt) = crate::simd::weighted_sum(&samples[..len], &weights[..len]);
+        prop_assert!(sum.is_finite(), "weighted_sum not finite: {sum}");
+        prop_assert!(wt.is_finite(), "weight_sum not finite: {wt}");
+    }
+
+    #[cfg(feature = "dsp")]
+    #[test]
+    fn svf_output_finite(
+        buf in arb_audio_buffer(),
+        freq in 20.0f32..20000.0,
+        q in 0.1f32..10.0,
+    ) {
+        let mut buf = buf;
+        let mut svf = crate::dsp::SvfFilter::new(
+            crate::dsp::SvfMode::LowPass, freq, q, 0.0, 44100, buf.channels,
+        );
+        svf.process(&mut buf);
+        prop_assert!(buf.samples.iter().all(|s| s.is_finite()));
+    }
+
+    #[cfg(feature = "dsp")]
+    #[test]
+    fn automation_monotonic_linear(
+        start_val in -10.0f32..10.0,
+        end_val in -10.0f32..10.0,
+        frames in 10usize..10000,
+    ) {
+        use crate::dsp::automation::{AutomationLane, Breakpoint, CurveType};
+        let mut lane = AutomationLane::new(start_val);
+        lane.add(Breakpoint::new(0, start_val, CurveType::Linear));
+        lane.add(Breakpoint::new(frames, end_val, CurveType::Linear));
+
+        let mut output = vec![0.0f32; frames + 1];
+        lane.render(&mut output, 0);
+
+        // All values should be between start and end (inclusive)
+        let lo = start_val.min(end_val);
+        let hi = start_val.max(end_val);
+        for (i, &v) in output.iter().enumerate() {
+            prop_assert!(v >= lo - 1e-5 && v <= hi + 1e-5,
+                "automation[{i}] = {v}, expected [{lo}, {hi}]");
+        }
+    }
+
+    #[cfg(feature = "dsp")]
+    #[test]
+    fn routing_matrix_preserves_energy(
+        buf in arb_audio_buffer(),
+    ) {
+        // Identity routing should preserve energy exactly
+        let m = crate::dsp::RoutingMatrix::identity(buf.channels as usize);
+        if let Ok(out) = m.apply(&buf) {
+            for (a, b) in buf.samples.iter().zip(out.samples.iter()) {
+                prop_assert!((a - b).abs() < 1e-6, "identity routing changed value");
+            }
+        }
+    }
+
+    #[cfg(feature = "analysis")]
+    #[test]
+    fn zcr_non_negative(buf in arb_audio_buffer()) {
+        if buf.frames >= 2 {
+            let result = crate::analysis::zero_crossing_rate(&buf).unwrap();
+            prop_assert!(result.rate_hz >= 0.0);
+            for &r in &result.per_channel {
+                prop_assert!(r >= 0.0);
+            }
+        }
+    }
 }

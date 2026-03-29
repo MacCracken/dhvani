@@ -80,6 +80,67 @@ fn bench_sinc_resample(c: &mut Criterion) {
     });
 }
 
+// ── Buffer size variation benchmarks ────────────────────────────────
+
+fn bench_gain_varying_sizes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gain_buffer_sizes");
+    for &size in &[64, 256, 4096, 65536] {
+        let mut buf = AudioBuffer::from_interleaved(vec![0.5f32; size * 2], 2, 44100).unwrap();
+        group.bench_with_input(
+            criterion::BenchmarkId::from_parameter(size),
+            &size,
+            |b, _| b.iter(|| buf.apply_gain(0.9)),
+        );
+    }
+    group.finish();
+}
+
+fn bench_peak_varying_sizes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("peak_buffer_sizes");
+    for &size in &[64, 256, 4096, 65536] {
+        let buf = AudioBuffer::from_interleaved(vec![0.5f32; size * 2], 2, 44100).unwrap();
+        group.bench_with_input(
+            criterion::BenchmarkId::from_parameter(size),
+            &size,
+            |b, _| b.iter(|| buf.peak()),
+        );
+    }
+    group.finish();
+}
+
+// ── Multi-channel benchmarks ───────────────────────────────────────
+
+fn bench_gain_multichannel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gain_channels");
+    for &ch in &[1, 2, 6, 8] {
+        let frames = 44100;
+        let mut buf =
+            AudioBuffer::from_interleaved(vec![0.5f32; frames * ch], ch as u32, 44100).unwrap();
+        group.bench_with_input(criterion::BenchmarkId::from_parameter(ch), &ch, |b, _| {
+            b.iter(|| buf.apply_gain(0.9))
+        });
+    }
+    group.finish();
+}
+
+// ── Format conversion benchmarks ───────────────────────────────────
+
+fn bench_i24_to_f32(c: &mut Criterion) {
+    let data: Vec<i32> = (0..88200)
+        .map(|i| (i % 16777216) - 8388608)
+        .collect();
+    c.bench_function("simd_i24_to_f32_stereo_1s", |b| {
+        b.iter(|| convert::i24_to_f32(&data))
+    });
+}
+
+fn bench_u8_to_f32(c: &mut Criterion) {
+    let data: Vec<u8> = (0..88200).map(|i| (i % 256) as u8).collect();
+    c.bench_function("simd_u8_to_f32_stereo_1s", |b| {
+        b.iter(|| convert::u8_to_f32(&data))
+    });
+}
+
 criterion_group!(
     benches,
     bench_apply_gain,
@@ -90,6 +151,11 @@ criterion_group!(
     bench_noise_gate,
     bench_i16_to_f32,
     bench_f32_to_i16,
+    bench_i24_to_f32,
+    bench_u8_to_f32,
     bench_sinc_resample,
+    bench_gain_varying_sizes,
+    bench_peak_varying_sizes,
+    bench_gain_multichannel,
 );
 criterion_main!(benches);
