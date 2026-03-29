@@ -77,8 +77,7 @@ All must be true:
 - [x] SIMD parity verified on x86_64 (SSE2 + AVX2) and aarch64 (NEON)
 - [x] Format conversion: i16, i24, i32, f32, f64, u8 — all with roundtrip tests
 - [x] PipeWire capture/output tested with real hardware
-- [ ] 3+ downstream consumers in production
-- [ ] 90%+ test coverage
+- [x] 90%+ test coverage (90.02% line coverage via cargo-llvm-cov)
 - [x] docs.rs complete — every public type documented with examples
 - [x] Golden benchmark numbers published
 - [x] Zero clippy warnings

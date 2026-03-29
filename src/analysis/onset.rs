@@ -112,7 +112,8 @@ mod tests {
     fn silence_no_onsets() {
         let buf = AudioBuffer::silence(1, 44100, 44100);
         let result = detect_onsets(&buf, 2048, 512, 0.3).unwrap();
-        assert!(result.positions.is_empty());
+        assert!(result.positions().is_empty());
+        assert_eq!(result.count(), 0);
     }
 
     #[test]

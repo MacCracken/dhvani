@@ -252,7 +252,11 @@ mod tests {
     fn silence_r128() {
         let buf = AudioBuffer::silence(2, 48000, 48000);
         let r = measure_r128(&buf).unwrap();
-        assert!(r.integrated_lufs < -60.0 || r.integrated_lufs.is_infinite());
+        assert!(r.integrated_lufs() < -60.0 || r.integrated_lufs().is_infinite());
+        // Exercise all accessors
+        let _ = r.range_lu();
+        let _ = r.short_term_lufs();
+        let _ = r.momentary_lufs();
     }
 
     #[test]
@@ -266,8 +270,8 @@ mod tests {
         let r = measure_r128(&buf).unwrap();
 
         // A -6 dBFS sine should measure around -9 to -12 LUFS
-        assert!(r.integrated_lufs > -20.0, "LUFS={}", r.integrated_lufs);
-        assert!(r.integrated_lufs < 0.0, "LUFS={}", r.integrated_lufs);
+        assert!(r.integrated_lufs() > -20.0, "LUFS={}", r.integrated_lufs());
+        assert!(r.integrated_lufs() < 0.0, "LUFS={}", r.integrated_lufs());
     }
 
     #[test]

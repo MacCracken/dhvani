@@ -571,4 +571,19 @@ mod tests {
         assert!(meter.rms_db(5) < -100.0);
         assert!(meter.peak_hold_db(5) < -100.0);
     }
+
+    #[test]
+    fn level_meter_public_accessors() {
+        let buf =
+            crate::buffer::AudioBuffer::from_interleaved(vec![0.5f32; 512], 2, 48000).unwrap();
+        let mut meter = LevelMeter::new(2, 48000.0);
+        meter.process(&buf);
+        assert_eq!(meter.peak().len(), 2);
+        assert_eq!(meter.rms().len(), 2);
+        assert!(meter.peak()[0] > 0.0);
+        assert!(meter.rms()[0] > 0.0);
+        assert_eq!(meter.channels(), 2);
+        let _ = meter.lufs();
+        assert_eq!(meter.peak_hold().len(), 2);
+    }
 }

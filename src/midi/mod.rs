@@ -559,4 +559,84 @@ mod tests {
         let clip = MidiClip::new("test", 1000, 5000);
         assert_eq!(clip.end_pos(), 6000);
     }
+
+    #[test]
+    fn note_event_accessors() {
+        let n = NoteEvent::new(100, 200, 60, 127, 3);
+        assert_eq!(n.position(), 100);
+        assert_eq!(n.duration(), 200);
+        assert_eq!(n.note(), 60);
+        assert_eq!(n.velocity(), 127);
+        assert_eq!(n.channel(), 3);
+    }
+
+    #[test]
+    fn control_change_accessors() {
+        let cc = ControlChange::new(500, 7, 100, 0);
+        assert_eq!(cc.position(), 500);
+        assert_eq!(cc.controller(), 7);
+        assert_eq!(cc.value(), 100);
+        assert_eq!(cc.channel(), 0);
+    }
+
+    #[test]
+    fn midi_clip_accessors() {
+        let mut clip = MidiClip::new("lead", 1000, 5000);
+        clip.add_note(1000, 500, 60, 100, 0);
+        clip.add_cc(2000, 1, 64, 0);
+        assert_eq!(clip.name(), "lead");
+        assert_eq!(clip.notes().len(), 1);
+        assert_eq!(clip.control_changes().len(), 1);
+        assert_eq!(clip.timeline_pos(), 1000);
+        assert_eq!(clip.duration(), 5000);
+    }
+
+    #[test]
+    fn midi_event_all_variants_position_channel() {
+        let events = [
+            MidiEvent::NoteOn {
+                position: 1,
+                note: 60,
+                velocity: 100,
+                channel: 0,
+            },
+            MidiEvent::NoteOff {
+                position: 2,
+                note: 60,
+                velocity: 0,
+                channel: 1,
+            },
+            MidiEvent::ControlChange {
+                position: 3,
+                controller: 7,
+                value: 64,
+                channel: 2,
+            },
+            MidiEvent::PitchBend {
+                position: 4,
+                value: 8192,
+                channel: 3,
+            },
+            MidiEvent::Aftertouch {
+                position: 5,
+                pressure: 64,
+                channel: 4,
+            },
+            MidiEvent::PolyAftertouch {
+                position: 6,
+                note: 60,
+                pressure: 32,
+                channel: 5,
+            },
+            MidiEvent::ProgramChange {
+                position: 7,
+                program: 0,
+                channel: 6,
+            },
+        ];
+        for (i, event) in events.iter().enumerate() {
+            assert_eq!(event.position(), (i + 1) as u64);
+            assert_eq!(event.channel(), i as u8);
+        }
+    }
 }

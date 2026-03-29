@@ -66,3 +66,43 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for NadaError {
         Self::Other(err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display() {
+        let errors = [
+            NadaError::FormatMismatch {
+                expected: "44100Hz".into(),
+                actual: "48000Hz".into(),
+            },
+            NadaError::LengthMismatch {
+                expected: 1024,
+                actual: 512,
+            },
+            NadaError::InvalidSampleRate(0),
+            NadaError::InvalidChannels(0),
+            NadaError::Dsp("test".into()),
+            NadaError::Capture("test".into()),
+            NadaError::InvalidParameter {
+                name: "ratio".into(),
+                value: "-1".into(),
+                reason: "must be positive".into(),
+            },
+            NadaError::Conversion("test".into()),
+        ];
+        for e in &errors {
+            let msg = e.to_string();
+            assert!(!msg.is_empty());
+        }
+    }
+
+    #[test]
+    fn error_from_boxed() {
+        let err: Box<dyn std::error::Error + Send + Sync> = "test error".into();
+        let nada: NadaError = err.into();
+        assert!(nada.to_string().contains("test error"));
+    }
+}
