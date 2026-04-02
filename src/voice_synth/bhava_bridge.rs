@@ -70,6 +70,14 @@ const STRESS_RANGE_NARROW: f32 = 0.3;
 const STRESS_VIBRATO_RATE: f32 = 1.0;
 const BURNOUT_BANDWIDTH: f32 = 0.5;
 
+// quality_from_energy
+const ENERGY_RAW_WEIGHT: f32 = 0.6;
+const ENERGY_PERFORMANCE_WEIGHT: f32 = 0.4;
+
+// Safety floor for f0-related outputs
+const F0_FLOOR_HZ: f32 = 50.0;
+const F0_MULTIPLIER_FLOOR: f32 = 0.5;
+
 // ── Mapping functions ──────────────────────────────────────────────
 
 /// Derive a voice baseline from personality traits.
@@ -143,11 +151,12 @@ pub fn prosody_from_mood(mood: &MoodVector) -> ProsodyContour {
         ([1.0_f32, 0.99, 0.97, 0.96, 0.94], [1.0; 5])
     };
 
-    // Blend between flat and shaped by joy intensity
+    // Blend between flat and shaped by joy intensity, floor at F0_MULTIPLIER_FLOOR
     let mut points: Vec<(f32, f32)> = (0..5)
         .map(|i| {
             let t = i as f32 * 0.25;
-            let v = f0_base * (flat[i] + (shape_offsets[i] - flat[i]) * joy_abs);
+            let v = (f0_base * (flat[i] + (shape_offsets[i] - flat[i]) * joy_abs))
+                .max(F0_MULTIPLIER_FLOOR);
             (t, v)
         })
         .collect();
@@ -156,8 +165,8 @@ pub fn prosody_from_mood(mood: &MoodVector) -> ProsodyContour {
     if mood.frustration > 0.3 {
         let jag = mood.frustration * FRUSTRATION_CONTOUR_JAG;
         // Insert perturbation points
-        points.push((0.3, f0_base + jag));
-        points.push((0.7, f0_base - jag));
+        points.push((0.3, (f0_base + jag).max(F0_MULTIPLIER_FLOOR)));
+        points.push((0.7, (f0_base - jag).max(F0_MULTIPLIER_FLOOR)));
         points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
     }
 
@@ -226,7 +235,7 @@ pub fn apply_mood_to_voice(mood: &MoodVector, voice: &VoiceProfile) -> VoiceProf
 
     voice
         .clone()
-        .with_f0(voice.base_f0 * (1.0 + mood.joy * MOOD_JOY_F0))
+        .with_f0((voice.base_f0 * (1.0 + mood.joy * MOOD_JOY_F0)).max(F0_FLOOR_HZ))
         .with_f0_range(
             voice.f0_range * (1.0 + mood.arousal * MOOD_AROUSAL_RANGE)
                 + mood.interest * MOOD_INTEREST_RANGE_HZ,
@@ -259,7 +268,7 @@ pub fn apply_stress_to_voice(stress: &StressState, voice: &VoiceProfile) -> Voic
         .with_jitter(voice.jitter + load * STRESS_JITTER)
         .with_shimmer(voice.shimmer + load * STRESS_SHIMMER)
         .with_breathiness(voice.breathiness + load * STRESS_BREATHINESS)
-        .with_f0(voice.base_f0 * (1.0 + load * STRESS_F0_RAISE))
+        .with_f0((voice.base_f0 * (1.0 + load * STRESS_F0_RAISE)).max(F0_FLOOR_HZ))
         .with_f0_range(voice.f0_range * (1.0 - load * STRESS_RANGE_NARROW))
         .with_vibrato_rate(voice.vibrato_rate + load * STRESS_VIBRATO_RATE);
 
@@ -283,7 +292,8 @@ pub fn apply_stress_to_voice(stress: &StressState, voice: &VoiceProfile) -> Voic
 pub fn quality_from_energy(energy: &EnergyState) -> Quality {
     tracing::trace!("quality_from_energy");
 
-    let effective = energy.energy.get() * 0.6 + energy.performance() * 0.4;
+    let effective =
+        energy.energy.get() * ENERGY_RAW_WEIGHT + energy.performance() * ENERGY_PERFORMANCE_WEIGHT;
 
     if effective >= 0.5 {
         Quality::Full
@@ -406,6 +416,37 @@ mod tests {
         assert!(result.vibrato_depth.is_finite());
     }
 
+    #[test]
+    fn personality_all_lowest_valid() {
+        let base = male_voice();
+        let mut profile = balanced_profile();
+        for &kind in bhava::traits::TraitKind::ALL {
+            profile.set_trait(kind, TraitLevel::Lowest);
+        }
+        let result = voice_from_personality(&profile, &base);
+        // All outputs must be finite and within svara's valid ranges
+        assert!(result.base_f0.is_finite() && result.base_f0 > 0.0);
+        assert!(result.breathiness >= 0.0 && result.breathiness <= 1.0);
+        assert!(result.f0_range >= 0.0);
+        assert!(result.jitter >= 0.0 && result.jitter <= 0.05);
+        assert!(result.shimmer >= 0.0 && result.shimmer <= 0.1);
+        assert!(result.vibrato_rate >= 0.0);
+        assert!(result.vibrato_depth >= 0.0 && result.vibrato_depth <= 0.5);
+        assert!(result.formant_scale >= 0.1);
+    }
+
+    #[test]
+    fn personality_lowest_confidence_increases_jitter() {
+        let base = male_voice();
+        let mut profile = balanced_profile();
+        profile.set_trait(TraitKind::Confidence, TraitLevel::Lowest);
+        let result = voice_from_personality(&profile, &base);
+        // Low confidence → more perturbation
+        assert!(result.jitter > base.jitter);
+        assert!(result.shimmer > base.shimmer);
+        assert!(result.f0_range < base.f0_range);
+    }
+
     // ── prosody_from_mood ──────────────────────────────────────────
 
     #[test]
@@ -416,6 +457,54 @@ mod tests {
         // f0 points should be near 1.0
         for &(_, v) in &contour.f0_points {
             assert!((v - 1.0).abs() < 0.15);
+        }
+    }
+
+    #[test]
+    fn sad_mood_lowers_f0_and_slows() {
+        let mut mood = neutral_mood();
+        mood.joy = -0.8;
+        mood.arousal = -0.5;
+        let contour = prosody_from_mood(&mood);
+        let avg_f0: f32 =
+            contour.f0_points.iter().map(|(_, v)| v).sum::<f32>() / contour.f0_points.len() as f32;
+        assert!(avg_f0 < 1.0); // lower pitch
+        assert!(contour.duration_scale > 1.0); // slower
+    }
+
+    #[test]
+    fn extreme_negative_mood_contour_positive() {
+        // Worst-case: all dimensions at negative extreme
+        let mut mood = MoodVector::neutral();
+        mood.joy = -1.0;
+        mood.arousal = -1.0;
+        mood.dominance = -1.0;
+        mood.trust = -1.0;
+        mood.interest = -1.0;
+        mood.frustration = -1.0;
+        let contour = prosody_from_mood(&mood);
+        for &(t, v) in &contour.f0_points {
+            assert!((0.0..=1.0).contains(&t), "time out of range: {t}");
+            assert!(v >= F0_MULTIPLIER_FLOOR, "f0 below floor: {v}");
+            assert!(v.is_finite(), "f0 not finite: {v}");
+        }
+        assert!(contour.duration_scale > 0.0);
+        assert!(contour.amplitude_scale > 0.0);
+    }
+
+    #[test]
+    fn extreme_positive_mood_contour_valid() {
+        let mut mood = MoodVector::neutral();
+        mood.joy = 1.0;
+        mood.arousal = 1.0;
+        mood.dominance = 1.0;
+        mood.trust = 1.0;
+        mood.interest = 1.0;
+        mood.frustration = 1.0;
+        let contour = prosody_from_mood(&mood);
+        for &(t, v) in &contour.f0_points {
+            assert!((0.0..=1.0).contains(&t));
+            assert!(v > 0.0 && v.is_finite());
         }
     }
 
@@ -691,5 +780,102 @@ mod tests {
             ..MoodVector::neutral()
         };
         assert_eq!(intonation_from_mood(&mood), IntonationPattern::Continuation);
+    }
+
+    // ── proptest ───────────────────────────────────────────────────
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_mood() -> impl Strategy<Value = MoodVector> {
+            (
+                -1.0f32..=1.0,
+                -1.0f32..=1.0,
+                -1.0f32..=1.0,
+                -1.0f32..=1.0,
+                -1.0f32..=1.0,
+                -1.0f32..=1.0,
+            )
+                .prop_map(|(j, a, d, t, i, f)| MoodVector {
+                    joy: j,
+                    arousal: a,
+                    dominance: d,
+                    trust: t,
+                    interest: i,
+                    frustration: f,
+                })
+        }
+
+        fn arb_profile() -> impl Strategy<Value = PersonalityProfile> {
+            proptest::collection::vec(
+                prop_oneof![
+                    Just(TraitLevel::Lowest),
+                    Just(TraitLevel::Low),
+                    Just(TraitLevel::Balanced),
+                    Just(TraitLevel::High),
+                    Just(TraitLevel::Highest),
+                ],
+                15,
+            )
+            .prop_map(|levels| {
+                let mut p = PersonalityProfile::new("proptest");
+                for (kind, level) in bhava::traits::TraitKind::ALL.iter().zip(levels) {
+                    p.set_trait(*kind, level);
+                }
+                p
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn mood_to_voice_always_valid(mood in arb_mood()) {
+                let voice = VoiceProfile::new_male();
+                let result = apply_mood_to_voice(&mood, &voice);
+                prop_assert!(result.base_f0.is_finite() && result.base_f0 >= F0_FLOOR_HZ);
+                prop_assert!(result.breathiness >= 0.0 && result.breathiness <= 1.0);
+                prop_assert!(result.f0_range >= 0.0);
+                prop_assert!(result.jitter >= 0.0 && result.jitter <= 0.05);
+                prop_assert!(result.shimmer >= 0.0 && result.shimmer <= 0.1);
+                prop_assert!(result.vibrato_depth >= 0.0 && result.vibrato_depth <= 0.5);
+            }
+
+            #[test]
+            fn mood_to_prosody_always_valid(mood in arb_mood()) {
+                let contour = prosody_from_mood(&mood);
+                for &(t, v) in &contour.f0_points {
+                    prop_assert!((0.0..=1.0).contains(&t), "time out of range: {}", t);
+                    prop_assert!(v >= F0_MULTIPLIER_FLOOR && v.is_finite(),
+                        "f0 multiplier invalid: {}", v);
+                }
+                prop_assert!(contour.duration_scale >= 0.7 && contour.duration_scale <= 1.4);
+                prop_assert!(contour.amplitude_scale >= 0.7 && contour.amplitude_scale <= 1.5);
+            }
+
+            #[test]
+            fn mood_to_effort_always_valid(mood in arb_mood()) {
+                let _effort = effort_from_mood(&mood);
+                // No panic = valid variant returned
+            }
+
+            #[test]
+            fn mood_to_intonation_always_valid(mood in arb_mood()) {
+                let _pattern = intonation_from_mood(&mood);
+            }
+
+            #[test]
+            fn personality_to_voice_always_valid(profile in arb_profile()) {
+                let base = VoiceProfile::new_male();
+                let result = voice_from_personality(&profile, &base);
+                prop_assert!(result.base_f0.is_finite() && result.base_f0 > 0.0);
+                prop_assert!(result.breathiness >= 0.0 && result.breathiness <= 1.0);
+                prop_assert!(result.f0_range >= 0.0);
+                prop_assert!(result.jitter >= 0.0 && result.jitter <= 0.05);
+                prop_assert!(result.shimmer >= 0.0 && result.shimmer <= 0.1);
+                prop_assert!(result.vibrato_rate >= 0.0);
+                prop_assert!(result.vibrato_depth >= 0.0 && result.vibrato_depth <= 0.5);
+                prop_assert!(result.formant_scale >= 0.1);
+            }
+        }
     }
 }
