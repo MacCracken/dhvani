@@ -1,0 +1,278 @@
+# voice_synth.tcyr -- parity tests for src/voice_synth.cyr.
+# Ported one-for-one from the 21 #[test] blocks in rust-old/src/voice_synth/mod.rs
+# (no serde/Debug tests to drop). Drives svara's vocal synthesis through dhvani's
+# render bridges. Sibling bundles are included in dependency order (sakshi ->
+# hisab -> goonj -> naad -> svara), then dhvani's own modules -- see the Wave F
+# note in port-audit.md. naad precedes svara (svara references naad NOISE_* consts).
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/voice_synth.cyr"
+
+# all samples finite?
+fn vs_all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(s, i)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+# every element of a raw vec<f64> finite?
+fn vs_vec_all_finite(v) {
+    var n = vec_len(v);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(v, i)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+# progress callback for batch_renderer_with_progress: increments the counter at
+# `user` and asserts p.fraction() <= 1.0. Returns 0 (continue).
+fn vs_progress_cb(user, progress) {
+    store64(user, load64(user) + 1);
+    assert(f64_le(svara_render_progress_fraction(progress), F64_ONE), "fraction <= 1.0");
+    return 0;
+}
+
+alloc_init();
+
+# ---- render_vowel_a ----
+test_group("render_vowel_a");
+var voice_a = svara_voice_new_male();
+var buf_a = dhvani_vsynth_render_phoneme(SVARA_PH_VOWEL_A, voice_a, 44100, 0.2);
+assert(buf_a != 0, "render ok");
+assert_eq(dhvani_buffer_channels(buf_a), 1, "channels 1");
+assert(dhvani_buffer_frames(buf_a) > 0, "frames > 0");
+assert(f64_gt(dhvani_buffer_rms(buf_a), 0), "rms > 0");
+assert_eq(vs_all_finite(buf_a), 1, "all finite");
+
+# ---- render_phoneme_sequence ----
+test_group("render_phoneme_sequence");
+var voice_s = svara_voice_new_female();
+var seq = svara_sequence_new();
+svara_sequence_push(seq, svara_phoneme_event_new(SVARA_PH_VOWEL_A, 0.2, SVARA_STRESS_PRIMARY));
+svara_sequence_push(seq, svara_phoneme_event_new(SVARA_PH_NASAL_N, 0.1, SVARA_STRESS_UNSTRESSED));
+svara_sequence_push(seq, svara_phoneme_event_new(SVARA_PH_VOWEL_I, 0.2, SVARA_STRESS_UNSTRESSED));
+var buf_s = dhvani_vsynth_render_sequence(seq, voice_s, 44100);
+assert(buf_s != 0, "seq render ok");
+assert(dhvani_buffer_frames(buf_s) > 0, "frames > 0");
+assert(f64_gt(dhvani_buffer_rms(buf_s), 0), "rms > 0");
+
+# ---- voice_profiles ----
+test_group("voice_profiles");
+var male = svara_voice_new_male();
+var female = svara_voice_new_female();
+var child = svara_voice_new_child();
+assert(f64_gt(SvVoiceProfile_base_f0(female), SvVoiceProfile_base_f0(male)), "female f0 > male f0");
+assert(f64_gt(SvVoiceProfile_base_f0(child), SvVoiceProfile_base_f0(female)), "child f0 > female f0");
+assert(f64_gt(SvVoiceProfile_base_f0(male), 0), "male f0 > 0");
+
+# ---- glottal_source_renders ----
+test_group("glottal_source_renders");
+var voice_g = svara_voice_new_male();
+var source_g = svara_voice_create_glottal_source(voice_g, f64_from(44100));
+assert(svara_is_err(source_g) == 0, "glottal source ok");
+var tract_g = svara_tract_new(f64_from(44100));
+var buf_g = dhvani_vsynth_render_vocal_tract(source_g, tract_g, 4410, 44100);
+assert_eq(dhvani_buffer_frames(buf_g), 4410, "frames 4410");
+assert_eq(vs_all_finite(buf_g), 1, "all finite");
+
+# ---- vocal_effort_variants ----
+test_group("vocal_effort_variants");
+var eff_params = svara_effort_params(SVARA_EFFORT_NORMAL);
+assert(f64_ge(SvEffortParams_breathiness(eff_params), 0), "breathiness >= 0");
+
+# ---- quality_lod_levels ----
+test_group("quality_lod_levels");
+assert_eq(svara_quality_max_formants(SVARA_QUALITY_FULL), 5, "full max_formants 5");
+assert_eq(svara_quality_max_formants(SVARA_QUALITY_REDUCED), 3, "reduced max_formants 3");
+assert_eq(svara_quality_max_formants(SVARA_QUALITY_MINIMAL), 2, "minimal max_formants 2");
+assert_eq(svara_quality_use_nasal_coupling(SVARA_QUALITY_FULL), 1, "full nasal coupling");
+assert_eq(svara_quality_use_nasal_coupling(SVARA_QUALITY_MINIMAL), 0, "minimal no nasal coupling");
+
+# ---- tone_accessible ----
+test_group("tone_accessible");
+var contour = svara_tone_to_contour(SVARA_TONE_RISING);
+assert(vec_len(SvProsodyContour_f0_points(contour)) > 0, "f0_points not empty");
+
+# ---- nasalization_detection ----
+test_group("nasalization_detection");
+var phon_list = vec_new();
+vec_push(phon_list, SVARA_PH_VOWEL_A);
+vec_push(phon_list, SVARA_PH_NASAL_N);
+vec_push(phon_list, SVARA_PH_VOWEL_I);
+var nasalizations = svara_detect_nasalization(phon_list);
+assert_eq(vec_len(nasalizations), 3, "3 nasalizations");
+assert(vec_get(nasalizations, 0) != 0, "vowel before nasal has nasalization");
+
+# ---- phoneme_spectral_tilt_values ----
+test_group("phoneme_spectral_tilt_values");
+var tilt_a = svara_phoneme_spectral_tilt(SVARA_PH_VOWEL_A);
+var tilt_s = svara_phoneme_spectral_tilt(SVARA_PH_FRIC_S);
+assert_eq(dhvani_is_finite(tilt_a), 1, "tilt_a finite");
+assert_eq(dhvani_is_finite(tilt_s), 1, "tilt_s finite");
+
+# ---- height_adjusted_amplitudes_values ----
+test_group("height_adjusted_amplitudes_values");
+var amps = alloc(5 * 8);
+svara_phoneme_height_adjusted_amplitudes(SVARA_PH_VOWEL_A, amps);
+var amps_ok = 1;
+var ai = 0;
+while (ai < 5) {
+    if (dhvani_is_finite(load64(amps + ai * 8)) == 0) { amps_ok = 0; }
+    ai = ai + 1;
+}
+assert_eq(amps_ok, 1, "amps all finite");
+
+# ---- voice_onset_time_accessible ----
+test_group("voice_onset_time_accessible");
+var vot = svara_vot_for_plosive(SVARA_PH_PLOSIVE_T);
+assert(f64_gt(SvVOT_closure_fraction(vot), 0), "closure_fraction > 0");
+assert(f64_gt(SvVOT_burst_fraction(vot), 0), "burst_fraction > 0");
+
+# ---- synthesis_context_creation ----
+test_group("synthesis_context_creation");
+var voice_ctx = svara_voice_new_male();
+var ctx = svara_synthctx_new(voice_ctx, f64_from(44100));
+assert(svara_is_err(ctx) == 0, "ctx ok");
+assert(f64_gt(svara_synthctx_sample_rate(ctx), 0), "sample_rate > 0");
+
+# ---- synthesize_phoneme_nasalized_works ----
+test_group("synthesize_phoneme_nasalized_works");
+var voice_nz = svara_voice_new_male();
+var nasal = svara_nasalization_for_nasal(SVARA_PH_NASAL_N);
+assert(nasal != 0, "nasalization ok");
+var samples_nz = svara_phoneme_synthesize_nasalized(SVARA_PH_VOWEL_A, voice_nz, f64_from(44100), 0.1, nasal);
+assert(svara_is_err(samples_nz) == 0, "nasalized synth ok");
+assert(vec_len(samples_nz) > 0, "samples not empty");
+assert_eq(vs_vec_all_finite(samples_nz), 1, "samples all finite");
+
+# ---- synthesis_pool_render ----
+test_group("synthesis_pool_render");
+var voice_pool = svara_voice_new_male();
+var pool = svara_pool_new(voice_pool, f64_from(44100));
+assert(svara_is_err(pool) == 0, "pool ok");
+var pool_n = svara_pool_render(pool, SVARA_PH_VOWEL_A, voice_pool, 0.1);
+assert(svara_is_err(pool_n) == 0, "pool render ok");
+assert(pool_n > 0, "samples not empty");
+var pool_buf = svara_pool_buffer(pool);
+var pool_ok = 1;
+var pi = 0;
+while (pi < pool_n) {
+    if (dhvani_is_finite(load64(pool_buf + pi * 8)) == 0) { pool_ok = 0; }
+    pi = pi + 1;
+}
+assert_eq(pool_ok, 1, "pool samples all finite");
+assert_eq(svara_pool_render_count(pool), 1, "render_count 1");
+
+# ---- synthesis_pool_with_capacity ----
+test_group("synthesis_pool_with_capacity");
+var voice_cap = svara_voice_new_male();
+var pool_cap = svara_pool_with_capacity(voice_cap, f64_from(44100), 0.5);
+assert(svara_is_err(pool_cap) == 0, "pool_cap ok");
+assert(svara_pool_peak_samples(pool_cap) >= f64_to(f64_mul(0.5, f64_from(44100))), "peak_samples >= 0.5*44100");
+
+# ---- batch_renderer_render ----
+test_group("batch_renderer_render");
+var voice_br = svara_voice_new_male();
+var renderer = svara_batch_new(voice_br, f64_from(44100));
+assert(svara_is_err(renderer) == 0, "renderer ok");
+svara_batch_push(renderer, SVARA_PH_VOWEL_A, 0.1, SVARA_STRESS_PRIMARY);
+svara_batch_push(renderer, SVARA_PH_NASAL_N, 0.06, SVARA_STRESS_UNSTRESSED);
+svara_batch_push(renderer, SVARA_PH_VOWEL_I, 0.1, SVARA_STRESS_PRIMARY);
+var output = svara_batch_render_all(renderer);
+assert(svara_is_err(output) == 0, "render_all ok");
+assert(vec_len(SvRenderOutput_samples(output)) > 0, "samples not empty");
+assert_eq(vs_vec_all_finite(SvRenderOutput_samples(output)), 1, "samples all finite");
+assert_eq(SvRenderProgress_total_phonemes(SvRenderOutput_progress(output)), 3, "total_phonemes 3");
+assert_eq(SvRenderProgress_phoneme_index(SvRenderOutput_progress(output)), 3, "phoneme_index 3");
+
+# ---- batch_renderer_with_progress ----
+test_group("batch_renderer_with_progress");
+var voice_bp = svara_voice_new_female();
+var renderer_p = svara_batch_new(voice_bp, f64_from(44100));
+assert(svara_is_err(renderer_p) == 0, "renderer_p ok");
+svara_batch_push(renderer_p, SVARA_PH_VOWEL_E, 0.08, SVARA_STRESS_PRIMARY);
+svara_batch_push(renderer_p, SVARA_PH_FRIC_S, 0.05, SVARA_STRESS_UNSTRESSED);
+var pcount = alloc(8);
+store64(pcount, 0);
+var output_p = svara_batch_render_with_progress(renderer_p, &vs_progress_cb, pcount);
+assert(svara_is_err(output_p) == 0, "render_with_progress ok");
+assert_eq(load64(pcount), 2, "progress_count 2");
+assert(vec_len(SvRenderOutput_samples(output_p)) > 0, "samples not empty");
+
+# ---- render_progress_fraction ----
+test_group("render_progress_fraction");
+var prog = svara_render_progress_new(5, 10, 22050);
+assert(f64_lt(f64_abs(f64_sub(svara_render_progress_fraction(prog), 0.5)), 0.0001), "fraction ~ 0.5");
+
+# ---- trajectory_planner_basic ----
+test_group("trajectory_planner_basic");
+var voice_tp = svara_voice_new_male();
+var tp_phon = vec_new();
+vec_push(tp_phon, SVARA_PH_VOWEL_A);
+vec_push(tp_phon, SVARA_PH_NASAL_N);
+vec_push(tp_phon, SVARA_PH_VOWEL_I);
+var tp_dur = vec_new();
+vec_push(tp_dur, 0.1);
+vec_push(tp_dur, 0.06);
+vec_push(tp_dur, 0.1);
+var plan = svara_trajectory_plan(tp_phon, tp_dur, voice_tp, f64_from(44100));
+assert(svara_trajectory_total_samples(plan) > 0, "total_samples > 0");
+assert(svara_trajectory_num_keypoints(plan) >= 3, "num_keypoints >= 3");
+var ts = svara_trajectory_total_samples(plan);
+var si = 0;
+var traj_ok = 1;
+while (si < ts) {
+    var target = svara_trajectory_formants_at(plan, si);
+    if (dhvani_is_finite(SvVowelTarget_f1(target)) == 0) { traj_ok = 0; }
+    if (dhvani_is_finite(SvVowelTarget_f2(target)) == 0) { traj_ok = 0; }
+    if (f64_gt(SvVowelTarget_f1(target), 0) == 0) { traj_ok = 0; }
+    si = si + 441;
+}
+assert_eq(traj_ok, 1, "formants finite and f1 > 0 throughout");
+
+# ---- trajectory_planner_speaking_rate ----
+test_group("trajectory_planner_speaking_rate");
+var voice_sr = svara_voice_new_male();
+var sr_phon = vec_new();
+vec_push(sr_phon, SVARA_PH_VOWEL_A);
+vec_push(sr_phon, SVARA_PH_VOWEL_I);
+var sr_dur = vec_new();
+vec_push(sr_dur, 0.1);
+vec_push(sr_dur, 0.1);
+var plan_sr = svara_trajectory_plan(sr_phon, sr_dur, voice_sr, f64_from(44100));
+var kp_before = SvFormantKeypoint_resistance(vec_get(svara_trajectory_keypoints(plan_sr), 1));
+svara_trajectory_apply_speaking_rate(plan_sr, F64_TWO);
+var kp_after = SvFormantKeypoint_resistance(vec_get(svara_trajectory_keypoints(plan_sr), 1));
+assert(f64_lt(kp_after, kp_before), "faster speech reduces resistance");
+
+# ---- formant_keypoint_accessible ----
+test_group("formant_keypoint_accessible");
+var voice_fk = svara_voice_new_male();
+var fk_phon = vec_new();
+vec_push(fk_phon, SVARA_PH_VOWEL_A);
+var fk_dur = vec_new();
+vec_push(fk_dur, 0.1);
+var plan_fk = svara_trajectory_plan(fk_phon, fk_dur, voice_fk, f64_from(44100));
+var kps = svara_trajectory_keypoints(plan_fk);
+assert(vec_len(kps) > 0, "keypoints not empty");
+assert(f64_ge(SvFormantKeypoint_resistance(vec_get(kps, 0)), 0), "resistance >= 0");
+assert(f64_gt(SvVowelTarget_f1(SvFormantKeypoint_target(vec_get(kps, 0))), 0), "kp f1 > 0");
+
+var rc = assert_summary();
+syscall(60, rc);

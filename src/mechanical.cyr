@@ -1,0 +1,48 @@
+# mechanical.cyr -- ghurni mechanical-sound engines bridged to dhvani's AudioBuffer.
+# Ported from rust-old/src/mechanical/mod.rs. The Rust module is `pub use ghurni::...`
+# re-exports (no-ops in Cyrius's flat namespace: consumers call ghurni's bare
+# symbols -- ghurni_engine_new / ghurni_motor_new / ... -- directly) plus three
+# render bridges. Only the bridges carry over.
+#
+# Requires the ghurni bundle (+ its deps sakshi -> hisab -> goonj -> naad) to be
+# included before this unit, in dependency order (see port-audit.md Wave F note).
+#
+# The Rust `render_mechanical<S: Synthesizer>` is generic over the Synthesizer
+# trait (process_block + set_rpm). In Cyrius that generic dispatch becomes a
+# fn-ptr pair: `process_fp(state, out)` fills a pre-sized vec, `setrpm_fp(state,
+# rpm)` retargets the RPM. Each ghurni type's `*_process_block` / `*_set_rpm` fn
+# is a valid callback as-is (pass `&ghurni_motor_process_block` + the state ptr).
+
+# render_mechanical: fill a `frames`-length mono buffer via process_fp(state,out),
+# then assemble a 1-channel interleaved AudioBuffer (silence fallback on failure,
+# matching the Rust unwrap_or_else).
+fn dhvani_mech_render(process_fp, state, frames, sample_rate) {
+    var samples = vec_new();
+    var i = 0;
+    while (i < frames) { vec_push(samples, 0); i = i + 1; }
+    fncall2(process_fp, state, samples);
+    var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+    if (buf == 0) {
+        var sr = sample_rate;
+        if (sr < 1) { sr = 1; }
+        return dhvani_buffer_silence(1, frames, sr);
+    }
+    return buf;
+}
+
+# render_mechanical_at_rpm: set RPM via setrpm_fp(state,rpm), then render.
+fn dhvani_mech_render_at_rpm(process_fp, setrpm_fp, state, rpm, frames, sample_rate) {
+    fncall2(setrpm_fp, state, rpm);
+    return dhvani_mech_render(process_fp, state, frames, sample_rate);
+}
+
+# render_engine(engine, rpm, load, sample_rate, duration) -> AudioBuffer or
+# DHVANI_ERR_DSP. Calls ghurni_engine_synthesize (returns vec<f64> or GH_ERR_*),
+# maps a synthesis error / buffer-construction failure to DHVANI_ERR_DSP.
+fn dhvani_mech_render_engine(engine, rpm, load, sample_rate, duration) {
+    var samples = ghurni_engine_synthesize(engine, rpm, load, duration);
+    if (ghurni_is_err(samples) == 1) { return DHVANI_ERR_DSP; }
+    var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+    if (buf == 0) { return DHVANI_ERR_DSP; }
+    return buf;
+}

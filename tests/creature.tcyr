@@ -1,0 +1,77 @@
+# creature.tcyr -- parity tests for src/creature.cyr.
+# Ported one-for-one from the 6 #[test] blocks in rust-old/src/creature/mod.rs
+# (no serde/Display tests to drop). Drives prani's creature vocal synthesis
+# through dhvani's render bridges. Sibling bundles are included in dependency
+# order (sakshi -> hisab -> goonj -> naad -> svara -> prani; prani externalizes
+# svara + sakshi so they precede it), then dhvani's own modules.
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "lib/prani.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/creature.cyr"
+
+# all samples finite?
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(s, i)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+alloc_init();
+
+# ---- wolf_howl ----
+test_group("wolf_howl");
+var wvoice = crvoice_new(PRANI_SP_WOLF);
+var wbuf = dhvani_creature_render_vocalization(wvoice, PRANI_VOC_HOWL, 44100, 0.5);
+assert(dhvani_buffer_frames(wbuf) > 0, "wolf frames > 0");
+assert(f64_gt(dhvani_buffer_rms(wbuf), 0), "wolf rms > 0");
+assert_eq(all_finite(wbuf), 1, "wolf all finite");
+
+# ---- cat_purr ----
+test_group("cat_purr");
+var cvoice = crvoice_new(PRANI_SP_CAT);
+var cbuf = dhvani_creature_render_vocalization(cvoice, PRANI_VOC_PURR, 44100, 0.5);
+assert(dhvani_buffer_frames(cbuf) > 0, "cat frames > 0");
+assert_eq(all_finite(cbuf), 1, "cat all finite");
+
+# ---- dragon_roar_with_intent ----
+test_group("dragon_roar_with_intent");
+var dvoice = crvoice_new(PRANI_SP_DRAGON);
+var dbuf = dhvani_creature_render_vocalization_with_intent(dvoice, PRANI_VOC_ROAR, PRANI_INTENT_THREAT, 44100, 0.5);
+assert(dhvani_buffer_frames(dbuf) > 0, "dragon frames > 0");
+assert(f64_gt(dhvani_buffer_rms(dbuf), 0), "dragon rms > 0");
+
+# ---- songbird_chirp ----
+test_group("songbird_chirp");
+var svoice = crvoice_new(PRANI_SP_SONGBIRD);
+var sbuf = dhvani_creature_render_vocalization(svoice, PRANI_VOC_CHIRP, 44100, 0.3);
+assert(dhvani_buffer_frames(sbuf) > 0, "songbird frames > 0");
+
+# ---- species_supports_vocalization ----
+test_group("species_supports_vocalization");
+assert(species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_HOWL) != 0, "wolf howl");
+assert(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HISS) != 0, "snake hiss");
+assert(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_STRIDULATE) != 0, "cricket stridulate");
+
+# ---- voice_builder ----
+test_group("voice_builder");
+var lvoice = crvoice_new(PRANI_SP_LION);
+lvoice = crvoice_with_size(lvoice, 1.3);
+lvoice = crvoice_with_breathiness(lvoice, 0.2);
+var lbuf = dhvani_creature_render_vocalization(lvoice, PRANI_VOC_ROAR, 44100, 0.5);
+assert(f64_gt(dhvani_buffer_rms(lbuf), 0), "lion rms > 0");
+
+var rc = assert_summary();
+syscall(60, rc);

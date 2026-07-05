@@ -50,18 +50,17 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**49 / 64 modules ported** — Waves A+B+C+D+E complete; **Wave F in flight**
-(synthesis + sampler landed; the sibling-bundle consumption pattern is solved).
-**1083 parity assertions** across 50 suites (+ 1 scaffold smoke). Portable now:
-~55 across A–G. Deferred: 9.
+**54 / 64 modules ported** — **Waves A+B+C+D+E+F COMPLETE** (foundation → DSP →
+analysis → MIDI/graph → synthesis stack). **1200 parity assertions** across 55
+suites (+ 1 scaffold smoke). Deferred: 9 (blocked deps + platform).
 
-**Wave F consumption pattern (solved this cycle):** the 7 synthesis-stack siblings
-+ sakshi + hisab + shravan are vendored into `lib/` (committed) and included **in
-dependency order** (`sakshi → hisab → goonj → naad → shravan → svara → ghurni →
-garjan → prani`) — NOT wired as `[deps]` (which mis-orders cross-bundle types and
-force-includes the 136 KB `bayan`, overflowing the compiler's identifier cap).
-Every dist externalizes its deps (nidhi→naad+shravan, naad→goonj, …); the consumer
-assembles the full set. See the manifest and [`port-audit.md`](port-audit.md).
+**Wave F consumption pattern:** the 7 synthesis-stack siblings + sakshi + hisab +
+shravan are vendored into `lib/` (committed) and included **in dependency order**
+(`sakshi → hisab → goonj → naad → shravan → svara → ghurni → garjan → prani`) —
+NOT wired as `[deps]` (which mis-orders cross-bundle types and force-includes the
+136 KB `bayan`, overflowing the compiler's identifier cap). Every dist externalizes
+its deps (nidhi→naad+shravan, naad→goonj, …); the consumer assembles the full set.
+See the manifest and [`port-audit.md`](port-audit.md).
 
 | Layer / Wave | Modules | Status |
 |--------------|---------|--------|
@@ -70,7 +69,7 @@ assembles the full set. See the manifest and [`port-audit.md`](port-audit.md).
 | C — DSP dependents (dsp) | ✅ compressor, limiter, delay, reverb, eq, deesser, graphic_eq | ✅ |
 | D — Analysis (analysis) | ✅ waveform, zcr, analysis, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ✅ |
 | E — MIDI/meter/capture/graph | ✅ midi, voice, midi_routing, midi_v2, translate, meter, capture, record, graph | ✅ |
-| F — Synthesis stack | ✅ synthesis(naad), sampler(nidhi) · ⬜ voice_synth(svara), creature(prani), environment(garjan), mechanical(ghurni), acoustics(goonj) | 🟡 |
+| F — Synthesis stack | ✅ synthesis(naad), sampler(nidhi), voice_synth(svara), creature(prani), environment(garjan), mechanical(ghurni), acoustics(goonj) | ✅ |
 | G — Assembly | lib facade, dist/dhvani.cyr bundle, tests/{mod,proptest}, benches | ⬜ |
 | ⛔ Blocked (dep) | g2p (shabda), voice_synth/bhava_bridge (bhava) | deferred |
 | ⛔ Blocked (platform) | simd/{x86,aarch64}, ffi, capture/pw | deferred |
@@ -87,11 +86,12 @@ the serde_tests suite and the blocked/platform modules).
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). Continue **Wave F** — port the 5 remaining
-wrappers using the established ordered-include pattern: `voice_synth` (svara),
-`creature` (prani), `environment` (garjan), `mechanical` (ghurni), `acoustics`
-(goonj + dhvani ConvolutionReverb). `voice_synth/bhava_bridge` + `g2p` stay
-dep-blocked (bhava/shabda).
+See [`roadmap.md`](roadmap.md). **Wave G — assembly**: the `lib` facade →
+`[lib] modules` distlib order, assemble `dist/dhvani.cyr` (bundle only what's
+reachable — keep the shipped surface auditable), integration tests, and re-enable
+the deferred `ops::normalize_to_lufs` + `resample` sine tests (now unblocked by
+fft/loudness). `voice_synth/bhava_bridge` + `g2p` stay dep-blocked (bhava/shabda);
+`ffi`, `simd/{x86,aarch64}`, `capture/pw` stay platform-blocked.
 Then **Wave G** — lib facade + `dist/dhvani.cyr` bundle + integration tests, and
 re-enable the deferred `ops::normalize_to_lufs` + `resample` sine tests (now
 unblocked by fft/loudness). (The abaco↔naad `amplitude_to_db` collision is already

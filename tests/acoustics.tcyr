@@ -1,0 +1,162 @@
+# acoustics.tcyr -- parity tests for src/acoustics.cyr.
+# Ported one-for-one from the 9 non-serde #[test] blocks in
+# rust-old/src/acoustics/mod.rs. Drives goonj room-sim / FDN / ambisonics /
+# WAV through dhvani's bridge + ConvolutionReverb. Sibling bundles in
+# dependency order (sakshi -> hisab -> goonj) then dhvani's own modules that
+# ConvolutionReverb needs (error -> simd -> buffer -> fft -> analysis ->
+# convolution) then acoustics.
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/fft.cyr"
+include "src/analysis.cyr"
+include "src/convolution.cyr"
+include "src/acoustics.cyr"
+
+# A constant-1.0 mono vec of length n.
+fn ones_vec(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, 1.0); i = i + 1; }
+    return v;
+}
+
+# A constant-value mono vec of length n.
+fn const_vec(n, val) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, val); i = i + 1; }
+    return v;
+}
+
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(s, i)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+# IrConfig with default fields but overridden diffuse-ray count + max-time.
+fn cfg(num_diffuse_rays, max_time_seconds) {
+    var c = ir_config_default();
+    IrConfig_set_num_diffuse_rays(c, num_diffuse_rays);
+    IrConfig_set_max_time_seconds(c, max_time_seconds);
+    return c;
+}
+
+alloc_init();
+
+# ---- convolution_from_ir ----
+test_group("convolution_from_ir");
+var ir1 = impulse_response_new(vec_new(), 44100, 0.5);
+vec_push(ImpulseResponse_samples(ir1), 1.0);
+vec_push(ImpulseResponse_samples(ir1), 0.5);
+vec_push(ImpulseResponse_samples(ir1), 0.25);
+vec_push(ImpulseResponse_samples(ir1), 0.125);
+var rev1 = dhvani_acoustics_convolution_from_ir(ir1, 0.5);
+var buf1 = dhvani_buffer_from_interleaved(ones_vec(2048), 1, 44100);
+dhvani_conv_process(rev1, buf1);
+assert_eq(all_finite(buf1), 1, "convolution_from_ir all finite");
+
+# ---- fdn_processing ----
+test_group("fdn_processing");
+var fcfg = fdn_config_for_room(f64_from(10), f64_from(8), f64_from(3), 1.2, 44100);
+var fdn2 = fdn_new(fcfg);
+var buf2 = dhvani_buffer_from_interleaved(const_vec(4096, 0.5), 2, 44100);
+dhvani_acoustics_process_fdn(fdn2, buf2, 0.3);
+assert_eq(all_finite(buf2), 1, "fdn_processing all finite");
+
+# ---- dhvani_ir_generation ----
+test_group("dhvani_ir_generation");
+var room3 = acoustic_room_shoebox(f64_from(10), f64_from(8), f64_from(3), acoustic_material_concrete());
+var cfg3 = cfg(50, 0.1);
+var dir3 = dhvani_acoustics_generate_ir(f64_from(3), 1.5, f64_from(4), f64_from(7), 1.5, f64_from(4), room3, cfg3);
+assert(vec_len(ImpulseResponse_samples(dhvani_ir_ir(dir3))) > 0, "ir samples non-empty");
+assert(f64_gt(dhvani_ir_room_volume(dir3), 0), "room volume > 0");
+assert_eq(dhvani_ir_has_multiband(dir3), 1, "multiband present");
+
+# ---- dhvani_ir_to_convolution ----
+test_group("dhvani_ir_to_convolution");
+var room4 = acoustic_room_shoebox(f64_from(5), f64_from(4), f64_from(3), acoustic_material_wood());
+var cfg4 = cfg(20, 0.05);
+var dir4 = dhvani_acoustics_generate_ir(f64_from(2), 1.5, f64_from(2), f64_from(3), 1.5, f64_from(2), room4, cfg4);
+var rev4 = dhvani_acoustics_convolution_from_dhvani_ir(dir4, 0.3);
+var buf4 = dhvani_buffer_from_interleaved(const_vec(4096, 0.5), 1, 44100);
+dhvani_conv_process(rev4, buf4);
+assert_eq(all_finite(buf4), 1, "dhvani_ir_to_convolution all finite");
+
+# ---- multiband_convolution ----
+test_group("multiband_convolution");
+var room5 = acoustic_room_shoebox(f64_from(5), f64_from(4), f64_from(3), acoustic_material_concrete());
+var cfg5 = cfg(20, 0.05);
+var dir5 = dhvani_acoustics_generate_ir(f64_from(2), 1.5, f64_from(2), f64_from(3), 1.5, f64_from(2), room5, cfg5);
+var mb5 = dhvani_ir_multiband(dir5);
+assert(mb5 != 0, "multiband present");
+var buf5 = dhvani_buffer_from_interleaved(const_vec(4096, 0.5), 1, 44100);
+dhvani_acoustics_convolve_multiband(buf5, mb5, 0.3);
+assert_eq(all_finite(buf5), 1, "multiband_convolution all finite");
+
+# ---- bformat_decode_stereo ----
+test_group("bformat_decode_stereo");
+var bf6 = new_bformat_ir(1024, 44100);
+var buf6 = dhvani_acoustics_decode_bformat_stereo(bf6);
+assert(buf6 != 0, "decode succeeded");
+assert_eq(dhvani_buffer_channels(buf6), 2, "channels 2");
+assert_eq(dhvani_buffer_frames(buf6), 1024, "frames 1024");
+
+# ---- wav_export ----
+test_group("wav_export");
+var ir7 = impulse_response_new(vec_new(), 44100, 0.1);
+vec_push(ImpulseResponse_samples(ir7), 1.0);
+vec_push(ImpulseResponse_samples(ir7), 0.5);
+vec_push(ImpulseResponse_samples(ir7), 0);
+vec_push(ImpulseResponse_samples(ir7), f64_neg(0.5));
+var wav7 = dhvani_acoustics_export_ir_wav(ir7);
+assert(WavBytes_len(wav7) > 0, "wav data non-empty");
+var data7 = WavBytes_data(wav7);
+# WAV header starts with "RIFF" = bytes 82, 73, 70, 70.
+assert_eq(load8(data7 + 0), 82, "byte 0 = R");
+assert_eq(load8(data7 + 1), 73, "byte 1 = I");
+assert_eq(load8(data7 + 2), 70, "byte 2 = F");
+assert_eq(load8(data7 + 3), 70, "byte 3 = F");
+
+# ---- room_presets_valid ----
+test_group("room_presets_valid");
+var p_studio = dhvani_acoustics_preset_studio();
+var p_rehearsal = dhvani_acoustics_preset_rehearsal_room();
+var p_concert = dhvani_acoustics_preset_concert_hall();
+var p_bath = dhvani_acoustics_preset_bathroom();
+var p_cathedral = dhvani_acoustics_preset_cathedral();
+var p_outdoor = dhvani_acoustics_preset_outdoor();
+assert(f64_gt(room_geometry_volume_shoebox(AcousticRoom_geometry(p_studio)), 0), "studio volume > 0");
+assert(f64_gt(room_geometry_volume_shoebox(AcousticRoom_geometry(p_rehearsal)), 0), "rehearsal volume > 0");
+assert(f64_gt(room_geometry_volume_shoebox(AcousticRoom_geometry(p_concert)), 0), "concert volume > 0");
+assert(f64_gt(room_geometry_volume_shoebox(AcousticRoom_geometry(p_bath)), 0), "bathroom volume > 0");
+assert(f64_gt(room_geometry_volume_shoebox(AcousticRoom_geometry(p_cathedral)), 0), "cathedral volume > 0");
+assert(f64_gt(room_geometry_volume_shoebox(AcousticRoom_geometry(p_outdoor)), 0), "outdoor volume > 0");
+
+# ---- preset_ir_generation ----
+test_group("preset_ir_generation");
+var room9 = dhvani_acoustics_preset_bathroom();
+var cfg9 = cfg(10, 0.05);
+var dir9 = dhvani_acoustics_generate_ir(1.0, 1.0, 1.0, 1.5, 1.0, 1.0, room9, cfg9);
+assert(vec_len(ImpulseResponse_samples(dhvani_ir_ir(dir9))) > 0, "preset ir samples non-empty");
+var band = 0;
+var rt_ok = 1;
+while (band < NUM_BANDS) {
+    if (f64_gt(dhvani_ir_rt60_band(dir9, band), 0) == 0) { rt_ok = 0; }
+    band = band + 1;
+}
+assert_eq(rt_ok, 1, "all bathroom rt60 bands > 0");
+
+var rc = assert_summary();
+syscall(60, rc);

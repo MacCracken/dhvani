@@ -332,7 +332,7 @@ Now-unblocked (fft/loudness available), to re-enable during Wave G assembly:
 `buffer/ops::normalize_to_lufs` (needs loudness `measure_r128`) + `resample`
 `sine_frequency_preserved` (needs `spectrum_dft`).
 
-**Wave F (synthesis stack) — in flight (49/64, 1083 assertions):**
+**Wave F (synthesis stack) — COMPLETE (54/64, 1200 assertions):**
 
 *Sibling-bundle consumption — the hard part, solved this cycle.* The 7 wrapped
 siblings each re-export a sibling engine; in Cyrius the `pub use` re-exports are
@@ -371,9 +371,28 @@ Ported:
   (nidhi externalizes shravan for `STREAM_EVT_*`/`wav_*` — supplied by the chain,
   not a nidhi defect; keeping nidhi consistent with the ecosystem's dep model).
 
-Remaining unblocked: `voice_synth`(svara), `creature`(prani), `environment`
-(garjan), `mechanical`(ghurni), `acoustics`(goonj). `voice_synth/bhava_bridge` +
-`g2p` stay dep-blocked (bhava/shabda).
+- ✅ `voice_synth`(svara) — 21 tests / 61 assertions. 3 render bridges
+  (render_sequence/render_phoneme → null-sentinel on `svara_is_err`; render_vocal_tract
+  → direct per-frame `svara_glottal_next_sample`+`svara_tract_process_sample`). The
+  one real callback (batch_render_with_progress) → fn-ptr via `callptr`. Drops the
+  dep-blocked `voice_synth/bhava_bridge` (bhava).
+- ✅ `creature`(prani) — 6 tests / 12 assertions (wolf/cat/dragon/songbird + species
+  + voice-builder). render_vocalization → sentinel on negative `PRANI_ERR_*`.
+- ✅ `environment`(garjan) — 6 tests / 10 assertions. `render_environment<S>` +
+  `render_block` → **trait→fn-ptr** (`fncall2(synth_fp, state, …)`), render_impact concrete.
+- ✅ `mechanical`(ghurni) — 5 tests / 10 assertions. `render_mechanical<S>` /
+  `render_mechanical_at_rpm` → fn-ptr (process_block + set_rpm), render_engine concrete.
+- ✅ `acoustics`(goonj) — 9 tests / 24 assertions. Richest bridges: generate_ir
+  (hvec3), goonj IR→dhvani `ConvolutionReverb`, convolve_multiband, real per-frame
+  `process_fdn` (mono-sum→FDN→wet/dry), cardioid B-format decode (L=W+Y, R=W−Y),
+  WAV export (RIFF-header byte-checked), 6 room presets (dims match oracle).
+
+Ported via a 10-agent workflow (5 port → 5 adversarial-verify), then independently
+re-swept (55 suites green on cycc 6.4.5) + spot-reviewed (acoustics bridges real,
+preset dims match Rust, no weakened/tautological assertions).
+
+Wave F blocked/deferred: `voice_synth/bhava_bridge` + `g2p` (dep: bhava/shabda);
+`ffi`, `simd/{x86,aarch64}`, `capture/pw` (platform).
 
 ### Cyrius idioms confirmed (this port)
 

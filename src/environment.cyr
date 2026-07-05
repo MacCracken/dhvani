@@ -1,0 +1,62 @@
+# environment.cyr -- garjan environmental synthesis bridged to dhvani's AudioBuffer.
+# Ported from rust-old/src/environment/mod.rs. The Rust module is mostly
+# `pub use garjan::...` re-exports (no-ops in Cyrius's flat namespace: consumers
+# call garjan's bare symbols -- rain_new / thunder_new / impact_synthesize / ...
+# -- directly) plus three render bridges. Only the bridges carry over.
+#
+# Depends on: buffer.cyr (AudioBuffer) + garjan (via ordered include; see
+# docs/development/port-audit.md Wave F include order). The Rust generic
+# `render_environment<S: EnvironmentSynth>` -> fn-ptr + opaque state: the caller
+# passes a `synthesize(state, duration)` fn (e.g. &rain_synthesize) that returns
+# an interleaved-mono samples vec (or a negative garjan error code). render_impact
+# and render_block are concrete (impact_synthesize / process_block).
+
+# render_environment: call synth_fp(state, duration) to get a mono samples vec,
+# then wrap it in an AudioBuffer. Returns a negative garjan error code if the
+# synthesizer failed (matches the Rust map_err), or a silence fallback if buffer
+# construction fails.
+fn dhvani_env_render_environment(synth_fp, state, sample_rate, duration) {
+    var samples = fncall2(synth_fp, state, duration);
+    if (garjan_is_err(samples) == 1) { return samples; }
+    var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+    if (buf == 0) {
+        var sr = sample_rate;
+        if (sr < 1) { sr = 1; }
+        return dhvani_buffer_silence(1, vec_len(samples), sr);
+    }
+    return buf;
+}
+
+# render_impact: synthesize a one-shot impact of the given type, wrap in an
+# AudioBuffer (silence fallback on construction failure, per the Rust map_err).
+fn dhvani_env_render_impact(impact, impact_type, sample_rate) {
+    var samples = impact_synthesize(impact, impact_type);
+    if (garjan_is_err(samples) == 1) { return samples; }
+    var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+    if (buf == 0) {
+        var sr = sample_rate;
+        if (sr < 1) { sr = 1; }
+        return dhvani_buffer_silence(1, vec_len(samples), sr);
+    }
+    return buf;
+}
+
+# render_block: fill a `frames`-length mono buffer via block_fp(state, output),
+# then assemble an interleaved AudioBuffer (silence fallback on failure, matching
+# the Rust unwrap_or_else). block_fp is a process_block fn (e.g. &rain_process_block).
+fn dhvani_env_render_block(block_fp, state, frames, sample_rate) {
+    var samples = vec_new();
+    var i = 0;
+    while (i < frames) {
+        vec_push(samples, 0);
+        i = i + 1;
+    }
+    fncall2(block_fp, state, samples);
+    var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+    if (buf == 0) {
+        var sr = sample_rate;
+        if (sr < 1) { sr = 1; }
+        return dhvani_buffer_silence(1, frames, sr);
+    }
+    return buf;
+}

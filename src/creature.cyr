@@ -1,0 +1,27 @@
+# creature.cyr -- prani creature vocal synthesis bridged to dhvani's AudioBuffer.
+# Ported from rust-old/src/creature/mod.rs. The Rust module is `pub use prani::...`
+# re-exports (no-ops in Cyrius's flat namespace: consumers call prani's bare
+# symbols -- crvoice_new / crvoice_vocalize / species_supports_vocalization / ...
+# -- directly) plus two render bridges. Only the bridges carry over.
+#
+# Depends on: buffer.cyr (AudioBuffer) + prani (via ordered include; prani itself
+# externalizes svara + sakshi, so those precede it -- see port-audit.md Wave F).
+# crvoice_vocalize / crvoice_vocalize_with_intent return a vec ptr of mono
+# samples on success or a NEGATIVE PRANI_ERR_* sentinel on failure; on failure
+# we return 0 (the Rust `?` propagated a NadaError::Dsp).
+
+# render_vocalization: vocalize the voice (mono samples), wrap in a 1-channel
+# AudioBuffer. sample_rate is an integer (u32 in Rust); prani wants it as f64.
+fn dhvani_creature_render_vocalization(voice, vocalization, sample_rate, duration) {
+    var samples = crvoice_vocalize(voice, vocalization, f64_from(sample_rate), duration);
+    if (samples < 0) { return 0; }
+    return dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+}
+
+# render_vocalization_with_intent: same, threading a CallIntent through prani's
+# intent-modifier chain.
+fn dhvani_creature_render_vocalization_with_intent(voice, vocalization, intent, sample_rate, duration) {
+    var samples = crvoice_vocalize_with_intent(voice, vocalization, intent, f64_from(sample_rate), duration);
+    if (samples < 0) { return 0; }
+    return dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+}

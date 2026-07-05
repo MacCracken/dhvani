@@ -1,0 +1,145 @@
+# acoustics.cyr -- goonj room-simulation / FDN / ambisonics bridged into
+# dhvani's AudioBuffer + ConvolutionReverb. Ported from
+# rust-old/src/acoustics/mod.rs. The Rust module is mostly `pub use goonj::...`
+# re-exports (no-ops in Cyrius's flat namespace: consumers call goonj's bare
+# symbols -- acoustic_room_shoebox / fdn_new / new_bformat_ir / write_wav_mono /
+# generate_dhvani_ir / ... -- directly). Only the module's own bridge fns +
+# room presets carry over.
+#
+# Requires (in dependency order before this unit): sakshi -> hisab -> goonj,
+# then dhvani's error -> simd -> buffer -> fft -> analysis -> convolution.
+# goonj IR structs (ImpulseResponse / MultibandIr / DhvaniIr / BFormatIr / Fdn /
+# WavBytes) are goonj symbols; dhvani's ConvolutionReverb lives in convolution.cyr.
+
+# ── Bridge: generate a DhvaniIr from (x,y,z) source/listener positions ──
+# Rust `generate_ir((sx,sy,sz),(lx,ly,lz), room, config)` builds Vec3s and
+# defers to goonj's generate_dhvani_ir. Here we take scalar coords, build
+# hisab hvec3s, and call generate_dhvani_ir.
+#must_use
+fn dhvani_acoustics_generate_ir(sx, sy, sz, lx, ly, lz, room, config) {
+    var src = hvec3_new(sx, sy, sz);
+    var lis = hvec3_new(lx, ly, lz);
+    return generate_dhvani_ir(src, lis, room, config);
+}
+
+# ── Bridge: goonj ImpulseResponse -> dhvani ConvolutionReverb ──
+# ConvolutionReverb::new(&ir.samples, mix, ir.sample_rate).
+#must_use
+fn dhvani_acoustics_convolution_from_ir(ir, mix) {
+    return dhvani_conv_new(ImpulseResponse_samples(ir), mix,
+        ImpulseResponse_sample_rate(ir));
+}
+
+# ── Bridge: DhvaniIr (broadband) -> ConvolutionReverb ──
+#must_use
+fn dhvani_acoustics_convolution_from_dhvani_ir(ir, mix) {
+    return dhvani_acoustics_convolution_from_ir(dhvani_ir_ir(ir), mix);
+}
+
+# ── Multiband convolution ──
+# Collapse the MultibandIr to a broadband IR, build a ConvolutionReverb, and
+# process the buffer in place. Returns DHVANI_ERR_NONE.
+fn dhvani_acoustics_convolve_multiband(buf, multiband, mix) {
+    var broadband = multiband_ir_to_broadband(multiband);
+    var reverb = dhvani_conv_new(ImpulseResponse_samples(broadband), mix,
+        ImpulseResponse_sample_rate(broadband));
+    dhvani_conv_process(reverb, buf);
+    return DHVANI_ERR_NONE;
+}
+
+# ── FDN reverb over an AudioBuffer ──
+# Sum channels to mono per frame, run through the FDN, mix wet back into all
+# channels. mix is clamped to [0,1].
+fn dhvani_acoustics_process_fdn(fdn, buf, mix) {
+    var m = f64_clamp(mix, 0, 1.0);
+    var dry = f64_sub(1.0, m);
+    var ch = DhAudioBuffer_channels(buf);
+    var chmax = ch;
+    if (chmax < 1) { chmax = 1; }
+    var frames = DhAudioBuffer_frames(buf);
+    var samples = DhAudioBuffer_samples(buf);
+
+    var frame = 0;
+    while (frame < frames) {
+        var mono_in = 0;
+        var c = 0;
+        while (c < ch) {
+            mono_in = f64_add(mono_in, vec_get(samples, frame * ch + c));
+            c = c + 1;
+        }
+        mono_in = f64_div(mono_in, f64_from(chmax));
+
+        var wet = fdn_process_sample(fdn, mono_in);
+
+        var c2 = 0;
+        while (c2 < ch) {
+            var idx = frame * ch + c2;
+            var cur = vec_get(samples, idx);
+            vec_set(samples, idx, f64_add(f64_mul(cur, dry), f64_mul(wet, m)));
+            c2 = c2 + 1;
+        }
+        frame = frame + 1;
+    }
+    return 0;
+}
+
+# ── Ambisonics: decode a B-Format IR to a stereo AudioBuffer ──
+# Cardioid decode: L = W + Y, R = W - Y. Returns 0 on length mismatch or
+# buffer construction failure.
+#must_use
+fn dhvani_acoustics_decode_bformat_stereo(bformat) {
+    var w = BFormatIr_w(bformat);
+    var y = BFormatIr_y(bformat);
+    var len = vec_len(w);
+    if (vec_len(y) != len) { return 0; }
+
+    var samples = vec_new();
+    var i = 0;
+    while (i < len) {
+        var wv = vec_get(w, i);
+        var yv = vec_get(y, i);
+        vec_push(samples, f64_add(wv, yv));
+        vec_push(samples, f64_sub(wv, yv));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(samples, 2, BFormatIr_sample_rate(bformat));
+}
+
+# ── WAV export ──
+# Write the IR as a 16-bit PCM mono WAV; returns a goonj WavBytes handle
+# (data pointer + byte length). The Rust version writes into a std::io::Write;
+# in Cyrius write_wav_mono materializes the bytes.
+#must_use
+fn dhvani_acoustics_export_ir_wav(ir) {
+    return write_wav_mono(ImpulseResponse_samples(ir),
+        ImpulseResponse_sample_rate(ir));
+}
+
+# ── Room presets (goonj AcousticRoom + AcousticMaterial) ──
+#must_use
+fn dhvani_acoustics_preset_studio() {
+    return acoustic_room_shoebox(4.5, 3.5, 2.8, acoustic_material_carpet());
+}
+#must_use
+fn dhvani_acoustics_preset_rehearsal_room() {
+    return acoustic_room_shoebox(8.0, 5.0, 3.0, acoustic_material_wood());
+}
+#must_use
+fn dhvani_acoustics_preset_concert_hall() {
+    return acoustic_room_shoebox(f64_from(40), f64_from(25), f64_from(15),
+        acoustic_material_concrete());
+}
+#must_use
+fn dhvani_acoustics_preset_bathroom() {
+    return acoustic_room_shoebox(2.5, f64_from(2), 2.4, acoustic_material_glass());
+}
+#must_use
+fn dhvani_acoustics_preset_cathedral() {
+    return acoustic_room_shoebox(f64_from(60), f64_from(30), f64_from(28),
+        acoustic_material_concrete());
+}
+#must_use
+fn dhvani_acoustics_preset_outdoor() {
+    return acoustic_room_shoebox(f64_from(100), f64_from(100), f64_from(50),
+        acoustic_material_carpet());
+}

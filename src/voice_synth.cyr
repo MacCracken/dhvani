@@ -1,0 +1,60 @@
+# voice_synth.cyr -- svara vocal synthesis bridged to dhvani's AudioBuffer.
+# Ported from rust-old/src/voice_synth/mod.rs. The Rust module is ~150 lines of
+# `pub use svara::...` re-exports (no-ops in Cyrius's flat namespace: consumers
+# call svara's bare symbols -- svara_voice_new_male / svara_phoneme_synthesize /
+# svara_tract_new / ... -- directly) plus three render bridges. Only the bridges
+# carry over. The bhava_bridge.rs submodule is a separate dep-blocked file
+# (bhava) and is NOT ported here.
+#
+# Requires the svara bundle (+ its deps naad/goonj/hisab/sakshi) included before
+# this unit, in dependency order, then dhvani's error -> simd -> buffer:
+#   sakshi -> hisab -> goonj -> naad -> svara -> error -> simd -> buffer.
+# See docs/development/port-audit.md Wave F include order.
+#
+# svara synth fns return either a `vec` of f64 samples (success) or a negative
+# error code (svara_is_err). The bridges convert a success vec into an
+# interleaved mono AudioBuffer, or 0 (null) on synth failure -- mapping the Rust
+# `crate::Result<AudioBuffer>` fallible returns to dhvani's null-handle sentinel.
+
+# render_sequence(sequence, voice, sample_rate) -- render a PhonemeSequence to a
+# mono AudioBuffer. Returns 0 (null) on synth failure or buffer-construction
+# failure (matching the Rust map_err chains that produced NadaError::Dsp).
+#must_use
+fn dhvani_vsynth_render_sequence(sequence, voice, sample_rate) {
+    var samples = svara_sequence_render(sequence, voice, f64_from(sample_rate));
+    if (svara_is_err(samples) == 1) { return 0; }
+    return dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+}
+
+# render_phoneme(phoneme, voice, sample_rate, duration) -- render a single
+# phoneme to a mono AudioBuffer. Returns 0 (null) on synth failure or buffer
+# construction failure.
+#must_use
+fn dhvani_vsynth_render_phoneme(phoneme, voice, sample_rate, duration) {
+    var samples = svara_phoneme_synthesize(phoneme, voice, f64_from(sample_rate), duration);
+    if (svara_is_err(samples) == 1) { return 0; }
+    return dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+}
+
+# render_vocal_tract(source, tract, frames, sample_rate) -- the lowest-level
+# voice bridge: pull `frames` samples from a GlottalSource through a VocalTract,
+# assemble a mono AudioBuffer. Silence fallback on construction failure (matches
+# the Rust unwrap_or_else). No closure needed -- the glottal/tract fns are called
+# directly per frame.
+#must_use
+fn dhvani_vsynth_render_vocal_tract(source, tract, frames, sample_rate) {
+    var samples = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var glottal = svara_glottal_next_sample(source);
+        vec_push(samples, svara_tract_process_sample(tract, glottal));
+        i = i + 1;
+    }
+    var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+    if (buf == 0) {
+        var sr = sample_rate;
+        if (sr < 1) { sr = 1; }
+        return dhvani_buffer_silence(1, frames, sr);
+    }
+    return buf;
+}

@@ -1,0 +1,73 @@
+# environment.tcyr -- parity tests for src/environment.cyr.
+# Ported one-for-one from the 6 #[test] blocks in rust-old/src/environment/mod.rs.
+# The tests drive garjan's environmental synths through dhvani's render bridges.
+# Sibling bundles are included in dependency order (sakshi -> hisab -> goonj ->
+# naad -> garjan), then dhvani's own modules -- see the Wave F note in port-audit.md.
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/garjan.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/environment.cyr"
+
+# all samples finite?
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(s, i)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+alloc_init();
+
+# ---- rain_synthesis ----
+test_group("rain_synthesis");
+var rain = rain_new(RAIN_INTENSITY_HEAVY, f64_from(44100));
+var rbuf = dhvani_env_render_environment(&rain_synthesize, rain, 44100, 0.5);
+assert(dhvani_buffer_frames(rbuf) > 0, "rain frames > 0");
+assert_eq(all_finite(rbuf), 1, "rain all finite");
+
+# ---- wind_synthesis ----
+test_group("wind_synthesis");
+var wind = wind_new(f64_from(15), 0.5, f64_from(44100));
+var wbuf = dhvani_env_render_environment(&wind_synthesize, wind, 44100, 0.5);
+assert(dhvani_buffer_frames(wbuf) > 0, "wind frames > 0");
+assert(f64_gt(dhvani_buffer_rms(wbuf), 0), "wind rms > 0");
+
+# ---- thunder_synthesis ----
+test_group("thunder_synthesis");
+var thunder = thunder_new(f64_from(500), f64_from(44100));
+var tbuf = dhvani_env_render_environment(&thunder_synthesize, thunder, 44100, 0.5);
+assert(dhvani_buffer_frames(tbuf) > 0, "thunder frames > 0");
+
+# ---- fire_synthesis ----
+test_group("fire_synthesis");
+var fire = fire_new(0.7, f64_from(44100));
+var fbuf = dhvani_env_render_environment(&fire_synthesize, fire, 44100, 0.5);
+assert(dhvani_buffer_frames(fbuf) > 0, "fire frames > 0");
+assert_eq(all_finite(fbuf), 1, "fire all finite");
+
+# ---- impact_synthesis ----
+test_group("impact_synthesis");
+var impact = impact_new(MATERIAL_WOOD, f64_from(44100));
+var ibuf = dhvani_env_render_impact(impact, IMPACT_STRIKE, 44100);
+assert(dhvani_buffer_frames(ibuf) > 0, "impact frames > 0");
+
+# ---- render_block_streaming ----
+test_group("render_block_streaming");
+var rain2 = rain_new(RAIN_INTENSITY_LIGHT, f64_from(44100));
+var bbuf = dhvani_env_render_block(&rain_process_block, rain2, 4410, 44100);
+assert_eq(dhvani_buffer_frames(bbuf), 4410, "block frames 4410");
+assert_eq(all_finite(bbuf), 1, "block all finite");
+
+var rc = assert_summary();
+syscall(60, rc);

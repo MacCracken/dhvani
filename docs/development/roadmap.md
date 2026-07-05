@@ -68,16 +68,17 @@
   slots) currently allocates a fresh scratch vec per node cycle — revisit the
   alloc-free-per-block acceptance target in Wave G hardening (parity first).
 
-### M5 — Synthesis stack (Wave F) — feature-gated sibling wrappers — 🟡 IN FLIGHT
+### M5 — Synthesis stack (Wave F) — feature-gated sibling wrappers — ✅ COMPLETE
 
 - **Consumption pattern (solved):** siblings vendored into `lib/` (committed) and
   `include`d in dependency order `sakshi → hisab → goonj → naad → shravan → svara
   → ghurni → garjan → prani` — **not** `[deps]` (mis-orders cross-bundle types +
   force-includes the 136 KB `bayan`, overflowing the LEXID cap). Every dist
   externalizes its deps; the consumer assembles the set. Rationale in `port-audit.md`.
-- ✅ `synthesis/mod`(naad) — 7 tests · ✅ `sampler`(nidhi, via naad+shravan) — 3
-  tests. Remaining: `creature`(prani), `environment`(garjan), `mechanical`(ghurni),
-  `voice_synth/mod`(svara), `acoustics`(goonj).
+- ✅ All 7 wrappers: `synthesis`(naad), `sampler`(nidhi), `voice_synth/mod`(svara),
+  `creature`(prani), `environment`(garjan), `mechanical`(ghurni), `acoustics`(goonj).
+  **47 tests / 117 assertions.** Traits/closures → fn-ptr; goonj IR → dhvani
+  ConvolutionReverb. Dep-blocked: `voice_synth/bhava_bridge` (bhava).
 - Gate: `synthesis`, `voice`, `creature`, `environment`, `mechanical`,
   `sampler`, `acoustics`.
 

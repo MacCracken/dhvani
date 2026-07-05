@@ -1,0 +1,73 @@
+# mechanical.tcyr -- parity tests for src/mechanical.cyr.
+# Ported one-for-one from the 5 #[test] blocks in rust-old/src/mechanical/mod.rs.
+# The tests drive ghurni's mechanical engines through dhvani's render bridges.
+# Sibling bundles are included in dependency order (sakshi -> hisab -> goonj ->
+# naad -> ghurni), then dhvani's own modules -- see the Wave F note in port-audit.md.
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/ghurni.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/mechanical.cyr"
+
+# all samples finite?
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(s, i)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+alloc_init();
+
+# ---- engine_gasoline_renders ----
+# Engine::new(Gasoline, 4, 44100).unwrap(); render_engine(&mut, 3000, 0.5, 44100, 0.5).unwrap()
+test_group("engine_gasoline_renders");
+var engine = ghurni_engine_new(GH_ENGINE_GASOLINE, 4, f64_from(44100));
+var ebuf = dhvani_mech_render_engine(engine, f64_from(3000), 0.5, 44100, 0.5);
+assert(ebuf > 0, "engine render ok");
+assert(dhvani_buffer_frames(ebuf) > 0, "engine frames > 0");
+assert(f64_gt(dhvani_buffer_rms(ebuf), 0), "engine rms > 0");
+assert_eq(all_finite(ebuf), 1, "engine all finite");
+
+# ---- motor_renders ----
+# Motor::new(Brushless, 6, 44100); render_mechanical_at_rpm(&mut, 5000, 22050, 44100)
+test_group("motor_renders");
+var motor = ghurni_motor_new(GH_MOTOR_BRUSHLESS, 6, f64_from(44100));
+var mbuf = dhvani_mech_render_at_rpm(&ghurni_motor_process_block, &ghurni_motor_set_rpm, motor, f64_from(5000), 22050, 44100);
+assert_eq(dhvani_buffer_frames(mbuf), 22050, "motor frames 22050");
+assert_eq(all_finite(mbuf), 1, "motor all finite");
+
+# ---- gear_renders ----
+# Gear::new(20, Steel, 44100); render_mechanical_at_rpm(&mut, 1200, 4410, 44100)
+test_group("gear_renders");
+var gear = ghurni_gear_new(20, GH_GEAR_STEEL, f64_from(44100));
+var gbuf = dhvani_mech_render_at_rpm(&ghurni_gear_process_block, &ghurni_gear_set_rpm, gear, f64_from(1200), 4410, 44100);
+assert(dhvani_buffer_frames(gbuf) > 0, "gear frames > 0");
+assert_eq(all_finite(gbuf), 1, "gear all finite");
+
+# ---- turbine_renders ----
+# Turbine::new(12, 800, 44100); render_mechanical_at_rpm(&mut, 10000, 4410, 44100)
+test_group("turbine_renders");
+var turbine = ghurni_turbine_new(12, f64_from(800), f64_from(44100));
+var tbuf = dhvani_mech_render_at_rpm(&ghurni_turbine_process_block, &ghurni_turbine_set_rpm, turbine, f64_from(10000), 4410, 44100);
+assert(dhvani_buffer_frames(tbuf) > 0, "turbine frames > 0");
+
+# ---- synthesizer_trait_rpm ----
+# Motor::new(Brushless, 6, 44100); set_rpm(2500); assert (rpm - 2500).abs() < EPSILON
+test_group("synthesizer_trait_rpm");
+var motor2 = ghurni_motor_new(GH_MOTOR_BRUSHLESS, 6, f64_from(44100));
+ghurni_motor_set_rpm(motor2, f64_from(2500));
+assert(f64_lt(f64_abs(f64_sub(ghurni_motor_rpm(motor2), f64_from(2500))), 0.0001), "motor rpm 2500");
+
+var rc = assert_summary();
+syscall(60, rc);
