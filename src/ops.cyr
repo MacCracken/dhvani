@@ -7,7 +7,7 @@
 # Wave B wires abaco for the DSP modules. normalize_to_lufs is DEFERRED to
 # Wave D (it needs analysis::measure_r128).
 
-var DH_PI_2 = 1.5707963267948966;   # PI/2 (equal-power crossfade angle scale)
+var DH_PI_2 = F64_PI_2;   # PI/2 (equal-power crossfade angle scale; exact-hex stdlib const)
 
 # ---- CrossfadeType ----
 var DH_XFADE_LINEAR      = 0;

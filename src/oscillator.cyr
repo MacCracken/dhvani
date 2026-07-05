@@ -1,0 +1,99 @@
+# oscillator.cyr -- anti-aliased waveform generation (PolyBLEP).
+# Ports rust-old/src/dsp/oscillator.rs. L0 leaf (deps: error + abaco::poly_blep).
+# Waveform enum -> codes; validate() Result -> error code; serde dropped.
+# rng_state u32 xorshift inlined with 32-bit masking (anonymous -- does not
+# redefine dither's dh_xorshift32_next). TAU via the exact-hex stdlib F64_TAU.
+
+var DH_WAVE_SINE     = 0;
+var DH_WAVE_SAW      = 1;
+var DH_WAVE_SQUARE   = 2;
+var DH_WAVE_TRIANGLE = 3;
+var DH_WAVE_NOISE    = 4;
+
+#derive(accessors)
+struct DhOscillator { waveform; phase; sample_rate; rng_state; tri_integrator; }
+
+# new(waveform, sample_rate) -- phase 0, seeded RNG.
+#must_use
+fn dhvani_osc_new(waveform, sample_rate) {
+    var self = alloc(sizeof(DhOscillator));
+    DhOscillator_set_waveform(self, waveform);
+    DhOscillator_set_phase(self, 0);
+    DhOscillator_set_sample_rate(self, f64_from(sample_rate));
+    DhOscillator_set_rng_state(self, 0x12345678);
+    DhOscillator_set_tri_integrator(self, 0);
+    return self;
+}
+
+# validate -- ERR_NONE if sample_rate > 0, else ERR_INVALID_SAMPLE_RATE.
+#must_use
+fn dhvani_osc_validate(self) {
+    if (f64_le(DhOscillator_sample_rate(self), 0) == 1) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
+    return DHVANI_ERR_NONE;
+}
+
+# sample(freq) -- next sample; advances phase. Call once per sample.
+fn dhvani_osc_sample(self, freq) {
+    var phase = DhOscillator_phase(self);
+    var dt = f64_div(freq, DhOscillator_sample_rate(self));
+    var wf = DhOscillator_waveform(self);
+    var value = 0;
+    # Cyrius `var` is function-scoped -- every local below has a unique name.
+    var naive = 0;
+    var p2 = 0;
+    if (wf == DH_WAVE_SINE) {
+        value = f64_sin(f64_mul(phase, F64_TAU));
+    } elif (wf == DH_WAVE_SAW) {
+        naive = f64_sub(f64_mul(2.0, phase), 1.0);
+        value = f64_sub(naive, poly_blep(phase, dt));
+    } elif (wf == DH_WAVE_SQUARE) {
+        naive = f64_neg(1.0);
+        if (f64_lt(phase, 0.5) == 1) { naive = 1.0; }
+        p2 = f64_add(phase, 0.5);
+        if (f64_ge(p2, 1.0) == 1) { p2 = f64_sub(p2, 1.0); }
+        value = f64_sub(f64_add(naive, poly_blep(phase, dt)), poly_blep(p2, dt));
+    } elif (wf == DH_WAVE_TRIANGLE) {
+        naive = f64_neg(1.0);
+        if (f64_lt(phase, 0.5) == 1) { naive = 1.0; }
+        p2 = f64_add(phase, 0.5);
+        if (f64_ge(p2, 1.0) == 1) { p2 = f64_sub(p2, 1.0); }
+        var sq_blep = f64_sub(f64_add(naive, poly_blep(phase, dt)), poly_blep(p2, dt));
+        # leaky integrator (stored unclamped; returned value is clamped)
+        var tri = f64_add(DhOscillator_tri_integrator(self), f64_mul(f64_mul(sq_blep, 4.0), dt));
+        tri = f64_mul(tri, f64_sub(1.0, dt));
+        DhOscillator_set_tri_integrator(self, tri);
+        value = f64_clamp(tri, f64_neg(1.0), 1.0);
+    } else {
+        # Noise: xorshift32 (u32 wrap emulated with 32-bit masks).
+        var s = DhOscillator_rng_state(self);
+        s = (s ^ ((s << 13) & 0xFFFFFFFF)) & 0xFFFFFFFF;
+        s = (s ^ (s >> 17)) & 0xFFFFFFFF;
+        s = (s ^ ((s << 5) & 0xFFFFFFFF)) & 0xFFFFFFFF;
+        DhOscillator_set_rng_state(self, s);
+        value = f64_sub(f64_mul(f64_div(f64_from(s), f64_from(4294967295)), 2.0), 1.0);
+    }
+    phase = f64_add(phase, dt);
+    if (f64_ge(phase, 1.0) == 1) { phase = f64_sub(phase, 1.0); }
+    DhOscillator_set_phase(self, phase);
+    return value;
+}
+
+fn dhvani_osc_set_waveform(self, wf) { DhOscillator_set_waveform(self, wf); return 0; }
+#inline
+#must_use
+fn dhvani_osc_waveform(self) { return DhOscillator_waveform(self); }
+
+fn dhvani_osc_reset(self) {
+    DhOscillator_set_phase(self, 0);
+    DhOscillator_set_tri_integrator(self, 0);
+    return 0;
+}
+
+#inline
+#must_use
+fn dhvani_osc_phase(self) { return DhOscillator_phase(self); }
+
+fn dhvani_osc_set_sample_rate(self, sample_rate) {
+    DhOscillator_set_sample_rate(self, f64_from(sample_rate));
+    return 0;
+}

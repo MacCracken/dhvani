@@ -44,25 +44,26 @@ stdlib = [
     "bench",
 ]
 
-# ── Dependency wiring — uncomment per port wave (see port-audit.md) ─────────
+# ── Dependency wiring — grows per port wave (see port-audit.md) ─────────────
 #
-# Math base. Rust dhvani used `abaco::dsp` (amplitude_to_db, poly_blep,
-# panning, filters). But every audio sibling dhvani consumes
-# (naad/svara/goonj/prani/garjan/ghurni/nidhi) pulls `hisab`, so dhvani pulls
-# hisab transitively regardless. Whether dhvani's OWN math stays on abaco or
-# standardizes on hisab (as the rest of the audio stack did) is an open port
-# decision — resolve it when the foundation/dsp wave lands and record an ADR.
-# Both are listed; prune the loser once decided.
-#
+# Math base. Decision (Wave B): **keep abaco** for dhvani's own DSP helpers
+# (amplitude_to_db, db_to_amplitude, db_gain_factor, angular_frequency,
+# time_constant, sanitize_sample, poly_blep, constant_power_pan,
+# equal_power_crossfade). `path` for local dev, `git`+`tag` for CI/release.
+# NOTE: abaco's dist also carries json/http/net helpers dhvani never calls —
+# they resolve as unreachable-undefined and are DCE-pruned (benign warnings).
+[deps.abaco]
+git = "https://github.com/MacCracken/abaco.git"
+path = "../abaco"
+tag = "2.3.1"
+modules = ["dist/abaco.cyr"]
+
+# hisab arrives in Wave F — the synthesis bundles (naad/svara/goonj) reference
+# it; dhvani pulls it transitively then.
 # [deps.hisab]
 # git = "https://github.com/MacCracken/hisab.git"
 # tag = "2.6.7"
 # modules = ["dist/hisab.cyr"]
-#
-# [deps.abaco]
-# git = "https://github.com/MacCracken/abaco.git"
-# tag = "2.3.1"
-# modules = ["dist/abaco.cyr"]
 #
 # ── Synthesis stack — feature-gated modules; wire when that wave starts.
 #    Each bundle references hisab (+ goonj/sakshi transitively); all resolve

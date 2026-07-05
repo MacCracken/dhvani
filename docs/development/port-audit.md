@@ -249,10 +249,15 @@ their upstream deps (svara for voice) are already ported.
 - `dither` defines `dh_xorshift32_next`; Wave B `oscillator`/`noise` must **reuse**
   it (share, don't redefine) to keep the dist bundle collision-free.
 
-**Next: M2 / Wave B (DSP core)** — first task is **wiring abaco** (`[deps.abaco]`
-+ vendored `lib/abaco.cyr`; abaco's dist pulls stdlib `ganita`/`bayan` — expand
-dhvani's manifest accordingly), then `oscillator`/`pan`/`svf`/`biquad`/`dsp/mod`.
-See [`state.md`](state.md) / [`roadmap.md`](roadmap.md).
+**Wave B (DSP core) — in flight** (9/64 total; 177 parity assertions):
+- ✅ **abaco wired** — `[deps.abaco]` (`path=../abaco` + git/tag), vendored
+  `lib/abaco.cyr`, `cyrius.lock` written. DSP helpers verified; abaco's unused
+  json/http/net DCE-prune (benign warnings). No stdlib expansion needed.
+- ✅ `oscillator` → `src/oscillator.cyr` — Waveform→codes; PolyBLEP via
+  `abaco::poly_blep`; u32 xorshift inlined; `F64_TAU` exact. `tests/oscillator.tcyr`: **14 green**.
+- ⬜ Next: `pan` (constant_power_pan), `gain_smoother`, `envelope`, `lfo`,
+  `automation` (L0 leaves), then `svf`/`biquad`/`dsp/mod`/`routing` (L1),
+  then Wave C (eq/deesser/compressor/limiter/delay/reverb/graphic_eq).
 
 ### Cyrius idioms confirmed (this port)
 

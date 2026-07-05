@@ -33,9 +33,10 @@ Direct (declared/planned in `cyrius.cyml`):
 
 - **stdlib** — base set + the DSP-math set (`math`, `ganita`, `tagged`,
   `fnptr`, `callback`, `bench`).
-- **Math** (open decision, wire in Wave A): `abaco` 2.3.1 vs `hisab` 2.6.7 —
-  dhvani pulls hisab transitively via the audio siblings regardless; decide
-  whether its own math stays on abaco or standardizes on hisab (ADR).
+- **Math**: ✅ **abaco 2.3.1 wired** (`[deps.abaco]`, `path=../abaco` local +
+  git/tag for CI; vendored `lib/abaco.cyr`, `cyrius.lock` written). DSP helpers
+  verified (poly_blep/amplitude_to_db/constant_power_pan/…). abaco's unused
+  json/http/net helpers DCE-prune (benign warnings).
 - **Synthesis stack** (wire in Wave F, all ported): naad 2.1.0, svara 3.0.0,
   prani 2.0.1, nidhi 2.0.0, garjan 2.0.0, ghurni 2.0.0, goonj 2.0.0.
 - **Blocked** (not ported): shabda (→ g2p), bhava (→ bhava-voice).
@@ -47,14 +48,13 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**8 / 64 modules ported** — **Wave A (Foundation) COMPLETE**: error, clock, simd(scalar),
-and the full buffer family (mod/convert/resample/dither/ops) green; **163 parity
-assertions**. Portable now: ~55 across A–G. Deferred: 9.
+**9 / 64 modules ported** — Wave A complete; **Wave B started** (abaco wired,
+`oscillator` green). **177 parity assertions**. Portable now: ~55 across A–G. Deferred: 9.
 
 | Layer / Wave | Modules | Status |
 |--------------|---------|--------|
 | A — Foundation (core) | ✅ error, ✅ clock, ✅ simd(scalar), ✅ buffer/{mod,convert,resample,dither,ops} | ✅ |
-| B–C — DSP (dsp) | oscillator, gain_smoother, envelope, lfo, automation, pan, svf, biquad, dsp/mod, routing, eq, deesser, compressor, limiter, delay, reverb, graphic_eq | ⬜ (next; wire abaco first) |
+| B–C — DSP (dsp) | ✅ oscillator · ⬜ gain_smoother, envelope, lfo, automation, pan, svf, biquad, dsp/mod, routing, eq, deesser, compressor, limiter, delay, reverb, graphic_eq | 🟡 |
 | D — Analysis (analysis) | waveform, zcr, mod, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ⬜ |
 | E — MIDI/graph/meter/capture | midi/{mod,voice,routing,v2,translate}, meter, graph, capture/{mod,record} | ⬜ |
 | F — Synthesis stack | synthesis, sampler, creature, environment, mechanical, voice_synth/mod, acoustics | ⬜ |

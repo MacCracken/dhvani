@@ -3,8 +3,9 @@
 # path is dropped -- platform-blocked). L1: depends on error + buffer.
 # ResampleQuality enum -> codes. serde dropped. Result -> null-handle sentinel.
 
-var DH_PI  = 3.141592653589793;
-var DH_TAU = 6.283185307179586;
+# Exact-hex stdlib constants (a long decimal literal loses precision vs the oracle).
+var DH_PI  = F64_PI;
+var DH_TAU = F64_TAU;
 
 # ResampleQuality (kernel half-width in samples).
 var DH_RESAMPLE_DRAFT = 0;   # 4-point  (half-width 2)

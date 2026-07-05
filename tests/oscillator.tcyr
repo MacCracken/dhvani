@@ -1,0 +1,117 @@
+# oscillator.tcyr -- parity tests for src/oscillator.cyr
+# Ported one-for-one from the 8 #[test] blocks in rust-old/src/dsp/oscillator.rs.
+# Uses abaco::poly_blep (include lib/abaco.cyr).
+
+include "src/error.cyr"
+include "lib/abaco.cyr"
+include "src/oscillator.cyr"
+
+alloc_init();
+
+# ---- sine_oscillates ----
+test_group("sine_oscillates");
+var so = dhvani_osc_new(DH_WAVE_SINE, 44100);
+var has_pos = 0;
+var has_neg = 0;
+var i = 0;
+while (i < 44100) {
+    var s0 = dhvani_osc_sample(so, 440.0);
+    if (f64_gt(s0, 0.1) == 1) { has_pos = 1; }
+    if (f64_lt(s0, f64_neg(0.1)) == 1) { has_neg = 1; }
+    i = i + 1;
+}
+assert_eq(has_pos, 1, "sine has positive");
+assert_eq(has_neg, 1, "sine has negative");
+
+# ---- saw_range ----
+test_group("saw_range");
+var sw = dhvani_osc_new(DH_WAVE_SAW, 44100);
+var smin = 1.0;
+var smax = f64_neg(1.0);
+i = 0;
+while (i < 44100) {
+    var s1 = dhvani_osc_sample(sw, 440.0);
+    if (f64_lt(s1, smin) == 1) { smin = s1; }
+    if (f64_gt(s1, smax) == 1) { smax = s1; }
+    i = i + 1;
+}
+assert(f64_lt(smin, f64_neg(0.9)), "saw min < -0.9");
+assert(f64_gt(smax, 0.9), "saw max > 0.9");
+
+# ---- square_bipolar ----
+test_group("square_bipolar");
+var sq = dhvani_osc_new(DH_WAVE_SQUARE, 44100);
+var hi = 0;
+var lo = 0;
+i = 0;
+while (i < 44100) {
+    var s2 = dhvani_osc_sample(sq, 440.0);
+    if (f64_gt(s2, 0.5) == 1) { hi = 1; }
+    if (f64_lt(s2, f64_neg(0.5)) == 1) { lo = 1; }
+    i = i + 1;
+}
+assert_eq(hi, 1, "square has high");
+assert_eq(lo, 1, "square has low");
+
+# ---- triangle_range ----
+test_group("triangle_range");
+var tr = dhvani_osc_new(DH_WAVE_TRIANGLE, 44100);
+var tmin = 1.0;
+var tmax = f64_neg(1.0);
+i = 0;
+while (i < 44100) {
+    var s3 = dhvani_osc_sample(tr, 440.0);
+    if (f64_lt(s3, tmin) == 1) { tmin = s3; }
+    if (f64_gt(s3, tmax) == 1) { tmax = s3; }
+    i = i + 1;
+}
+assert(f64_lt(tmin, f64_neg(0.9)), "triangle min < -0.9");
+assert(f64_gt(tmax, 0.9), "triangle max > 0.9");
+
+# ---- noise_nonzero ----
+test_group("noise_nonzero");
+var no = dhvani_osc_new(DH_WAVE_NOISE, 44100);
+var sum = 0;
+i = 0;
+while (i < 1000) {
+    sum = f64_add(sum, f64_abs(dhvani_osc_sample(no, 440.0)));
+    i = i + 1;
+}
+assert(f64_gt(sum, 0), "noise produces non-zero output");
+
+# ---- reset_clears_phase ----
+test_group("reset_clears_phase");
+var ro = dhvani_osc_new(DH_WAVE_SINE, 44100);
+i = 0;
+while (i < 100) { dhvani_osc_sample(ro, 440.0); i = i + 1; }
+assert(f64_gt(dhvani_osc_phase(ro), 0), "phase advanced");
+dhvani_osc_reset(ro);
+assert(f64_lt(f64_abs(dhvani_osc_phase(ro)), 0.0000001), "phase cleared");
+
+# ---- all_waveforms_finite ----
+test_group("all_waveforms_finite");
+var wfs = vec_new();
+vec_push(wfs, DH_WAVE_SINE); vec_push(wfs, DH_WAVE_SAW); vec_push(wfs, DH_WAVE_SQUARE);
+vec_push(wfs, DH_WAVE_TRIANGLE); vec_push(wfs, DH_WAVE_NOISE);
+var wi = 0;
+var allfin = 1;
+while (wi < 5) {
+    var osc = dhvani_osc_new(vec_get(wfs, wi), 44100);
+    var k = 0;
+    while (k < 4096) {
+        if (dhvani_is_finite(dhvani_osc_sample(osc, 440.0)) == 0) { allfin = 0; }
+        k = k + 1;
+    }
+    wi = wi + 1;
+}
+assert_eq(allfin, 1, "all waveforms produce finite samples");
+
+# ---- set_waveform ----
+test_group("set_waveform");
+var xo = dhvani_osc_new(DH_WAVE_SINE, 44100);
+assert_eq(dhvani_osc_waveform(xo), DH_WAVE_SINE, "starts sine");
+dhvani_osc_set_waveform(xo, DH_WAVE_SAW);
+assert_eq(dhvani_osc_waveform(xo), DH_WAVE_SAW, "switched to saw");
+
+var rc = assert_summary();
+syscall(60, rc);
