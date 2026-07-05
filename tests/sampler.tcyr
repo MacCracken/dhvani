@@ -1,0 +1,83 @@
+# sampler.tcyr -- parity tests for src/sampler.cyr.
+# Ported one-for-one from the 3 #[test] blocks in rust-old/src/sampler/mod.rs.
+# Drives nidhi's SamplerEngine through dhvani's render bridge. Sibling bundles
+# in dependency order (sakshi -> hisab -> goonj -> naad -> shravan -> nidhi;
+# nidhi needs naad + shravan) then dhvani's own modules.
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/shravan.cyr"
+include "lib/nidhi.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/sampler.cyr"
+
+# 1 second of 440 Hz sine as a mono sample.
+fn build_sine(n, freq, sr) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(v, f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, freq), f64_from(i)), sr)));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(s, i)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+# A bank with one 440 Hz sine sample mapped across all keys, root note 69.
+fn make_engine() {
+    var bank = n_sample_bank_new();
+    var id = n_sample_bank_add(bank, n_sample_from_mono(build_sine(44100, f64_from(440), f64_from(44100)), 44100));
+    var inst = n_instrument_new(str_from("test"));
+    var zone = n_zone_new(id);
+    zone = n_zone_with_key_range(zone, 0, 127);
+    zone = n_zone_with_root_note(zone, 69);
+    n_instrument_add_zone(inst, zone);
+    var e = n_engine_new(8, f64_from(44100));
+    n_engine_set_bank(e, bank);
+    n_engine_set_instrument(e, inst);
+    return e;
+}
+
+alloc_init();
+
+# ---- sampler_to_buffer ----
+test_group("sampler_to_buffer");
+var e1 = make_engine();
+n_engine_note_on(e1, 69, 100);
+var b1 = dhvani_sampler_render_to_buffer(e1, 2, 4410, 44100);
+assert_eq(dhvani_buffer_channels(b1), 2, "channels 2");
+assert_eq(dhvani_buffer_frames(b1), 4410, "frames 4410");
+assert(f64_gt(dhvani_buffer_rms(b1), 0), "rms > 0");
+
+# ---- sampler_pitch_shift ----
+test_group("sampler_pitch_shift");
+var e2 = make_engine();
+n_engine_note_on(e2, 81, 100);
+var b2 = dhvani_sampler_render_to_buffer(e2, 1, 4410, 44100);
+assert(f64_gt(dhvani_buffer_rms(b2), 0), "pitch-shifted rms > 0");
+
+# ---- sampler_note_off ----
+test_group("sampler_note_off");
+var e3 = make_engine();
+n_engine_note_on(e3, 69, 100);
+n_engine_note_off(e3, 69);
+var b3 = dhvani_sampler_render_to_buffer(e3, 1, 44100, 44100);
+assert_eq(all_finite(b3), 1, "all finite through release");
+
+var rc = assert_summary();
+syscall(60, rc);

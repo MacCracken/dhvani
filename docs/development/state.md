@@ -37,11 +37,10 @@ Direct (declared/planned in `cyrius.cyml`):
   git/tag for CI; vendored `lib/abaco.cyr`, `cyrius.lock` written). DSP helpers
   verified (poly_blep/amplitude_to_db/constant_power_pan/…). abaco's unused
   json/http/net helpers DCE-prune (benign warnings).
-- **Synthesis stack** (Wave F): naad 2.1.0, svara 3.0.0, prani 2.0.1,
+- **Synthesis stack** (Wave F): naad 2.1.1, svara 3.0.1, prani 2.0.1,
   nidhi 2.0.0, garjan 2.0.0, ghurni 2.0.0, goonj 2.0.0 + sakshi 2.4.4 (logging)
-  + hisab 2.6.7 (HVec3 for goonj) — **vendored into `lib/` (committed), included
-  in dependency order**, NOT `[deps]`. nidhi's dist is broken (missing
-  `STREAM_EVT_*`) → `sampler` blocked pending a nidhi re-release.
+  + hisab 2.6.7 (HVec3 for goonj) + shravan 2.x (WAV codec for nidhi) —
+  **vendored into `lib/` (committed), included in dependency order**, NOT `[deps]`.
 - **Blocked** (not ported): shabda (→ g2p), bhava (→ bhava-voice).
 
 ## Consumers
@@ -51,18 +50,18 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**48 / 64 modules ported** — Waves A+B+C+D+E complete; **Wave F in flight**
-(synthesis landed; the sibling-bundle consumption pattern is solved). **1078
-parity assertions** across 48 suites (+ 1 scaffold smoke). Portable now: ~55
-across A–G. Deferred: 9.
+**49 / 64 modules ported** — Waves A+B+C+D+E complete; **Wave F in flight**
+(synthesis + sampler landed; the sibling-bundle consumption pattern is solved).
+**1083 parity assertions** across 50 suites (+ 1 scaffold smoke). Portable now:
+~55 across A–G. Deferred: 9.
 
 **Wave F consumption pattern (solved this cycle):** the 7 synthesis-stack siblings
-+ sakshi + hisab are vendored into `lib/` (committed) and included **in dependency
-order** (`sakshi → hisab → goonj → naad → svara → ghurni → garjan → prani`) — NOT
-wired as `[deps]` (which mis-orders cross-bundle types and force-includes the
-136 KB `bayan`, overflowing the compiler's identifier cap). See the manifest and
-[`port-audit.md`](port-audit.md) Wave F notes. `sampler` is blocked: nidhi's dist
-omits its `STREAM_EVT_*` enum.
++ sakshi + hisab + shravan are vendored into `lib/` (committed) and included **in
+dependency order** (`sakshi → hisab → goonj → naad → shravan → svara → ghurni →
+garjan → prani`) — NOT wired as `[deps]` (which mis-orders cross-bundle types and
+force-includes the 136 KB `bayan`, overflowing the compiler's identifier cap).
+Every dist externalizes its deps (nidhi→naad+shravan, naad→goonj, …); the consumer
+assembles the full set. See the manifest and [`port-audit.md`](port-audit.md).
 
 | Layer / Wave | Modules | Status |
 |--------------|---------|--------|
@@ -71,7 +70,7 @@ omits its `STREAM_EVT_*` enum.
 | C — DSP dependents (dsp) | ✅ compressor, limiter, delay, reverb, eq, deesser, graphic_eq | ✅ |
 | D — Analysis (analysis) | ✅ waveform, zcr, analysis, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ✅ |
 | E — MIDI/meter/capture/graph | ✅ midi, voice, midi_routing, midi_v2, translate, meter, capture, record, graph | ✅ |
-| F — Synthesis stack | ✅ synthesis(naad) · ⬜ voice_synth(svara), creature(prani), environment(garjan), mechanical(ghurni), acoustics(goonj) · ⛔ sampler(nidhi dist gap) | 🟡 |
+| F — Synthesis stack | ✅ synthesis(naad), sampler(nidhi) · ⬜ voice_synth(svara), creature(prani), environment(garjan), mechanical(ghurni), acoustics(goonj) | 🟡 |
 | G — Assembly | lib facade, dist/dhvani.cyr bundle, tests/{mod,proptest}, benches | ⬜ |
 | ⛔ Blocked (dep) | g2p (shabda), voice_synth/bhava_bridge (bhava) | deferred |
 | ⛔ Blocked (platform) | simd/{x86,aarch64}, ffi, capture/pw | deferred |
@@ -89,10 +88,11 @@ the serde_tests suite and the blocked/platform modules).
 ## Next
 
 See [`roadmap.md`](roadmap.md). Continue **Wave F** — port the 5 remaining
-unblocked wrappers using the established ordered-include pattern: `voice_synth`
-(svara), `creature` (prani), `environment` (garjan), `mechanical` (ghurni),
-`acoustics` (goonj + dhvani ConvolutionReverb). `sampler` (nidhi) is blocked on a
-nidhi dist fix; `voice_synth/bhava_bridge` + `g2p` stay dep-blocked (bhava/shabda).
-Then **Wave G** — lib facade + `dist/dhvani.cyr` bundle (resolve the abaco↔naad
-`amplitude_to_db` collision here) + integration tests, and re-enable the deferred
-`ops::normalize_to_lufs` + `resample` sine tests (now unblocked by fft/loudness).
+wrappers using the established ordered-include pattern: `voice_synth` (svara),
+`creature` (prani), `environment` (garjan), `mechanical` (ghurni), `acoustics`
+(goonj + dhvani ConvolutionReverb). `voice_synth/bhava_bridge` + `g2p` stay
+dep-blocked (bhava/shabda).
+Then **Wave G** — lib facade + `dist/dhvani.cyr` bundle + integration tests, and
+re-enable the deferred `ops::normalize_to_lufs` + `resample` sine tests (now
+unblocked by fft/loudness). (The abaco↔naad `amplitude_to_db` collision is already
+resolved upstream — naad 2.1.1 dropped its copies.)

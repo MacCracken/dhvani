@@ -63,17 +63,16 @@ modules = ["dist/abaco.cyr"]
 #    transitive deps in an order that breaks cross-bundle *type* refs (naad
 #    `sizeof(CoupledRooms)` before goonj) AND forces stdlib `hashmap`+`bayan`
 #    (bayan is 136 KB — force-including it overflows the compiler LEXID cap).
-#    Instead the 9 bundles (naad/svara/prani/nidhi/garjan/ghurni/goonj + sakshi
-#    + hisab) are vendored into `lib/` (committed) and each Wave F test/module
-#    `include`s the ones it needs IN DEPENDENCY ORDER:
-#        sakshi → hisab → goonj → naad → svara → ghurni → garjan → prani
-#    hisab compiles clean under this ordering (the "array size" error was a
-#    mis-ordered-concatenation artifact, not a 6.4.4 break). See the Wave F
-#    section of docs/development/port-audit.md for the full rationale.
-#    NOTE: abaco + naad both define amplitude_to_db/db_to_amplitude → benign
-#    "last wins" warning; resolve for the Wave G distlib.
-#    BLOCKED: `sampler` (nidhi) — nidhi's dist omits the STREAM_EVT_* enum it
-#    uses (STREAM_EVT_HEADER undefined); needs nidhi re-released.
+#    Instead the 10 bundles (naad/svara/prani/nidhi/garjan/ghurni/goonj + sakshi
+#    + hisab + shravan) are vendored into `lib/` (committed) and each Wave F
+#    test/module `include`s the ones it needs IN DEPENDENCY ORDER:
+#        sakshi → hisab → goonj → naad → shravan → svara → ghurni → garjan → prani
+#    (shravan = WAV codec, needed by nidhi for STREAM_EVT_*/wav_* — like every
+#    dist, nidhi externalizes it; the consumer supplies it.) hisab compiles clean
+#    under this ordering (the "array size" error was a mis-ordered-concatenation
+#    artifact, not a 6.4.4 break). Full rationale in port-audit.md Wave F.
+#    (naad 2.1.1 removed its own amplitude_to_db/db_to_amplitude — the former
+#    abaco↔naad duplicate-symbol warning is gone; only abaco defines them now.)
 #
 # ── BLOCKED — dependency not yet ported to Cyrius (still Rust) ──────────────
 #    shabda → `g2p` feature                     (port shabda first)

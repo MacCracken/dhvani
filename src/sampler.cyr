@@ -1,0 +1,29 @@
+# sampler.cyr -- nidhi sample-playback engine bridged to dhvani's AudioBuffer.
+# Ported from rust-old/src/sampler/mod.rs. The Rust module is `pub use nidhi::...`
+# re-exports (no-ops in Cyrius's flat namespace) + one render bridge. Only the
+# bridge carries over. Requires the nidhi bundle (n_engine_next_sample) to be
+# included before this unit, in dependency order:
+#   sakshi -> hisab -> goonj -> naad -> shravan -> nidhi   (see port-audit.md).
+
+# render_to_buffer: pull `frames` mono samples from the engine's active voices,
+# duplicate across `channels`, assemble an interleaved AudioBuffer (silence
+# fallback on construction failure, matching the Rust unwrap_or_else).
+fn dhvani_sampler_render_to_buffer(engine, channels, frames, sample_rate) {
+    var samples = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var s = n_engine_next_sample(engine);
+        var c = 0;
+        while (c < channels) { vec_push(samples, s); c = c + 1; }
+        i = i + 1;
+    }
+    var buf = dhvani_buffer_from_interleaved(samples, channels, sample_rate);
+    if (buf == 0) {
+        var ch = channels;
+        if (ch < 1) { ch = 1; }
+        var sr = sample_rate;
+        if (sr < 1) { sr = 1; }
+        return dhvani_buffer_silence(ch, frames, sr);
+    }
+    return buf;
+}

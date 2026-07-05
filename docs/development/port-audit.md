@@ -332,7 +332,7 @@ Now-unblocked (fft/loudness available), to re-enable during Wave G assembly:
 `buffer/ops::normalize_to_lufs` (needs loudness `measure_r128`) + `resample`
 `sine_frequency_preserved` (needs `spectrum_dft`).
 
-**Wave F (synthesis stack) — in flight (48/64, 1078 assertions):**
+**Wave F (synthesis stack) — in flight (49/64, 1083 assertions):**
 
 *Sibling-bundle consumption — the hard part, solved this cycle.* The 7 wrapped
 siblings each re-export a sibling engine; in Cyrius the `pub use` re-exports are
@@ -347,13 +347,17 @@ wrapper's adapter code + tests port. The bundles are **vendored into `lib/`
   16384-entry LEXID identifier table. Their `bayan_json_v_*` calls are unreachable
   in the ported tests → DCE-prune (like abaco's json helpers), so bayan isn't
   needed at all.
-- **Order:** `sakshi → hisab → goonj → naad → svara → ghurni → garjan → prani`.
-  sakshi (logging, called by goonj/garjan/ghurni/prani); hisab (HVec3, *reachable*
-  from goonj's ray tracing — genuinely required); goonj (CoupledRooms for naad).
+- **Order:** `sakshi → hisab → goonj → naad → shravan → svara → ghurni → garjan
+  → prani`. sakshi (logging, called by goonj/garjan/ghurni/prani); hisab (HVec3,
+  *reachable* from goonj's ray tracing — genuinely required); goonj (CoupledRooms
+  for naad); shravan (WAV codec — nidhi externalizes its `STREAM_EVT_*`/`wav_*`).
   hisab compiles clean under this order on both 6.4.3 and 6.4.4 — the earlier
   "hisab:16026 array size" error was a mis-ordered-concat artifact, not a break.
-- Symbol convention: bare `<module>_<fn>` (`osc_new`, `fm_engine_new`, …). abaco+
-  naad both define `amplitude_to_db`/`db_to_amplitude` → benign "last-wins" warning.
+- Symbol convention: bare `<module>_<fn>` (`osc_new`, `fm_engine_new`, `n_engine_*`,
+  …). (naad 2.1.1 removed its `amplitude_to_db`/`db_to_amplitude`, clearing the
+  former abaco↔naad duplicate-symbol warning.) Every dist externalizes its deps
+  (naad→goonj, goonj→
+  sakshi/hisab, nidhi→naad+shravan); the consumer assembles the full set.
 
 Ported:
 - ✅ `synthesis` → `src/synthesis.cyr` — ~90 lines of naad re-exports drop; the two
@@ -361,12 +365,15 @@ Ported:
   `FnMut` → fn-ptr + state (`fncall1`/`fncall3`); naad's `*_next_sample(self)` fns
   are valid callbacks as-is. **7 tests / 11 assertions** driving naad oscillator/
   FM/subtractive/granular/karplus/drum-kick + pan.
+- ✅ `sampler` → `src/sampler.cyr` — nidhi re-exports drop; `render_to_buffer`
+  pulls `n_engine_next_sample`. **3 tests / 5 assertions** (bank→zone→instrument→
+  engine, note_on/pitch-shift/note_off). Consumed via `…→naad→shravan→nidhi`
+  (nidhi externalizes shravan for `STREAM_EVT_*`/`wav_*` — supplied by the chain,
+  not a nidhi defect; keeping nidhi consistent with the ecosystem's dep model).
 
-⛔ `sampler` (nidhi) — nidhi's dist bundle *uses* `STREAM_EVT_HEADER` (lines
-1819/2029) but never *defines* it; the enum didn't make it into the dist. Blocked
-until nidhi is re-released. Remaining unblocked: `voice_synth`(svara),
-`creature`(prani), `environment`(garjan), `mechanical`(ghurni), `acoustics`(goonj).
-`voice_synth/bhava_bridge` + `g2p` stay dep-blocked (bhava/shabda).
+Remaining unblocked: `voice_synth`(svara), `creature`(prani), `environment`
+(garjan), `mechanical`(ghurni), `acoustics`(goonj). `voice_synth/bhava_bridge` +
+`g2p` stay dep-blocked (bhava/shabda).
 
 ### Cyrius idioms confirmed (this port)
 

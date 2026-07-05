@@ -71,15 +71,13 @@
 ### M5 — Synthesis stack (Wave F) — feature-gated sibling wrappers — 🟡 IN FLIGHT
 
 - **Consumption pattern (solved):** siblings vendored into `lib/` (committed) and
-  `include`d in dependency order `sakshi → hisab → goonj → naad → svara → ghurni
-  → garjan → prani` — **not** `[deps]` (mis-orders cross-bundle types + force-
-  includes the 136 KB `bayan`, overflowing the LEXID cap). Full rationale in
-  `port-audit.md`.
-- ✅ `synthesis/mod`(naad) — 7 tests. Remaining unblocked: `creature`(prani),
-  `environment`(garjan), `mechanical`(ghurni), `voice_synth/mod`(svara),
-  `acoustics`(goonj).
-- ⛔ `sampler`(nidhi) — nidhi's dist omits its `STREAM_EVT_*` enum
-  (`STREAM_EVT_HEADER` undefined); blocked pending a nidhi re-release.
+  `include`d in dependency order `sakshi → hisab → goonj → naad → shravan → svara
+  → ghurni → garjan → prani` — **not** `[deps]` (mis-orders cross-bundle types +
+  force-includes the 136 KB `bayan`, overflowing the LEXID cap). Every dist
+  externalizes its deps; the consumer assembles the set. Rationale in `port-audit.md`.
+- ✅ `synthesis/mod`(naad) — 7 tests · ✅ `sampler`(nidhi, via naad+shravan) — 3
+  tests. Remaining: `creature`(prani), `environment`(garjan), `mechanical`(ghurni),
+  `voice_synth/mod`(svara), `acoustics`(goonj).
 - Gate: `synthesis`, `voice`, `creature`, `environment`, `mechanical`,
   `sampler`, `acoustics`.
 
