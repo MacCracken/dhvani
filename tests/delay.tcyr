@@ -1,0 +1,89 @@
+# delay.tcyr -- parity tests for src/delay.cyr
+# Ported one-for-one from the 6 #[test] blocks in rust-old/src/dsp/delay.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/delay.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# ---- zero_mix_passthrough ----
+test_group("zero_mix_passthrough");
+var zv = vec_new(); vec_push(zv, 1.0); vec_push(zv, 0.5); vec_push(zv, 0.25); vec_push(zv, 0);
+var zb = dhvani_buffer_from_interleaved(zv, 1, 44100);
+var zorig = vec_new(); vec_push(zorig, 1.0); vec_push(zorig, 0.5); vec_push(zorig, 0.25); vec_push(zorig, 0);
+var zd = dhvani_delay_new(10.0, 10.0, 0, 0, 44100, 1);
+dhvani_delay_process(zd, zb);
+var zs = dhvani_buffer_samples(zb);
+var zi = 0; var zok = 1;
+while (zi < 4) { if (near(vec_get(zs, zi), vec_get(zorig, zi), 0.000001) == 0) { zok = 0; } zi = zi + 1; }
+assert_eq(zok, 1, "mix=0 passes dry through");
+
+# ---- delay_shifts_signal ----
+test_group("delay_shifts_signal");
+var dv = dh_vec_zeros(16);
+vec_set(dv, 0, 1.0);
+var db = dhvani_buffer_from_interleaved(dv, 1, 1000);
+var dd = dhvani_delay_new(1.0, 1.0, 0, 1.0, 1000, 1);
+dhvani_delay_process(dd, db);
+var ds = dhvani_buffer_samples(db);
+assert(f64_lt(f64_abs(vec_get(ds, 0)), 0.0000001), "frame 0 dry = 0");
+assert(near(vec_get(ds, 1), 1.0, 0.0000001), "frame 1 = delayed impulse");
+
+# ---- feedback_produces_echoes ----
+test_group("feedback_produces_echoes");
+var fv = dh_vec_zeros(32);
+vec_set(fv, 0, 1.0);
+var fb = dhvani_buffer_from_interleaved(fv, 1, 1000);
+var fd = dhvani_delay_new(2.0, 2.0, 0.5, 1.0, 1000, 1);
+dhvani_delay_process(fd, fb);
+var fs = dhvani_buffer_samples(fb);
+assert(f64_gt(f64_abs(vec_get(fs, 2)), 0.9), "first echo at frame 2");
+assert(f64_gt(f64_abs(vec_get(fs, 4)), 0.4), "second echo at frame 4");
+assert(f64_lt(f64_abs(vec_get(fs, 4)), f64_abs(vec_get(fs, 2))), "second echo attenuated");
+
+# ---- reset_clears_buffers ----
+test_group("reset_clears_buffers");
+var rd = dhvani_delay_new(10.0, 10.0, 0.5, 1.0, 44100, 2);
+var rb = dhvani_buffer_from_interleaved(dh_vec_zeros(200), 2, 44100);
+var rbs = dhvani_buffer_samples(rb);
+var rj = 0; while (rj < 200) { vec_set(rbs, rj, 1.0); rj = rj + 1; }
+dhvani_delay_process(rd, rb);
+dhvani_delay_reset(rd);
+var rbufs = DhDelayLine_buffers(rd);
+var rc0 = vec_get(rbufs, 0); var rc1 = vec_get(rbufs, 1);
+var rok = 1;
+var ri = 0; var rn = vec_len(rc0);
+while (ri < rn) {
+    if (vec_get(rc0, ri) != 0) { rok = 0; }
+    if (vec_get(rc1, ri) != 0) { rok = 0; }
+    ri = ri + 1;
+}
+assert_eq(rok, 1, "both channel buffers cleared");
+
+# ---- modulated_delay_produces_output ----
+test_group("modulated_delay_produces_output");
+var md = dhvani_moddelay_new(dhvani_moddelayparams_default(), 44100, 1);
+var mv = vec_new();
+var mi = 0;
+while (mi < 4096) {
+    var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(mi)), f64_from(44100));
+    vec_push(mv, f64_sin(ph));
+    mi = mi + 1;
+}
+var mb = dhvani_buffer_from_interleaved(mv, 1, 44100);
+dhvani_moddelay_process(md, mb);
+assert(f64_gt(dhvani_buffer_rms(mb), 0), "modulated delay produces output");
+
+# ---- modulated_delay_reset ----
+test_group("modulated_delay_reset");
+var md2 = dhvani_moddelay_new(dhvani_moddelayparams_default(), 44100, 1);
+DhModulatedDelay_set_lfo_phase(md2, 0.5);
+dhvani_moddelay_reset(md2);
+assert(f64_lt(f64_abs(dhvani_moddelay_lfo_phase(md2)), 0.0000001), "lfo phase reset to 0");
+
+var rc = assert_summary();
+syscall(60, rc);

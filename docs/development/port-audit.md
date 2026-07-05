@@ -84,7 +84,7 @@ pre-sized arena; port it early and make it the universal convention.
 
 ## Toolchain & commands
 
-- cycc pin: **6.4.2** (`cyrius.cyml [package].cyrius`).
+- cycc pin: **6.4.3** (`cyrius.cyml [package].cyrius`).
 - Build: `cyrius build src/main.cyr build/dhvani`
 - Test ONE suite: `cyrius test tests/<mod>.tcyr` (explicit path — no discovery).
 - **Concurrency**: `cyrius build/test/deps` re-resolve deps and race on
@@ -279,7 +279,9 @@ their upstream deps (svara for voice) are already ported.
   (slope=1/ratio−1); abaco `time_constant`/dB math. **8 green**.
 - ✅ `limiter` → `src/limiter.cyr` — inf:1 (slope=−1), instant attack + hard-clamp
   safety net. **10 green**.
-- ⬜ Next: `delay`, `reverb` (L1), `eq`/`deesser` (L2, wrap biquad), `graphic_eq`
+- ✅ `delay` → `src/delay.cyr` — delay line (per-channel ring buffers) + modulated
+  delay (chorus/flanger, sine LFO, interpolated reads). **9 green**.
+- ⬜ Next: `reverb` (L1), `eq`/`deesser` (L2, wrap biquad), `graphic_eq`
   (L3, wraps eq). Then re-enable the 7 deferred `dsp.tcyr` integration tests.
 
 ### Cyrius idioms confirmed (this port)

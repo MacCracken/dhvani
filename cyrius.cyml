@@ -5,7 +5,7 @@ description = "dhvani — core audio engine (buffers, format conversion, mixing,
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/dhvani"
 language = "cyrius"
-cyrius = "6.4.2"
+cyrius = "6.4.3"
 
 [build]
 entry = "src/main.cyr"

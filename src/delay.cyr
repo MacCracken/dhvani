@@ -1,0 +1,228 @@
+# delay.cyr -- delay line with feedback + modulated delay (chorus/flanger).
+# Ports rust-old/src/dsp/delay.rs. L1: deps error + buffer. Per-channel ring
+# buffers = a vec of per-channel `vec`s. serde dropped.
+
+#derive(accessors)
+struct DhDelayLine { buffers; write_pos; delay_samples; max_delay_samples; feedback; mix; bypassed; }
+
+#derive(accessors)
+struct DhModulatedDelayParams { base_delay_ms; depth_ms; rate_hz; feedback; mix; }
+
+#derive(accessors)
+struct DhModulatedDelay { delay; params; lfo_phase; sample_rate; bypassed; }
+
+# ---- DelayLine ----
+#must_use
+fn dhvani_delay_new(delay_ms, max_delay_ms, feedback, mix, sample_rate, channels) {
+    var self = alloc(sizeof(DhDelayLine));
+    var max_samples = f64_to(f64_trunc(f64_mul(f64_div(f64_max(max_delay_ms, delay_ms), 1000.0), f64_from(sample_rate))));
+    if (max_samples < 1) { max_samples = 1; }
+    var delay_samples = f64_to(f64_trunc(f64_mul(f64_div(delay_ms, 1000.0), f64_from(sample_rate))));
+    if (delay_samples > max_samples) { delay_samples = max_samples; }
+    var buffers = vec_new();
+    var c = 0;
+    while (c < channels) { vec_push(buffers, dh_vec_zeros(max_samples)); c = c + 1; }
+    DhDelayLine_set_buffers(self, buffers);
+    DhDelayLine_set_write_pos(self, 0);
+    DhDelayLine_set_delay_samples(self, delay_samples);
+    DhDelayLine_set_max_delay_samples(self, max_samples);
+    DhDelayLine_set_feedback(self, f64_clamp(feedback, 0, 0.99));
+    DhDelayLine_set_mix(self, f64_clamp(mix, 0, 1.0));
+    DhDelayLine_set_bypassed(self, 0);
+    return self;
+}
+
+# process one sample for a channel (does NOT advance write_pos).
+fn dhvani_delay_process_sample(self, input, channel) {
+    var max = DhDelayLine_max_delay_samples(self);
+    var wp = DhDelayLine_write_pos(self);
+    var ring = vec_get(DhDelayLine_buffers(self), channel);
+    var read_pos = (wp + max - DhDelayLine_delay_samples(self)) % max;
+    var delayed = vec_get(ring, read_pos);
+    vec_set(ring, wp, f64_add(input, f64_mul(delayed, DhDelayLine_feedback(self))));
+    var mix = DhDelayLine_mix(self);
+    return f64_add(f64_mul(input, f64_sub(1.0, mix)), f64_mul(delayed, mix));
+}
+
+# read a fractional delay position via linear interpolation.
+#must_use
+fn dhvani_delay_read_interpolated(self, channel, delay_frac) {
+    var max = DhDelayLine_max_delay_samples(self);
+    var wp = DhDelayLine_write_pos(self);
+    var ring = vec_get(DhDelayLine_buffers(self), channel);
+    var delay_int = f64_to(f64_trunc(delay_frac));
+    var frac = f64_sub(delay_frac, f64_from(delay_int));
+    var pos0 = (wp + max - delay_int) % max;
+    var pos1 = (wp + max - delay_int - 1) % max;
+    return f64_add(f64_mul(vec_get(ring, pos0), f64_sub(1.0, frac)), f64_mul(vec_get(ring, pos1), frac));
+}
+
+# process(buf) -- fixed delay in place.
+fn dhvani_delay_process(self, buf) {
+    if (DhDelayLine_bypassed(self) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var max = DhDelayLine_max_delay_samples(self);
+    var frame = 0;
+    while (frame < frames) {
+        var c = 0;
+        while (c < ch) {
+            var idx = frame * ch + c;
+            var out = dhvani_delay_process_sample(self, vec_get(samples, idx), c);
+            if (dhvani_is_finite(out) == 0) { out = 0; }
+            vec_set(samples, idx, out);
+            c = c + 1;
+        }
+        DhDelayLine_set_write_pos(self, (DhDelayLine_write_pos(self) + 1) % max);
+        frame = frame + 1;
+    }
+    return 0;
+}
+
+fn dhvani_delay_set_bypass(self, bypassed) { DhDelayLine_set_bypassed(self, bypassed); return 0; }
+#must_use
+fn dhvani_delay_is_bypassed(self) { if (DhDelayLine_bypassed(self) == 1) { return 1; } return 0; }
+#inline
+#must_use
+fn dhvani_delay_latency_frames(self) { return DhDelayLine_delay_samples(self); }
+fn dhvani_delay_set_delay_ms(self, delay_ms, sample_rate) {
+    var samples = f64_to(f64_trunc(f64_mul(f64_div(delay_ms, 1000.0), f64_from(sample_rate))));
+    var max = DhDelayLine_max_delay_samples(self);
+    if (samples > max) { samples = max; }
+    DhDelayLine_set_delay_samples(self, samples);
+    return 0;
+}
+fn dhvani_delay_reset(self) {
+    var buffers = DhDelayLine_buffers(self);
+    var nc = vec_len(buffers);
+    var c = 0;
+    while (c < nc) {
+        var ring = vec_get(buffers, c);
+        var n = vec_len(ring);
+        var i = 0;
+        while (i < n) { vec_set(ring, i, 0); i = i + 1; }
+        c = c + 1;
+    }
+    DhDelayLine_set_write_pos(self, 0);
+    return 0;
+}
+
+# ---- ModulatedDelayParams ----
+#must_use
+fn dhvani_moddelayparams_new(base_delay_ms, depth_ms, rate_hz, feedback, mix) {
+    var p = alloc(sizeof(DhModulatedDelayParams));
+    DhModulatedDelayParams_set_base_delay_ms(p, base_delay_ms);
+    DhModulatedDelayParams_set_depth_ms(p, depth_ms);
+    DhModulatedDelayParams_set_rate_hz(p, rate_hz);
+    DhModulatedDelayParams_set_feedback(p, feedback);
+    DhModulatedDelayParams_set_mix(p, mix);
+    return p;
+}
+#must_use
+fn dhvani_moddelayparams_default() { return dhvani_moddelayparams_new(7.0, 3.0, 0.5, 0.3, 0.5); }
+#must_use
+fn dhvani_moddelayparams_validate(p) {
+    if (f64_lt(DhModulatedDelayParams_base_delay_ms(p), 0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhModulatedDelayParams_depth_ms(p), 0) == 1)      { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhModulatedDelayParams_rate_hz(p), 0) == 1)       { return DHVANI_ERR_INVALID_PARAMETER; }
+    var fb = DhModulatedDelayParams_feedback(p);
+    if (f64_lt(fb, 0) == 1)    { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_gt(fb, 0.99) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var mx = DhModulatedDelayParams_mix(p);
+    if (f64_lt(mx, 0) == 1)    { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_gt(mx, 1.0) == 1)  { return DHVANI_ERR_INVALID_PARAMETER; }
+    return DHVANI_ERR_NONE;
+}
+
+# ---- ModulatedDelay ----
+#must_use
+fn dhvani_moddelay_new(params, sample_rate, channels) {
+    var self = alloc(sizeof(DhModulatedDelay));
+    var max_ms = f64_add(f64_add(DhModulatedDelayParams_base_delay_ms(params), DhModulatedDelayParams_depth_ms(params)), 1.0);
+    DhModulatedDelay_set_delay(self, dhvani_delay_new(DhModulatedDelayParams_base_delay_ms(params), max_ms,
+        DhModulatedDelayParams_feedback(params), DhModulatedDelayParams_mix(params), sample_rate, channels));
+    DhModulatedDelay_set_params(self, params);
+    DhModulatedDelay_set_lfo_phase(self, 0);
+    DhModulatedDelay_set_sample_rate(self, sample_rate);
+    DhModulatedDelay_set_bypassed(self, 0);
+    return self;
+}
+
+fn dhvani_moddelay_process(self, buf) {
+    if (DhModulatedDelay_bypassed(self) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var p = DhModulatedDelay_params(self);
+    var delay = DhModulatedDelay_delay(self);
+    var sr = DhModulatedDelay_sample_rate(self);
+    var phase_inc = f64_div(DhModulatedDelayParams_rate_hz(p), f64_from(sr));
+    var lfo_phase = DhModulatedDelay_lfo_phase(self);
+    var base = DhModulatedDelayParams_base_delay_ms(p);
+    var depth = DhModulatedDelayParams_depth_ms(p);
+    var feedback = DhModulatedDelayParams_feedback(p);
+    var mix = DhModulatedDelayParams_mix(p);
+    var max = DhDelayLine_max_delay_samples(delay);
+    var frame = 0;
+    while (frame < frames) {
+        var lfo = f64_sin(f64_mul(f64_mul(2.0, F64_PI), lfo_phase));
+        var delay_ms = f64_add(base, f64_mul(depth, lfo));
+        var delay_frac = f64_max(f64_mul(f64_div(delay_ms, 1000.0), f64_from(sr)), 0);
+        var wp = DhDelayLine_write_pos(delay);
+        var c = 0;
+        while (c < ch) {
+            var idx = frame * ch + c;
+            var input = vec_get(samples, idx);
+            var delayed = dhvani_delay_read_interpolated(delay, c, delay_frac);
+            var ring = vec_get(DhDelayLine_buffers(delay), c);
+            vec_set(ring, wp, f64_add(input, f64_mul(delayed, feedback)));
+            var out = f64_add(f64_mul(input, f64_sub(1.0, mix)), f64_mul(delayed, mix));
+            if (dhvani_is_finite(out) == 0) { out = 0; }
+            vec_set(samples, idx, out);
+            c = c + 1;
+        }
+        DhDelayLine_set_write_pos(delay, (wp + 1) % max);
+        lfo_phase = f64_add(lfo_phase, phase_inc);
+        if (f64_ge(lfo_phase, 1.0) == 1) { lfo_phase = f64_sub(lfo_phase, 1.0); }
+        frame = frame + 1;
+    }
+    DhModulatedDelay_set_lfo_phase(self, lfo_phase);
+    return 0;
+}
+
+#inline
+#must_use
+fn dhvani_moddelay_latency_frames(self) {
+    var p = DhModulatedDelay_params(self);
+    return f64_to(f64_trunc(f64_mul(f64_div(DhModulatedDelayParams_base_delay_ms(p), 1000.0), f64_from(DhModulatedDelay_sample_rate(self)))));
+}
+#inline
+#must_use
+fn dhvani_moddelay_lfo_phase(self) { return DhModulatedDelay_lfo_phase(self); }
+fn dhvani_moddelay_set_bypass(self, bypassed) { DhModulatedDelay_set_bypassed(self, bypassed); return 0; }
+#must_use
+fn dhvani_moddelay_is_bypassed(self) { if (DhModulatedDelay_bypassed(self) == 1) { return 1; } return 0; }
+
+fn dhvani_moddelay_set_params(self, params) {
+    var delay = DhModulatedDelay_delay(self);
+    DhDelayLine_set_feedback(delay, f64_clamp(DhModulatedDelayParams_feedback(params), 0, 0.99));
+    DhDelayLine_set_mix(delay, f64_clamp(DhModulatedDelayParams_mix(params), 0, 1.0));
+    DhModulatedDelay_set_params(self, params);
+    return 0;
+}
+fn dhvani_moddelay_set_sample_rate(self, sample_rate) {
+    DhModulatedDelay_set_sample_rate(self, sample_rate);
+    var p = DhModulatedDelay_params(self);
+    var channels = vec_len(DhDelayLine_buffers(DhModulatedDelay_delay(self)));
+    var max_ms = f64_add(f64_add(DhModulatedDelayParams_base_delay_ms(p), DhModulatedDelayParams_depth_ms(p)), 1.0);
+    DhModulatedDelay_set_delay(self, dhvani_delay_new(DhModulatedDelayParams_base_delay_ms(p), max_ms,
+        DhModulatedDelayParams_feedback(p), DhModulatedDelayParams_mix(p), sample_rate, channels));
+    DhModulatedDelay_set_lfo_phase(self, 0);
+    return 0;
+}
+fn dhvani_moddelay_reset(self) {
+    dhvani_delay_reset(DhModulatedDelay_delay(self));
+    DhModulatedDelay_set_lfo_phase(self, 0);
+    return 0;
+}
