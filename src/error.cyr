@@ -70,3 +70,11 @@ fn dhvani_err_name(code) {
 fn dhvani_is_finite(x) {
     return f64_lt(f64_abs(x), DH_POS_INF);
 }
+
+# tan(x) = sin(x)/cos(x). The stdlib exposes f64_sin/f64_cos but not f64_tan
+# (only f64_tanh); the filter modules (svf, biquad) need tangent for coefficient
+# design. Defined here in the L0 base so both share one definition.
+#must_use
+fn dhvani_tan(x) {
+    return f64_div(f64_sin(x), f64_cos(x));
+}

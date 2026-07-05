@@ -1,0 +1,189 @@
+# svf.cyr -- State Variable Filter (Cytomic / Andrew Simper topology).
+# Ports rust-old/src/dsp/svf.rs. L1: deps error + buffer. SvfMode enum -> codes.
+# Per-channel state (ic1eq/ic2eq) as a vec of DhSvfState. serde dropped;
+# f32 params widen to f64. Stable under real-time cutoff modulation.
+
+var DH_SVF_LOWPASS   = 0;
+var DH_SVF_HIGHPASS  = 1;
+var DH_SVF_BANDPASS  = 2;
+var DH_SVF_NOTCH     = 3;
+var DH_SVF_ALLPASS   = 4;
+var DH_SVF_PEAK      = 5;
+var DH_SVF_LOWSHELF  = 6;
+var DH_SVF_HIGHSHELF = 7;
+
+#derive(accessors)
+struct DhSvfState { ic1eq; ic2eq; }
+
+#derive(accessors)
+struct DhSvfFilter { mode; freq_hz; q; gain_db; sample_rate; states; bypassed; mix; g; k; a1; a2; a3; a; }
+
+# new(mode, freq_hz, q, gain_db, sample_rate, channels).
+#must_use
+fn dhvani_svf_new(mode, freq_hz, q, gain_db, sample_rate, channels) {
+    var self = alloc(sizeof(DhSvfFilter));
+    DhSvfFilter_set_mode(self, mode);
+    DhSvfFilter_set_freq_hz(self, freq_hz);
+    DhSvfFilter_set_q(self, f64_max(q, 0.01));
+    DhSvfFilter_set_gain_db(self, gain_db);
+    DhSvfFilter_set_sample_rate(self, sample_rate);
+    var states = vec_new();
+    var c = 0;
+    while (c < channels) {
+        var st = alloc(sizeof(DhSvfState));
+        DhSvfState_set_ic1eq(st, 0);
+        DhSvfState_set_ic2eq(st, 0);
+        vec_push(states, st);
+        c = c + 1;
+    }
+    DhSvfFilter_set_states(self, states);
+    DhSvfFilter_set_bypassed(self, 0);
+    DhSvfFilter_set_mix(self, 1.0);
+    DhSvfFilter_set_g(self, 0);
+    DhSvfFilter_set_k(self, 0);
+    DhSvfFilter_set_a1(self, 0);
+    DhSvfFilter_set_a2(self, 0);
+    DhSvfFilter_set_a3(self, 0);
+    DhSvfFilter_set_a(self, 1.0);
+    dhvani_svf_update_coeffs(self);
+    return self;
+}
+
+# recompute g/k/a1/a2/a3/a from current params.
+fn dhvani_svf_update_coeffs(self) {
+    var sr = f64_from(DhSvfFilter_sample_rate(self));
+    var freq = f64_clamp(DhSvfFilter_freq_hz(self), 1.0, f64_mul(sr, 0.499));
+    var g = dhvani_tan(f64_div(f64_mul(F64_PI, freq), sr));
+    var q = f64_max(DhSvfFilter_q(self), 0.01);
+    var k = f64_div(1.0, q);
+    var a = f64_pow(10.0, f64_div(DhSvfFilter_gain_db(self), 40.0));
+    DhSvfFilter_set_a(self, a);
+    var mode = DhSvfFilter_mode(self);
+    if (mode == DH_SVF_PEAK) {
+        k = f64_div(1.0, f64_mul(q, a));
+    } elif (mode == DH_SVF_LOWSHELF) {
+        g = f64_mul(g, f64_sqrt(a));
+    } elif (mode == DH_SVF_HIGHSHELF) {
+        g = f64_div(g, f64_sqrt(a));
+    }
+    var denom = f64_add(1.0, f64_mul(g, f64_add(g, k)));
+    var a1 = f64_div(1.0, denom);
+    var a2 = f64_mul(g, a1);
+    var a3 = f64_mul(g, a2);
+    DhSvfFilter_set_g(self, g);
+    DhSvfFilter_set_k(self, k);
+    DhSvfFilter_set_a1(self, a1);
+    DhSvfFilter_set_a2(self, a2);
+    DhSvfFilter_set_a3(self, a3);
+    return 0;
+}
+
+# process one sample for `channel`; updates channel state.
+fn dhvani_svf_process_sample_internal(self, input, channel) {
+    var s = vec_get(DhSvfFilter_states(self), channel);
+    var ic1 = DhSvfState_ic1eq(s);
+    var ic2 = DhSvfState_ic2eq(s);
+    var k = DhSvfFilter_k(self);
+    var a = DhSvfFilter_a(self);
+    var v3 = f64_sub(input, ic2);
+    var v1 = f64_add(f64_mul(DhSvfFilter_a1(self), ic1), f64_mul(DhSvfFilter_a2(self), v3));
+    var v2 = f64_add(f64_add(ic2, f64_mul(DhSvfFilter_a2(self), ic1)), f64_mul(DhSvfFilter_a3(self), v3));
+    DhSvfState_set_ic1eq(s, f64_sub(f64_mul(2.0, v1), ic1));
+    DhSvfState_set_ic2eq(s, f64_sub(f64_mul(2.0, v2), ic2));
+    var mode = DhSvfFilter_mode(self);
+    if (mode == DH_SVF_LOWPASS)  { return v2; }
+    if (mode == DH_SVF_HIGHPASS) { return f64_sub(f64_sub(input, f64_mul(k, v1)), v2); }
+    if (mode == DH_SVF_BANDPASS) { return v1; }
+    if (mode == DH_SVF_NOTCH)    { return f64_sub(input, f64_mul(k, v1)); }
+    if (mode == DH_SVF_ALLPASS)  { return f64_sub(input, f64_mul(f64_mul(2.0, k), v1)); }
+    if (mode == DH_SVF_PEAK)     { return f64_add(input, f64_mul(f64_sub(f64_mul(a, a), 1.0), v1)); }
+    if (mode == DH_SVF_LOWSHELF) {
+        return f64_add(f64_add(input, f64_mul(f64_sub(f64_mul(a, a), 1.0), v2)),
+                       f64_mul(f64_mul(f64_sub(a, 1.0), k), v1));
+    }
+    # HighShelf
+    var hp = f64_sub(f64_sub(input, f64_mul(k, v1)), v2);
+    return f64_add(f64_add(input, f64_mul(f64_sub(f64_mul(a, a), 1.0), hp)),
+                   f64_mul(f64_mul(f64_sub(a, 1.0), k), v1));
+}
+
+# process(buf) -- filter in place with dry/wet mix.
+fn dhvani_svf_process(self, buf) {
+    if (DhSvfFilter_bypassed(self) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var mix = DhSvfFilter_mix(self);
+    var dry = f64_sub(1.0, mix);
+    var frame = 0;
+    while (frame < frames) {
+        var c = 0;
+        while (c < ch) {
+            var idx = frame * ch + c;
+            var input = vec_get(samples, idx);
+            var output = dhvani_svf_process_sample_internal(self, input, c);
+            vec_set(samples, idx, f64_add(f64_mul(input, dry), f64_mul(output, mix)));
+            c = c + 1;
+        }
+        frame = frame + 1;
+    }
+    return 0;
+}
+
+# process_sample(sample, channel) -- passthrough if channel out of range.
+#must_use
+fn dhvani_svf_process_sample(self, sample, channel) {
+    if (channel < vec_len(DhSvfFilter_states(self))) {
+        return dhvani_svf_process_sample_internal(self, sample, channel);
+    }
+    return sample;
+}
+
+fn dhvani_svf_set_params(self, mode, freq_hz, q, gain_db) {
+    DhSvfFilter_set_mode(self, mode);
+    DhSvfFilter_set_freq_hz(self, freq_hz);
+    DhSvfFilter_set_q(self, f64_max(q, 0.01));
+    DhSvfFilter_set_gain_db(self, gain_db);
+    dhvani_svf_update_coeffs(self);
+    return 0;
+}
+fn dhvani_svf_set_frequency(self, freq_hz) { DhSvfFilter_set_freq_hz(self, freq_hz); dhvani_svf_update_coeffs(self); return 0; }
+fn dhvani_svf_set_q(self, q) { DhSvfFilter_set_q(self, f64_max(q, 0.01)); dhvani_svf_update_coeffs(self); return 0; }
+fn dhvani_svf_set_gain_db(self, gain_db) { DhSvfFilter_set_gain_db(self, gain_db); dhvani_svf_update_coeffs(self); return 0; }
+fn dhvani_svf_set_sample_rate(self, sample_rate) { DhSvfFilter_set_sample_rate(self, sample_rate); dhvani_svf_update_coeffs(self); return 0; }
+fn dhvani_svf_set_bypass(self, bypassed) { DhSvfFilter_set_bypassed(self, bypassed); return 0; }
+fn dhvani_svf_set_mix(self, mix) { DhSvfFilter_set_mix(self, f64_clamp(mix, 0, 1.0)); return 0; }
+
+fn dhvani_svf_reset(self) {
+    var states = DhSvfFilter_states(self);
+    var n = vec_len(states);
+    var i = 0;
+    while (i < n) {
+        var st = vec_get(states, i);
+        DhSvfState_set_ic1eq(st, 0);
+        DhSvfState_set_ic2eq(st, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+#inline
+#must_use
+fn dhvani_svf_mode(self) { return DhSvfFilter_mode(self); }
+#inline
+#must_use
+fn dhvani_svf_freq_hz(self) { return DhSvfFilter_freq_hz(self); }
+#inline
+#must_use
+fn dhvani_svf_q(self) { return DhSvfFilter_q(self); }
+#inline
+#must_use
+fn dhvani_svf_gain_db(self) { return DhSvfFilter_gain_db(self); }
+#inline
+#must_use
+fn dhvani_svf_mix(self) { return DhSvfFilter_mix(self); }
+#must_use
+fn dhvani_svf_is_bypassed(self) {
+    if (DhSvfFilter_bypassed(self) == 1) { return 1; }
+    return 0;
+}

@@ -1,0 +1,182 @@
+# svf.tcyr -- parity tests for src/svf.cyr
+# Ported one-for-one from the 16 #[test] blocks in rust-old/src/dsp/svf.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/svf.cyr"
+
+alloc_init();
+
+fn make_sine_vec(freq, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr));
+        vec_push(v, f64_mul(f64_sin(ph), 0.8));
+        i = i + 1;
+    }
+    return v;
+}
+fn make_sine(freq, sr, frames) { return dhvani_buffer_from_interleaved(make_sine_vec(freq, sr, frames), 1, sr); }
+fn copy_vec(src) {
+    var d = vec_new();
+    var i = 0;
+    var n = vec_len(src);
+    while (i < n) { vec_push(d, vec_get(src, i)); i = i + 1; }
+    return d;
+}
+fn in_range(x, lo, hi) { if (f64_lt(x, lo) == 1) { return 0; } if (f64_gt(x, hi) == 1) { return 0; } return 1; }
+
+# ---- lowpass_attenuates_highs ----
+test_group("lowpass_attenuates_highs");
+var b1 = make_sine(10000.0, 44100, 4096);
+var r1b = dhvani_buffer_rms(b1);
+var f1 = dhvani_svf_new(DH_SVF_LOWPASS, 500.0, 0.707, 0, 44100, 1);
+dhvani_svf_process(f1, b1);
+assert(f64_lt(dhvani_buffer_rms(b1), f64_mul(r1b, 0.2)), "LP attenuates highs");
+
+# ---- highpass_attenuates_lows ----
+test_group("highpass_attenuates_lows");
+var b2 = make_sine(100.0, 44100, 4096);
+var r2b = dhvani_buffer_rms(b2);
+var f2 = dhvani_svf_new(DH_SVF_HIGHPASS, 5000.0, 0.707, 0, 44100, 1);
+dhvani_svf_process(f2, b2);
+assert(f64_lt(dhvani_buffer_rms(b2), f64_mul(r2b, 0.2)), "HP attenuates lows");
+
+# ---- bandpass_passes_center ----
+test_group("bandpass_passes_center");
+var b3 = make_sine(1000.0, 44100, 4096);
+var r3b = dhvani_buffer_rms(b3);
+var f3 = dhvani_svf_new(DH_SVF_BANDPASS, 1000.0, 1.0, 0, 44100, 1);
+dhvani_svf_process(f3, b3);
+assert(f64_gt(dhvani_buffer_rms(b3), f64_mul(r3b, 0.3)), "BP passes center");
+
+# ---- bypass_no_change ----
+test_group("bypass_no_change");
+var sv4 = make_sine_vec(440.0, 44100, 1024);
+var b4 = dhvani_buffer_from_interleaved(copy_vec(sv4), 44100 / 44100, 44100);
+var f4 = dhvani_svf_new(DH_SVF_LOWPASS, 200.0, 0.707, 0, 44100, 1);
+dhvani_svf_set_bypass(f4, 1);
+dhvani_svf_process(f4, b4);
+var s4 = dhvani_buffer_samples(b4);
+var i4 = 0;
+var ok4 = 1;
+while (i4 < 1024) {
+    if (vec_get(s4, i4) != vec_get(sv4, i4)) { ok4 = 0; }
+    i4 = i4 + 1;
+}
+assert_eq(ok4, 1, "bypass leaves samples unchanged");
+
+# ---- reset_clears_state ----
+test_group("reset_clears_state");
+var f5 = dhvani_svf_new(DH_SVF_LOWPASS, 1000.0, 0.707, 0, 44100, 2);
+var w5a = dhvani_svf_process_sample(f5, 0.5, 0);
+var w5b = dhvani_svf_process_sample(f5, 0.5, 1);
+dhvani_svf_reset(f5);
+assert_eq(dhvani_svf_process_sample(f5, 0, 0), 0, "silence in -> silence out after reset");
+
+# ---- modulation_safe ----
+test_group("modulation_safe");
+var f6 = dhvani_svf_new(DH_SVF_LOWPASS, 1000.0, 0.707, 0, 44100, 1);
+var i6 = 0;
+var fin6 = 1;
+while (i6 < 10000) {
+    var freq6 = f64_add(100.0, f64_mul(f64_div(f64_from(i6), f64_from(10000)), 15000.0));
+    dhvani_svf_set_frequency(f6, freq6);
+    if (dhvani_is_finite(dhvani_svf_process_sample(f6, 0.5, 0)) == 0) { fin6 = 0; }
+    i6 = i6 + 1;
+}
+assert_eq(fin6, 1, "no NaN/Inf under modulation");
+
+# ---- notch_rejects_center ----
+test_group("notch_rejects_center");
+var b7 = make_sine(1000.0, 44100, 4096);
+var r7b = dhvani_buffer_rms(b7);
+var f7 = dhvani_svf_new(DH_SVF_NOTCH, 1000.0, 5.0, 0, 44100, 1);
+dhvani_svf_process(f7, b7);
+assert(f64_lt(dhvani_buffer_rms(b7), f64_mul(r7b, 0.3)), "notch rejects center");
+
+# ---- stereo_independent ----
+test_group("stereo_independent");
+var f8 = dhvani_svf_new(DH_SVF_LOWPASS, 1000.0, 0.707, 0, 44100, 2);
+var ol8 = dhvani_svf_process_sample(f8, 1.0, 0);
+var or8 = dhvani_svf_process_sample(f8, 0, 1);
+assert(f64_gt(f64_abs(f64_sub(ol8, or8)), 0.001), "channels independent");
+
+# ---- output_finite ----
+test_group("output_finite");
+var b9 = make_sine(440.0, 44100, 44100);
+var f9 = dhvani_svf_new(DH_SVF_LOWPASS, 2000.0, 0.707, 0, 44100, 1);
+dhvani_svf_process(f9, b9);
+var s9 = dhvani_buffer_samples(b9);
+var i9 = 0;
+var fin9 = 1;
+while (i9 < 44100) { if (dhvani_is_finite(vec_get(s9, i9)) == 0) { fin9 = 0; } i9 = i9 + 1; }
+assert_eq(fin9, 1, "all samples finite");
+
+# ---- peak_unity_passthrough ----
+test_group("peak_unity_passthrough");
+var sv10 = make_sine_vec(1000.0, 44100, 4096);
+var b10 = dhvani_buffer_from_interleaved(copy_vec(sv10), 1, 44100);
+var f10 = dhvani_svf_new(DH_SVF_PEAK, 1000.0, 1.0, 0, 44100, 1);
+dhvani_svf_process(f10, b10);
+var s10 = dhvani_buffer_samples(b10);
+var i10 = 2048;
+var ok10 = 1;
+while (i10 < 4096) {
+    if (f64_gt(f64_abs(f64_sub(vec_get(s10, i10), vec_get(sv10, i10))), 0.01) == 1) { ok10 = 0; }
+    i10 = i10 + 1;
+}
+assert_eq(ok10, 1, "peak 0dB is unity after settling");
+
+# ---- peak_boosts_center ----
+test_group("peak_boosts_center");
+var b11 = make_sine(1000.0, 44100, 8192);
+var r11b = dhvani_buffer_rms(b11);
+var f11 = dhvani_svf_new(DH_SVF_PEAK, 1000.0, 1.0, 12.0, 44100, 1);
+dhvani_svf_process(f11, b11);
+assert(f64_gt(dhvani_buffer_rms(b11), f64_mul(r11b, 1.5)), "peak +12dB boosts center");
+
+# ---- peak_leaves_far_frequencies ----
+test_group("peak_leaves_far_frequencies");
+var b12 = make_sine(100.0, 44100, 8192);
+var r12b = dhvani_buffer_rms(b12);
+var f12 = dhvani_svf_new(DH_SVF_PEAK, 1000.0, 2.0, 12.0, 44100, 1);
+dhvani_svf_process(f12, b12);
+assert_eq(in_range(f64_div(dhvani_buffer_rms(b12), r12b), 0.7, 1.5), 1, "peak spares distant freq");
+
+# ---- low_shelf_boosts_lows ----
+test_group("low_shelf_boosts_lows");
+var b13 = make_sine(100.0, 44100, 8192);
+var r13b = dhvani_buffer_rms(b13);
+var f13 = dhvani_svf_new(DH_SVF_LOWSHELF, 1000.0, 0.707, 12.0, 44100, 1);
+dhvani_svf_process(f13, b13);
+assert(f64_gt(dhvani_buffer_rms(b13), f64_mul(r13b, 1.5)), "low shelf boosts lows");
+
+# ---- low_shelf_spares_highs ----
+test_group("low_shelf_spares_highs");
+var b14 = make_sine(10000.0, 44100, 8192);
+var r14b = dhvani_buffer_rms(b14);
+var f14 = dhvani_svf_new(DH_SVF_LOWSHELF, 1000.0, 0.707, 12.0, 44100, 1);
+dhvani_svf_process(f14, b14);
+assert_eq(in_range(f64_div(dhvani_buffer_rms(b14), r14b), 0.7, 1.5), 1, "low shelf spares highs");
+
+# ---- high_shelf_boosts_highs ----
+test_group("high_shelf_boosts_highs");
+var b15 = make_sine(10000.0, 44100, 8192);
+var r15b = dhvani_buffer_rms(b15);
+var f15 = dhvani_svf_new(DH_SVF_HIGHSHELF, 1000.0, 0.707, 12.0, 44100, 1);
+dhvani_svf_process(f15, b15);
+assert(f64_gt(dhvani_buffer_rms(b15), f64_mul(r15b, 1.5)), "high shelf boosts highs");
+
+# ---- high_shelf_spares_lows ----
+test_group("high_shelf_spares_lows");
+var b16 = make_sine(100.0, 44100, 8192);
+var r16b = dhvani_buffer_rms(b16);
+var f16 = dhvani_svf_new(DH_SVF_HIGHSHELF, 1000.0, 0.707, 12.0, 44100, 1);
+dhvani_svf_process(f16, b16);
+assert_eq(in_range(f64_div(dhvani_buffer_rms(b16), r16b), 0.7, 1.5), 1, "high shelf spares lows");
+
+var rc = assert_summary();
+syscall(60, rc);

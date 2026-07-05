@@ -263,8 +263,10 @@ their upstream deps (svara for voice) are already ported.
   set_params error code. **15 green**.
 - ✅ `automation` → `src/automation.cyr` — breakpoint curves (step/linear/exp/
   smooth); `Exponential(f32)` payload → `exp` field; `f64_pow(0)` guarded. **22 green**.
-- ⬜ Next: `svf`/`biquad`/`dsp/mod`/`routing` (L1 filters), then Wave C
-  (eq/deesser/compressor/limiter/delay/reverb/graphic_eq).
+- ✅ `svf` → `src/svf.cyr` — Cytomic SVF, 8 modes; per-channel state vec;
+  `dhvani_tan` (added to error.cyr — no `f64_tan` in stdlib). **16 green**.
+- ⬜ Next: `biquad` (RBJ design, data-carrying `FilterType`), `dsp/mod`
+  (facade + soft_knee_gain), `routing`, then Wave C.
 
 ### Cyrius idioms confirmed (this port)
 
