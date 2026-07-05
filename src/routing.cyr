@@ -1,0 +1,120 @@
+# routing.cyr -- N×M channel routing matrix with per-crosspoint gain.
+# Ports rust-old/src/dsp/routing.rs. L1: deps error + buffer.
+# Vec<Vec<f32>> gains -> a flat `vec` arena indexed [out*inputs + inp]
+# (Vec-arena-over-nested). apply() Result -> null-handle sentinel. serde dropped.
+
+#derive(accessors)
+struct DhRoutingMatrix { gains; inputs; outputs; }
+
+# new(inputs, outputs) -- all crosspoints zero.
+#must_use
+fn dhvani_routing_new(inputs, outputs) {
+    var self = alloc(sizeof(DhRoutingMatrix));
+    DhRoutingMatrix_set_gains(self, dh_vec_zeros(outputs * inputs));
+    DhRoutingMatrix_set_inputs(self, inputs);
+    DhRoutingMatrix_set_outputs(self, outputs);
+    return self;
+}
+
+# set_gain(output_ch, input_ch, gain) -- 1 on success, 0 if out of bounds.
+fn dhvani_routing_set_gain(self, output_ch, input_ch, gain) {
+    if (output_ch < DhRoutingMatrix_outputs(self)) {
+        if (input_ch < DhRoutingMatrix_inputs(self)) {
+            vec_set(DhRoutingMatrix_gains(self), output_ch * DhRoutingMatrix_inputs(self) + input_ch, gain);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# gain(output_ch, input_ch) -- crosspoint gain, or 0.0 if out of bounds.
+#must_use
+fn dhvani_routing_gain(self, output_ch, input_ch) {
+    if (output_ch < DhRoutingMatrix_outputs(self)) {
+        if (input_ch < DhRoutingMatrix_inputs(self)) {
+            return vec_get(DhRoutingMatrix_gains(self), output_ch * DhRoutingMatrix_inputs(self) + input_ch);
+        }
+    }
+    return 0;
+}
+
+#inline
+#must_use
+fn dhvani_routing_inputs(self) { return DhRoutingMatrix_inputs(self); }
+#inline
+#must_use
+fn dhvani_routing_outputs(self) { return DhRoutingMatrix_outputs(self); }
+
+# identity(channels) -- pass-through (unity on the diagonal).
+#must_use
+fn dhvani_routing_identity(channels) {
+    var m = dhvani_routing_new(channels, channels);
+    var i = 0;
+    while (i < channels) { dhvani_routing_set_gain(m, i, i, 1.0); i = i + 1; }
+    return m;
+}
+#must_use
+fn dhvani_routing_mono_to_stereo() {
+    var m = dhvani_routing_new(1, 2);
+    dhvani_routing_set_gain(m, 0, 0, 1.0);
+    dhvani_routing_set_gain(m, 1, 0, 1.0);
+    return m;
+}
+#must_use
+fn dhvani_routing_stereo_to_mono() {
+    var m = dhvani_routing_new(2, 1);
+    dhvani_routing_set_gain(m, 0, 0, 0.5);
+    dhvani_routing_set_gain(m, 0, 1, 0.5);
+    return m;
+}
+#must_use
+fn dhvani_routing_mid_side_encode() {
+    var m = dhvani_routing_new(2, 2);
+    dhvani_routing_set_gain(m, 0, 0, 0.5);
+    dhvani_routing_set_gain(m, 0, 1, 0.5);
+    dhvani_routing_set_gain(m, 1, 0, 0.5);
+    dhvani_routing_set_gain(m, 1, 1, f64_neg(0.5));
+    return m;
+}
+#must_use
+fn dhvani_routing_mid_side_decode() {
+    var m = dhvani_routing_new(2, 2);
+    dhvani_routing_set_gain(m, 0, 0, 1.0);
+    dhvani_routing_set_gain(m, 0, 1, 1.0);
+    dhvani_routing_set_gain(m, 1, 0, 1.0);
+    dhvani_routing_set_gain(m, 1, 1, f64_neg(1.0));
+    return m;
+}
+
+# apply(buf) -- route to a new buffer with `outputs` channels; 0 on channel
+# count mismatch.
+#must_use
+fn dhvani_routing_apply(self, buf) {
+    var in_ch = DhAudioBuffer_channels(buf);
+    var inputs = DhRoutingMatrix_inputs(self);
+    if (in_ch != inputs) { return 0; }
+    var frames = DhAudioBuffer_frames(buf);
+    var out_ch = DhRoutingMatrix_outputs(self);
+    var samples = DhAudioBuffer_samples(buf);
+    var gains = DhRoutingMatrix_gains(self);
+    var output = dh_vec_zeros(frames * out_ch);
+    var frame = 0;
+    while (frame < frames) {
+        var o = 0;
+        while (o < out_ch) {
+            var sum = 0;
+            var i = 0;
+            while (i < inputs) {
+                var gain = vec_get(gains, o * inputs + i);
+                if (gain != 0) {
+                    sum = f64_add(sum, f64_mul(vec_get(samples, frame * in_ch + i), gain));
+                }
+                i = i + 1;
+            }
+            vec_set(output, frame * out_ch + o, sum);
+            o = o + 1;
+        }
+        frame = frame + 1;
+    }
+    return dhvani_buffer_from_interleaved(output, out_ch, DhAudioBuffer_sample_rate(buf));
+}

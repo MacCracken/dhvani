@@ -1,0 +1,41 @@
+# dsp.cyr -- DSP facade: free-function processors + shared soft-knee math.
+# Ports the OWN code of rust-old/src/dsp/mod.rs (the module re-exports are
+# implicit in the flat bundle). L1: deps error + simd + buffer. The abaco DSP
+# math (amplitude_to_db / db_to_amplitude / sanitize_sample) is used directly
+# from abaco by consumers.
+
+# noise_gate(buf, threshold) -- silence samples with |s| < threshold.
+fn dhvani_dsp_noise_gate(buf, threshold) {
+    dhvani_simd_noise_gate(DhAudioBuffer_samples(buf), threshold);
+    return 0;
+}
+
+# hard_limiter(buf, ceiling) -- clamp to [-|ceiling|, |ceiling|].
+fn dhvani_dsp_hard_limiter(buf, ceiling) {
+    var c = f64_abs(ceiling);
+    dhvani_simd_clamp(DhAudioBuffer_samples(buf), f64_neg(c), c);
+    return 0;
+}
+
+# normalize(buf, target_peak) -- scale so the peak reaches target_peak.
+fn dhvani_dsp_normalize(buf, target_peak) {
+    var peak = dhvani_buffer_peak(buf);
+    if (f64_gt(peak, 0) == 1) {
+        dhvani_buffer_apply_gain(buf, f64_div(target_peak, peak));
+    }
+    return 0;
+}
+
+# soft_knee_gain(env_db, threshold_db, knee_db, slope) -- gain reduction in dB
+# (negative = reduction). Shared by compressor + limiter for the quadratic
+# knee region. slope = 1/ratio - 1 (compressor) or -1.0 (limiter).
+#must_use
+fn dhvani_dsp_soft_knee_gain(env_db, threshold_db, knee_db, slope) {
+    var half_knee = f64_div(knee_db, 2.0);
+    var lower = f64_sub(threshold_db, half_knee);
+    var upper = f64_add(threshold_db, half_knee);
+    if (f64_le(env_db, lower) == 1) { return 0; }
+    if (f64_ge(env_db, upper) == 1) { return f64_mul(slope, f64_sub(env_db, threshold_db)); }
+    var x = f64_sub(env_db, lower);
+    return f64_div(f64_mul(f64_mul(slope, x), x), f64_mul(2.0, knee_db));
+}

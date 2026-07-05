@@ -268,9 +268,15 @@ their upstream deps (svara for voice) are already ported.
 - ✅ `biquad` → `src/biquad.cyr` — RBJ cookbook, 8 types; data-carrying
   `FilterType{gain_db}` → code + separate field; `abaco::angular_frequency`/
   `db_gain_factor`; SIMD stereo fast-path dropped (scalar loop). **16 green**.
-- ⬜ Next: `dsp/mod` (facade + soft_knee_gain + noise_gate/limiter/normalize
-  free fns), `routing`, then Wave C (eq/deesser/compressor/limiter/delay/
-  reverb/graphic_eq).
+- ✅ `dsp/mod` → `src/dsp.cyr` — facade free fns (noise_gate/hard_limiter/
+  normalize) + `soft_knee_gain`; abaco db-math re-exports. **24 green** (12
+  tests; 7 deferred to Wave C — need compressor/limiter/delay/eq).
+- ✅ `routing` → `src/routing.cyr` — N×M matrix; `Vec<Vec>`→flat arena
+  (`out*inputs+inp`); apply Result→null-handle. **19 green**.
+
+**L1 layer complete.** Next: **Wave C** (DSP dependents) — `compressor`,
+`limiter`, `delay`, `reverb` (L1, use dsp/soft_knee + abaco), `eq`/`deesser`
+(L2, use biquad), `graphic_eq` (L3, uses eq).
 
 ### Cyrius idioms confirmed (this port)
 

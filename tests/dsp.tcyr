@@ -1,0 +1,103 @@
+# dsp.tcyr -- parity tests for src/dsp.cyr (the dsp/mod facade)
+# Ports the #[test] blocks from rust-old/src/dsp/mod.rs whose deps are ported:
+# the free functions (noise_gate/hard_limiter/normalize), abaco db conversions,
+# soft_knee_gain, plus biquad/clock integration checks. DEFERRED to Wave C
+# (need compressor/limiter/delay/eq): compressor_bypass, compressor_set_sample_rate,
+# limiter_bypass, delay_latency_frames, modulated_delay_*, parametric_eq_set_params.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/clock.cyr"
+include "src/biquad.cyr"
+include "src/dsp.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+fn fill(n, v) { var out = vec_new(); var i = 0; while (i < n) { vec_push(out, v); i = i + 1; } return out; }
+
+# ---- noise_gate_silences_below_threshold ----
+test_group("noise_gate_silences_below_threshold");
+var gv = vec_new(); vec_push(gv, 0.01); vec_push(gv, f64_neg(0.01)); vec_push(gv, 0.5); vec_push(gv, f64_neg(0.5));
+var gb = dhvani_buffer_from_interleaved(gv, 1, 44100);
+dhvani_dsp_noise_gate(gb, 0.1);
+var gs = dhvani_buffer_samples(gb);
+assert_eq(vec_get(gs, 0), 0, "0.01 gated");
+assert_eq(vec_get(gs, 1), 0, "-0.01 gated");
+assert(near(vec_get(gs, 2), 0.5, 0.0001), "0.5 kept");
+
+# ---- hard_limiter_clamps ----
+test_group("hard_limiter_clamps");
+var hv = vec_new(); vec_push(hv, 2.0); vec_push(hv, f64_neg(2.0)); vec_push(hv, 0.5);
+var hb = dhvani_buffer_from_interleaved(hv, 1, 44100);
+dhvani_dsp_hard_limiter(hb, 1.0);
+var hs = dhvani_buffer_samples(hb);
+assert(near(vec_get(hs, 0), 1.0, 0.0001), "2 -> 1");
+assert(near(vec_get(hs, 1), f64_neg(1.0), 0.0001), "-2 -> -1");
+assert(near(vec_get(hs, 2), 0.5, 0.0001), "0.5 kept");
+
+# ---- normalize_to_peak ----
+test_group("normalize_to_peak");
+var nv = vec_new(); vec_push(nv, 0.5); vec_push(nv, f64_neg(0.25));
+var nb = dhvani_buffer_from_interleaved(nv, 1, 44100);
+dhvani_dsp_normalize(nb, 1.0);
+assert(near(dhvani_buffer_peak(nb), 1.0, 0.01), "peak normalized to 1.0");
+
+# ---- db_conversions (abaco) ----
+test_group("db_conversions");
+assert(f64_lt(f64_abs(amplitude_to_db(1.0)), 0.01), "amp 1.0 -> 0 dB");
+assert(near(amplitude_to_db(0.5), f64_neg(6.02), 0.1), "amp 0.5 -> ~-6 dB");
+assert(near(db_to_amplitude(0), 1.0, 0.01), "0 dB -> amp 1.0");
+assert(near(db_to_amplitude(f64_neg(6.02)), 0.5, 0.01), "-6 dB -> amp 0.5");
+
+# ---- soft_knee_gain ----
+test_group("soft_knee_gain");
+assert_eq(dhvani_dsp_soft_knee_gain(f64_neg(30.0), f64_neg(20.0), 0, f64_neg(0.75)), 0, "hard below threshold -> 0");
+assert(near(dhvani_dsp_soft_knee_gain(f64_neg(10.0), f64_neg(20.0), 0, f64_neg(0.75)), f64_neg(7.5), 0.01), "hard above -> -7.5");
+assert(near(dhvani_dsp_soft_knee_gain(f64_neg(20.0), f64_neg(20.0), 12.0, f64_neg(0.75)), f64_neg(1.125), 0.01), "quadratic mid -> -1.125");
+assert_eq(dhvani_dsp_soft_knee_gain(f64_neg(25.0), f64_neg(20.0), 0, f64_neg(1.0)), 0, "zero knee below -> 0");
+assert(near(dhvani_dsp_soft_knee_gain(f64_neg(15.0), f64_neg(20.0), 0, f64_neg(1.0)), f64_neg(5.0), 0.01), "zero knee above -> -5");
+
+# ---- biquad_bypass (integration) ----
+test_group("biquad_bypass");
+var bf = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 500.0, 0.707, 44100, 1);
+dhvani_biquad_set_bypass(bf, 1);
+assert_eq(dhvani_biquad_is_bypassed(bf), 1, "reports bypassed");
+var bbv = fill(64, 1.0);
+var bbo = fill(64, 1.0);
+var bbb = dhvani_buffer_from_interleaved(bbv, 1, 44100);
+dhvani_biquad_process(bf, bbb);
+var bbs = dhvani_buffer_samples(bbb);
+var bi = 0; var bok = 1;
+while (bi < 64) { if (vec_get(bbs, bi) != vec_get(bbo, bi)) { bok = 0; } bi = bi + 1; }
+assert_eq(bok, 1, "bypassed filter unchanged");
+
+# ---- biquad_set_sample_rate (integration) ----
+test_group("biquad_set_sample_rate");
+var srf = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 1);
+dhvani_biquad_set_sample_rate(srf, 48000);
+var srb = dhvani_buffer_from_interleaved(fill(64, 0.5), 1, 48000);
+dhvani_biquad_process(srf, srb);
+var srs = dhvani_buffer_samples(srb);
+var sri = 0; var srfin = 1;
+while (sri < 64) { if (dhvani_is_finite(vec_get(srs, sri)) == 0) { srfin = 0; } sri = sri + 1; }
+assert_eq(srfin, 1, "coeffs rebuilt, output finite");
+
+# ---- clock_getters (integration) ----
+test_group("clock_getters");
+var ck = dhvani_clock_with_tempo(48000, 120.0);
+assert_eq(dhvani_clock_sample_rate(ck), 48000, "sample_rate 48000");
+assert_eq(dhvani_clock_position_samples(ck), 0, "position 0");
+assert(near(dhvani_clock_tempo_bpm(ck), 120.0, 0.0000001), "tempo 120");
+assert_eq(dhvani_clock_is_running(ck), 0, "not running");
+
+# ---- clock_set_tempo (integration) ----
+test_group("clock_set_tempo");
+var ck2 = dhvani_clock_with_tempo(44100, 120.0);
+dhvani_clock_set_tempo(ck2, 140.0);
+assert(near(dhvani_clock_tempo_bpm(ck2), 140.0, 0.0000001), "tempo updated to 140");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,90 @@
+# routing.tcyr -- parity tests for src/routing.cyr
+# Ported one-for-one from the 8 #[test] blocks in rust-old/src/dsp/routing.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/routing.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# ---- identity_passthrough ----
+test_group("identity_passthrough");
+var iv = vec_new(); vec_push(iv, 0.5); vec_push(iv, f64_neg(0.5)); vec_push(iv, 0.3); vec_push(iv, f64_neg(0.3));
+var ib = dhvani_buffer_from_interleaved(iv, 2, 44100);
+var im = dhvani_routing_identity(2);
+var io = dhvani_routing_apply(im, ib);
+assert_eq(dhvani_buffer_channels(io), 2, "2 out channels");
+var ios = dhvani_buffer_samples(io);
+var ii = 0; var iok = 1;
+while (ii < 4) { if (near(vec_get(ios, ii), vec_get(iv, ii), 0.000001) == 0) { iok = 0; } ii = ii + 1; }
+assert_eq(iok, 1, "identity passes through");
+
+# ---- mono_to_stereo ----
+test_group("mono_to_stereo");
+var mv = vec_new(); vec_push(mv, 0.5); vec_push(mv, 0.3);
+var mb = dhvani_buffer_from_interleaved(mv, 1, 44100);
+var mo = dhvani_routing_apply(dhvani_routing_mono_to_stereo(), mb);
+assert_eq(dhvani_buffer_channels(mo), 2, "2 out channels");
+var mos = dhvani_buffer_samples(mo);
+assert(near(vec_get(mos, 0), 0.5, 0.000001), "f0 L = 0.5");
+assert(near(vec_get(mos, 1), 0.5, 0.000001), "f0 R = 0.5");
+assert(near(vec_get(mos, 2), 0.3, 0.000001), "f1 L = 0.3");
+assert(near(vec_get(mos, 3), 0.3, 0.000001), "f1 R = 0.3");
+
+# ---- stereo_to_mono ----
+test_group("stereo_to_mono");
+var sv = vec_new(); vec_push(sv, 1.0); vec_push(sv, 0.5);
+var sb = dhvani_buffer_from_interleaved(sv, 2, 44100);
+var so = dhvani_routing_apply(dhvani_routing_stereo_to_mono(), sb);
+assert_eq(dhvani_buffer_channels(so), 1, "1 out channel");
+assert(near(vec_get(dhvani_buffer_samples(so), 0), 0.75, 0.000001), "(1.0+0.5)/2 = 0.75");
+
+# ---- mid_side_roundtrip ----
+test_group("mid_side_roundtrip");
+var rv = vec_new(); vec_push(rv, 0.8); vec_push(rv, 0.2); vec_push(rv, 0.6); vec_push(rv, 0.4);
+var rb = dhvani_buffer_from_interleaved(rv, 2, 44100);
+var enc = dhvani_routing_apply(dhvani_routing_mid_side_encode(), rb);
+var dec = dhvani_routing_apply(dhvani_routing_mid_side_decode(), enc);
+var decs = dhvani_buffer_samples(dec);
+var ri = 0; var rok = 1;
+while (ri < 4) { if (near(vec_get(rv, ri), vec_get(decs, ri), 0.00001) == 0) { rok = 0; } ri = ri + 1; }
+assert_eq(rok, 1, "M/S encode->decode roundtrip");
+
+# ---- custom_crosspoint_gain ----
+test_group("custom_crosspoint_gain");
+var cm = dhvani_routing_new(2, 2);
+assert_eq(dhvani_routing_set_gain(cm, 0, 0, 0.7), 1, "set (0,0) ok");
+assert_eq(dhvani_routing_set_gain(cm, 1, 1, 0.3), 1, "set (1,1) ok");
+assert(near(dhvani_routing_gain(cm, 0, 0), 0.7, 0.000001), "gain(0,0)=0.7");
+assert(near(dhvani_routing_gain(cm, 1, 1), 0.3, 0.000001), "gain(1,1)=0.3");
+assert_eq(dhvani_routing_gain(cm, 0, 1), 0, "unset crosspoint = 0");
+
+# ---- channel_mismatch_error ----
+test_group("channel_mismatch_error");
+var em = dhvani_routing_new(2, 2);
+var ebv = vec_new(); vec_push(ebv, 0.5);
+var eb = dhvani_buffer_from_interleaved(ebv, 1, 44100);
+assert_eq(dhvani_routing_apply(em, eb), 0, "channel mismatch -> null");
+
+# ---- zero_gain_passthrough ----
+test_group("zero_gain_passthrough");
+var zm = dhvani_routing_new(2, 2);
+var zv = vec_new(); vec_push(zv, 1.0); vec_push(zv, 1.0);
+var zb = dhvani_buffer_from_interleaved(zv, 2, 44100);
+var zo = dhvani_routing_apply(zm, zb);
+var zos = dhvani_buffer_samples(zo);
+var zi = 0; var zok = 1;
+while (zi < 2) { if (vec_get(zos, zi) != 0) { zok = 0; } zi = zi + 1; }
+assert_eq(zok, 1, "all-zero matrix -> silence");
+
+# ---- out_of_bounds_set_gain ----
+test_group("out_of_bounds_set_gain");
+var om = dhvani_routing_new(2, 2);
+assert_eq(dhvani_routing_set_gain(om, 5, 0, 1.0), 0, "out of bounds set -> false");
+assert_eq(dhvani_routing_gain(om, 5, 0), 0, "out of bounds gain -> 0");
+
+var rc = assert_summary();
+syscall(60, rc);
