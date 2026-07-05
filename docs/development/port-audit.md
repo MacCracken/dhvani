@@ -336,8 +336,19 @@ independently reviewed (hex constants, dry/wet blend, reduction formula) — par
   (resample 44.1→48k → `spectrum_dft` → dominant bin within 2 freq-bins of 440 Hz).
   ops.tcyr/resample.tcyr gained the loudness/analysis include chains. **55 suites,
   1202 assertions.** In the dist bundle `ops` must follow `loudness` (new dep edge).
-- ⬜ `lib` facade → `[lib] modules` dependency order + `dist/dhvani.cyr` (externalize
-  abaco + siblings; keep shipped surface auditable) + integration/proptest suites.
+- ✅ `lib` facade + `dist/dhvani.cyr` bundle. `[lib].modules` populated with all 54
+  modules in L0→L4 topological order (caught: `waveform`/`zcr` use `DhAudioBuffer`
+  so follow `buffer`, not L0; `ops` follows `loudness`). `cyrius distlib` →
+  `dist/dhvani.cyr` (9.4k lines / 340 KB) — **externalizes abaco + the 10 siblings**
+  (dhvani ships only its own code; consumers link siblings for the features they
+  use, unused refs DCE-prune). The Rust `lib.rs` `pub use` facade is a no-op in the
+  flat namespace; its crate-root helpers were folded into `error.cyr` in Wave A.
+  Validated by `tests/bundle.tcyr` (core consumer: abaco+dist, 6 layers) +
+  `tests/bundle_synth.tcyr` (synthesis feature: naad chain+abaco+dist). NOTE: linking
+  ALL 10 siblings + dist in one unit overflows the compiler's 16384 LEXID cap — an
+  unrealistic "every feature at once" case; per-feature linking is well under it
+  (dissolves under scoped modules, see the migration horizon).
+- ⬜ Integration + proptest suites (`tests/mod` → 47, `tests/proptest` → 20).
 
 **Wave F (synthesis stack) — COMPLETE (54/64, 1200 assertions):**
 

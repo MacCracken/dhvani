@@ -14,10 +14,72 @@ output = "build/dhvani"
 # `[lib]` declares the distlib bundle `cyrius distlib` writes into
 # `dist/dhvani.cyr` — every ported module concatenated in dependency order
 # (deps before dependents), each self-contained (no `include` lines), sharing
-# one flat namespace. Grows one entry per ported module; the authoritative
-# order is the ledger in docs/development/port-audit.md. Empty until L0 lands.
+# one flat namespace. Order = the L0→L4 topological layering in
+# docs/development/port-audit.md. The bundle EXTERNALIZES abaco + the synthesis
+# siblings (naad/svara/…): the Wave F wrappers reference their bare symbols, and
+# a consumer supplies those bundles (in dep order) alongside dist/dhvani.cyr —
+# unused feature refs DCE-prune. Do NOT edit dist/dhvani.cyr; rebuild with distlib.
 [lib]
 modules = [
+    # L0 — error base + error-only leaves
+    "src/error.cyr",
+    "src/simd.cyr",
+    "src/clock.cyr",
+    "src/oscillator.cyr",
+    "src/gain_smoother.cyr",
+    "src/envelope.cyr",
+    "src/lfo.cyr",
+    "src/automation.cyr",
+    "src/midi.cyr",
+    "src/voice.cyr",
+    "src/capture.cyr",
+    "src/record.cyr",
+    # L1 — buffer + its dependents
+    "src/buffer.cyr",
+    "src/convert.cyr",
+    "src/dither.cyr",
+    "src/resample.cyr",
+    "src/waveform.cyr",
+    "src/zcr.cyr",
+    "src/pan.cyr",
+    "src/svf.cyr",
+    "src/biquad.cyr",
+    "src/routing.cyr",
+    "src/dsp.cyr",
+    "src/compressor.cyr",
+    "src/limiter.cyr",
+    "src/delay.cyr",
+    "src/reverb.cyr",
+    "src/analysis.cyr",
+    "src/fft.cyr",
+    "src/loudness.cyr",
+    "src/dynamics.cyr",
+    # L2 — analysis/dsp dependents
+    "src/stft.cyr",
+    "src/chroma.cyr",
+    "src/convolution.cyr",
+    "src/noise_reduction.cyr",
+    "src/eq.cyr",
+    "src/deesser.cyr",
+    "src/ops.cyr",              # needs loudness (normalize_to_lufs)
+    "src/meter.cyr",
+    "src/midi_routing.cyr",
+    "src/midi_v2.cyr",
+    "src/translate.cyr",
+    "src/graph.cyr",
+    # L3/L4
+    "src/graphic_eq.cyr",
+    "src/key.cyr",
+    "src/onset.cyr",
+    "src/beat.cyr",
+    # Wave F — synthesis stack (externalize naad/svara/prani/nidhi/garjan/ghurni/goonj)
+    "src/synthesis.cyr",
+    "src/sampler.cyr",
+    "src/voice_synth.cyr",
+    "src/creature.cyr",
+    "src/environment.cyr",
+    "src/mechanical.cyr",
+    "src/acoustics.cyr",
 ]
 
 # stdlib: base set + the DSP/math set naad/svara use. `math` gives

@@ -1,0 +1,23 @@
+# bundle_synth.tcyr -- validates dist/dhvani.cyr for a SYNTHESIS-feature consumer:
+# the naad dependency chain + abaco, then the bundled dhvani distlib. Proves the
+# bundle's Wave F wrapper (synthesis) links against the externalized naad symbols
+# (osc_new / osc_next_sample) the consumer supplies. (Core-only linking is covered
+# by bundle.tcyr; per-feature logic by the module suites.)
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+alloc_init();
+
+test_group("bundle_synthesis_over_naad");
+var osc = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+var b = dhvani_synth_render_to_buffer(&osc_next_sample, osc, 1, 441, 44100);
+assert_eq(dhvani_buffer_frames(b), 441, "rendered 441 frames");
+assert(f64_gt(dhvani_buffer_peak(b), 0.9), "bundled synthesis over naad peaks > 0.9");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,46 @@
+# bundle.tcyr -- validates the assembled dist/dhvani.cyr the way a CORE consumer
+# links it: just abaco + the single bundled dhvani distlib (no synthesis-stack
+# siblings). Confirms the [lib].modules concatenation is a valid topological sort
+# and the core/DSP/analysis/MIDI/graph surface is callable. The Wave F wrapper
+# modules' sibling references (naad/goonj/…) are unreachable here and DCE-prune,
+# exactly as a feature-off consumer sees them. (Per-feature link is covered by
+# each module's own suite, e.g. synthesis.tcyr / acoustics.tcyr.)
+
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+alloc_init();
+
+# ---- core: buffer (L1) ----
+test_group("bundle_core");
+var buf = dhvani_buffer_silence(2, 512, 44100);
+assert_eq(dhvani_buffer_channels(buf), 2, "buffer channels");
+assert_eq(dhvani_buffer_frames(buf), 512, "buffer frames");
+
+# ---- dsp: biquad (L1) ----
+test_group("bundle_dsp");
+var lp = dhvani_biquad_new(DH_BQ_LOWPASS, 0, f64_from(1000), 0.707, f64_from(44100), 1);
+assert(lp != 0, "biquad lowpass built");
+
+# ---- analysis: spectrum_dft (L1/L2) ----
+test_group("bundle_analysis");
+var spec = dhvani_analysis_spectrum_dft(buf, 256);
+assert(spec != 0, "spectrum built");
+
+# ---- graph (L2) ----
+test_group("bundle_graph");
+var g = dhvani_graph_new();
+assert_eq(dhvani_graph_node_count(g), 0, "empty graph");
+
+# ---- midi (L0) ----
+test_group("bundle_midi");
+var clip = dhvani_midi_clip_new("t", 0, 44100);
+assert_eq(dhvani_midi_clip_duration(clip), 44100, "midi clip duration");
+
+# ---- ops::normalize (L2, needs loudness -- cross-layer within the bundle) ----
+test_group("bundle_ops");
+var ob = dhvani_buffer_silence(1, 4410, 44100);
+assert_eq(dhvani_is_finite(dhvani_ops_normalize_to_lufs(ob, f64_neg(f64_from(14)))), 1, "normalize finite");
+
+var rc = assert_summary();
+syscall(60, rc);

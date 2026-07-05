@@ -51,9 +51,15 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 ## Port progress
 
 **54 / 64 modules ported** — **Waves A+B+C+D+E+F COMPLETE**; **Wave G assembly in
-flight** (the two Wave-D-deferred analysis-gated tests are re-enabled — see below).
-**1202 parity assertions** across 55 suites (+ 1 scaffold smoke). Deferred: 9
-(blocked deps + platform).
+flight**: Wave-D-deferred tests re-enabled + **`dist/dhvani.cyr` bundle built &
+validated**; integration/proptest suites remain. **1211 parity assertions** across
+57 suites (+ 1 scaffold smoke). Deferred: 9 (blocked deps + platform).
+
+**Bundle:** `[lib].modules` = all 54 modules in L0→L4 order; `cyrius distlib` →
+`dist/dhvani.cyr` (9.4k lines / 340 KB). It **externalizes abaco + the 10 siblings**
+— dhvani ships only its own auditable code; a consumer links the siblings for the
+features it uses (unused refs DCE-prune). Validated by `tests/bundle.tcyr` (core:
+abaco+dist) + `tests/bundle_synth.tcyr` (synthesis feature: naad chain+abaco+dist).
 
 **Wave F consumption pattern:** the 7 synthesis-stack siblings + sakshi + hisab +
 shravan are vendored into `lib/` (committed) and included **in dependency order**
@@ -87,12 +93,11 @@ the serde_tests suite and the blocked/platform modules).
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). **Wave G — assembly** (remaining): the `lib` facade
-→ `[lib] modules` dependency order, assemble `dist/dhvani.cyr` (externalize abaco +
-siblings; keep the shipped surface auditable), and the integration/proptest suites.
-The two Wave-D-deferred analysis-gated tests are ✅ done. `voice_synth/bhava_bridge`
-+ `g2p` stay dep-blocked (bhava/shabda); `ffi`, `simd/{x86,aarch64}`, `capture/pw`
-stay platform-blocked.
+See [`roadmap.md`](roadmap.md). **Wave G — assembly** (remaining): the integration
+parity suite (`tests/mod` → ~47) + proptest suite (`tests/proptest` → ~20). Done:
+✅ deferred analysis-gated tests, ✅ `dist/dhvani.cyr` bundle + validation. Then tag
+2.0.0. `voice_synth/bhava_bridge` + `g2p` stay dep-blocked (bhava/shabda); `ffi`,
+`simd/{x86,aarch64}`, `capture/pw` stay platform-blocked.
 Then **Wave G** — lib facade + `dist/dhvani.cyr` bundle + integration tests, and
 re-enable the deferred `ops::normalize_to_lufs` + `resample` sine tests (now
 unblocked by fft/loudness). (The abaco↔naad `amplitude_to_db` collision is already

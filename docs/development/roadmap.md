@@ -82,11 +82,15 @@
 - Gate: `synthesis`, `voice`, `creature`, `environment`, `mechanical`,
   `sampler`, `acoustics`.
 
-### M6 — Assembly & release (Wave G) — 2.0.0 tag
+### M6 — Assembly & release (Wave G) — 2.0.0 tag — 🟡 IN FLIGHT
 
-- `lib` facade → `[lib] modules` order; assemble `dist/dhvani.cyr`; collision
-  audit; port `tests/{mod,proptest}` (drop `serde_tests`); hot-path benches;
-  pin deps to git+tag; **bump/confirm `VERSION` = 2.0.0**.
+- ✅ Re-enabled the two Wave-D-deferred analysis-gated tests (normalize_to_lufs,
+  sine_frequency_preserved).
+- ✅ `lib` facade → `[lib] modules` L0→L4 order; `cyrius distlib` → `dist/dhvani.cyr`
+  (externalizes abaco + siblings). Collision audit clear (naad 2.1.1 fixed
+  amplitude_to_db). Validated by `tests/bundle{,_synth}.tcyr`.
+- ⬜ Port `tests/{mod,proptest}` (drop `serde_tests`); hot-path benches; pin deps
+  to git+tag; **bump/confirm `VERSION` = 2.0.0**.
 
 ## Blocked from porting — deferred past 2.0.0
 
