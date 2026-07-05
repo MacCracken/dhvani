@@ -93,8 +93,10 @@
   bundle — 67 tests / 414 assertions (integration + dsp-reference + proptest).
 - ✅ abaco 2.3.2: numerical dsp-reference port caught & fixed abaco's dB constants
   (wrong `ln(10)`); re-vendored, ripple-free.
-- ⬜ Hot-path `.bcyr` benches; CHANGELOG; confirm deps pinned git+tag &
-  `VERSION` = 2.0.0; then tag 2.0.0.
+- ✅ Hot-path `.bcyr` benches (`tests/hotpath.bcyr` + `BENCHMARKS.md`): 2.0.0
+  baseline for osc/biquad/svf (per-sample), SIMD kernels + FFT (per-block), scalar.
+- ⬜ Finalize CHANGELOG `[2.0.0]`; confirm deps pinned git+tag & `VERSION` = 2.0.0
+  (both ✅ set); then **tag 2.0.0**.
 
 ## Blocked from porting — deferred past 2.0.0
 

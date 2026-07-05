@@ -1,0 +1,80 @@
+# hotpath.bcyr -- per-sample + per-block hot-path benchmarks for dhvani.
+# Run: cyrius bench tests/hotpath.bcyr
+#
+# Baseline throughput for the inner loops a real-time consumer runs every
+# sample/block: oscillator + biquad/SVF filters (per-sample), the SIMD buffer
+# kernels + FFT (per-block). These are the alloc-free hot paths the free-less
+# bump allocator demands stay zero-bytes/sample; the numbers here are the proof
+# the port didn't regress (capture before claiming a win). Links the assembled
+# bundle (abaco + dist/dhvani.cyr) — the same surface a consumer ships.
+
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+fn bench_batch(name, fp) {
+    var b = bench_new(name);
+    bench_run_batch(b, fp, 1000, 200);   # 200k calls, batched to amortize clock overhead
+    bench_report(b);
+    return 0;
+}
+fn bench_block(name, fp, n) {
+    var b = bench_new(name);
+    bench_run(b, fp, n);
+    bench_report(b);
+    return 0;
+}
+
+# ---- fixtures (built in main) ----
+var _half = 0;
+var _freq = 0;
+var _osc = 0;
+var _bq = 0;
+var _svf = 0;
+var _samples = 0;
+var _i16src = 0;
+var _i16dst = 0;
+var _fftbuf = 0;
+
+# ---- per-sample bodies (state evolves but bounded on constant input) ----
+fn b_osc() { return dhvani_osc_sample(_osc, _freq); }
+fn b_bq()  { return dhvani_biquad_process_sample(_bq, _half, 0); }
+fn b_svf() { return dhvani_svf_process_sample(_svf, _half, 0); }
+
+# ---- per-block bodies (read-only or identity, so values stay in range) ----
+fn b_peak() { return dhvani_simd_peak_abs(_samples); }
+fn b_gain() { return dhvani_simd_apply_gain(_samples, F64_ONE); }
+fn b_conv() { return dhvani_simd_i16_to_f32(_i16src, _i16dst); }
+fn b_fft()  { return dhvani_fft_spectrum(_fftbuf, 1024); }
+
+fn main() {
+    alloc_init();
+    _half = F64_HALF;
+    _freq = f64_from(440);
+    _osc = dhvani_osc_new(DH_WAVE_SINE, f64_from(44100));
+    _bq  = dhvani_biquad_new(DH_BQ_LOWPASS, 0, f64_from(1000), 0.707106781, f64_from(44100), 1);
+    _svf = dhvani_svf_new(DH_SVF_LOWPASS, f64_from(1000), 0.707106781, 0, f64_from(44100), 1);
+
+    # 512-sample block for the SIMD kernels
+    _samples = vec_new();
+    var i = 0;
+    while (i < 512) { vec_push(_samples, F64_HALF); i = i + 1; }
+    # i16 -> f32 conversion block
+    _i16src = vec_new();
+    _i16dst = vec_new();
+    var j = 0;
+    while (j < 512) { vec_push(_i16src, 1000); vec_push(_i16dst, 0); j = j + 1; }
+    # 1024-frame buffer for the FFT
+    _fftbuf = dhvani_buffer_silence(1, 1024, 44100);
+
+    bench_batch("osc_sample sine     ", &b_osc);
+    bench_batch("biquad per-sample   ", &b_bq);
+    bench_batch("svf per-sample      ", &b_svf);
+    bench_block("simd peak_abs 512   ", &b_peak, 20000);
+    bench_block("simd apply_gain 512 ", &b_gain, 20000);
+    bench_block("simd i16->f32 512   ", &b_conv, 20000);
+    bench_block("fft spectrum 1024   ", &b_fft, 5000);
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

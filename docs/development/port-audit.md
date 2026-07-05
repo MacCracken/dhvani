@@ -360,7 +360,10 @@ independently reviewed (hex constants, dry/wet blend, reduction formula) — par
   dynamics, deesser, analysis, biquad, ops, loudness). Fixed upstream, re-vendored;
   the dB tests now exercise abaco's real functions. Confirmed ripple-free (61 suites,
   1625 assertions green).
-- ⬜ Hot-path `.bcyr` benches + release polish (CHANGELOG, VERSION), then tag 2.0.0.
+- ✅ Hot-path `.bcyr` benches (`tests/hotpath.bcyr`) + `BENCHMARKS.md` — 2.0.0
+  scalar baseline: per-sample osc 63ns / biquad 51ns / svf 55ns; per-block SIMD
+  kernels ~11–13ns/sample; radix-2 FFT-1024 713µs.
+- ⬜ Finalize CHANGELOG `[2.0.0]`, then tag 2.0.0 (`VERSION`=2.0.0, deps pinned).
 
 **Wave F (synthesis stack) — COMPLETE (54/64, 1200 assertions):**
 
