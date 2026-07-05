@@ -124,5 +124,26 @@ while (di < 3) {
 }
 assert_eq(dok, 1, "i16/i24/i32 round-trip within 1e-4");
 
+# ---- capture recorder: ring bytes -> decoded AudioBuffer ----
+# (fills the recorder's ring directly, standing in for vani_record_to_ring, which
+# needs /dev/snd; validates the ring-drain + unpack side.)
+test_group("recorder_ring_read");
+var rec = dhvani_recorder_new(1024, 4, 2, 44100);
+var kv = vec_new();
+vec_push(kv, 1.0);
+vec_push(kv, f64_neg(1.0));
+vec_push(kv, 0.5);
+vec_push(kv, 0);
+var kpcm = dhvani_playback_to_s16le(dhvani_buffer_from_interleaved(kv, 2, 44100));
+vani_ring_write(dhvani_recorder_ring(rec), kpcm, 8);
+var got = dhvani_recorder_read(rec, 2);
+assert_eq(dhvani_buffer_channels(got), 2, "recorder stereo");
+assert_eq(dhvani_buffer_frames(got), 2, "recorder 2 frames");
+var gs = dhvani_buffer_samples(got);
+assert(f64_lt(f64_abs(f64_sub(vec_get(gs, 0), 1.0)), 0.0001), "sample0 ~1.0");
+assert(f64_lt(f64_abs(f64_sub(vec_get(gs, 1), f64_neg(1.0))), 0.0001), "sample1 ~-1.0");
+assert(f64_lt(f64_abs(f64_sub(vec_get(gs, 2), 0.5)), 0.0001), "sample2 ~0.5");
+assert(f64_lt(f64_abs(vec_get(gs, 3)), 0.0001), "sample3 ~0");
+
 var rc = assert_summary();
 syscall(60, rc);

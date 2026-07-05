@@ -5,10 +5,13 @@
 
 ## Version
 
-**2.1.1** (in progress) — RT playback path. **2.0.0** (Rust→Cyrius parity port) and
-**2.1.0** (vani device I/O) released. The `playback` module (`src/playback.cyr`)
-bridges `AudioBuffer` ↔ vani ALSA PCM; 2.1.1 adds the **lock-free, alloc-free ring
-path** (`dhvani_player_*` over `vani_play_from_ring`) for real-time-safe playback —
+**2.1.2** (in progress) — capture ring path. **2.0.0** (Rust→Cyrius parity port),
+**2.1.0** (vani device I/O), **2.1.1** (RT ring player + multi-format S16/S24/S32)
+released. The `playback` module (`src/playback.cyr`) bridges `AudioBuffer` ↔ vani
+ALSA PCM; 2.1.2 adds the recorder (`dhvani_recorder_*` over `vani_record_to_ring`),
+the capture mirror of the RT player. Device enumeration deferred (needs yukti's
+fs/patra + real HW). The 2.1.1 ring path (`dhvani_player_*` over `vani_play_from_ring`)
+gives real-time-safe playback —
 zero per-block allocation, as the free-less bump allocator requires.
 
 ## Toolchain
@@ -57,8 +60,10 @@ dsp-reference/proptest suites, hot-path benches + Rust-vs-Cyrius comparison).
 
 **2.1.x (in progress):** device I/O via vani. `playback` bridges `AudioBuffer` ↔
 little-endian PCM (**S16/S24/S32**) + device glue (open/write/close/capture) + the
-2.1.1 alloc-free ring player (`dhvani_player_*`); bundled into the dist (DCE-prunes
-for vani-free consumers). **1647 assertions across 62 suites** (+ 1 scaffold smoke).
+alloc-free RT ring **player** (`dhvani_player_*`, 2.1.1) and **recorder**
+(`dhvani_recorder_*`, 2.1.2); bundled into the dist (DCE-prunes for vani-free
+consumers). Device enumeration deferred (yukti fs/patra + HW). **1653 assertions
+across 62 suites** (+ 1 scaffold smoke).
 
 **abaco 2.3.2** (dep bump): the numerical dsp-reference port caught abaco's dB
 constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.04%/dB

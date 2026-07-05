@@ -5,7 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.1] — real-time playback path (in progress)
+## [2.1.2] — capture ring path (in progress)
+
+### Added
+
+- **Lock-free, alloc-free ring capture** (`src/playback.cyr`) — the recorder
+  mirror of the 2.1.1 player: `dhvani_recorder_new` / `dhvani_recorder_new_fmt` /
+  `dhvani_recorder_fill` (device → ring via `vani_record_to_ring`) /
+  `dhvani_recorder_read` (ring → decoded `AudioBuffer` at the recorder's bit
+  depth) / `dhvani_recorder_ring`. Reusable scratch, no per-block allocation on
+  the fill side; multi-format (S16/S24/S32). Unit-tested hardware-free (fill the
+  ring with known PCM → read back → decoded samples match).
+
+### Deferred
+
+- **Device enumeration** (`yukti_audio_devices` → default-device open) —
+  attempted but not shipped: yukti discovers PCM endpoints via a udevadm
+  subprocess + sysfs, externalizing `patra`/`fs`, so it faults in a sandbox
+  without those deps and needs real audio hardware to return anything. Manual
+  device selection (`dhvani_playback_open(card, device, …)`, since 2.1.0) covers
+  the common case; auto-enumeration waits on wiring yukti's `patra`/`fs` + a
+  real-HW test.
+
+## [2.1.1] — real-time playback path
 
 ### Added
 

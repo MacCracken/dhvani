@@ -196,3 +196,53 @@ fn dhvani_player_push(self, buf) {
 fn dhvani_player_drain(self, dev) {
     return vani_play_from_ring(dev, DhPlayer_ring(self));
 }
+
+# ── Ring-buffer RT capture (mirror of the player) ──────────────────────────
+# A recorder owns a vani ring + reusable scratch. The RT loop: fill the ring
+# from the device (vani_record_to_ring), then read decoded blocks back as
+# AudioBuffers. No per-block allocation on the fill side.
+
+#derive(accessors)
+struct DhRecorder { ring; scratch; scratch_bytes; bit_depth; channels; sample_rate; }
+
+#must_use
+fn dhvani_recorder_new_fmt(ring_bytes, max_frames, channels, sample_rate, bit_depth) {
+    var self = alloc(sizeof(DhRecorder));
+    DhRecorder_set_ring(self, vani_ring_new(ring_bytes));
+    var bytes = max_frames * channels * dh_pcm_bytes(bit_depth);
+    DhRecorder_set_scratch(self, alloc(bytes));
+    DhRecorder_set_scratch_bytes(self, bytes);
+    DhRecorder_set_bit_depth(self, bit_depth);
+    DhRecorder_set_channels(self, channels);
+    DhRecorder_set_sample_rate(self, sample_rate);
+    return self;
+}
+#must_use
+fn dhvani_recorder_new(ring_bytes, max_frames, channels, sample_rate) {
+    return dhvani_recorder_new_fmt(ring_bytes, max_frames, channels, sample_rate, 16);
+}
+
+fn dhvani_recorder_ring(self) { return DhRecorder_ring(self); }
+
+# Fill the ring from the device (call from the RT loop). Returns the vani result.
+fn dhvani_recorder_fill(self, dev, frames) {
+    return vani_record_to_ring(dev, DhRecorder_ring(self), frames);
+}
+
+# Drain up to `frames` whole frames from the ring into a new AudioBuffer (decoded
+# per the recorder's bit depth). Returns a buffer of however many whole frames
+# were available (0-frame buffer if the ring was empty).
+#must_use
+fn dhvani_recorder_read(self, frames) {
+    var ch = DhRecorder_channels(self);
+    var bpp = dh_pcm_bytes(DhRecorder_bit_depth(self));
+    var frame_bytes = ch * bpp;
+    var want = frames * frame_bytes;
+    if (want > DhRecorder_scratch_bytes(self)) { want = DhRecorder_scratch_bytes(self); }
+    var got = vani_ring_read(DhRecorder_ring(self), DhRecorder_scratch(self), want);
+    got = (got / frame_bytes) * frame_bytes;   # floor to a whole-frame boundary
+    var samples = got / bpp;
+    var f = dh_vec_zeros(samples);
+    dh_unpack_le(DhRecorder_scratch(self), samples, f, DhRecorder_bit_depth(self));
+    return dhvani_buffer_from_interleaved(f, ch, DhRecorder_sample_rate(self));
+}
