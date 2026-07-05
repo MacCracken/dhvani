@@ -68,14 +68,18 @@
   slots) currently allocates a fresh scratch vec per node cycle — revisit the
   alloc-free-per-block acceptance target in Wave G hardening (parity first).
 
-### M5 — Synthesis stack (Wave F) — feature-gated sibling wrappers
+### M5 — Synthesis stack (Wave F) — feature-gated sibling wrappers — 🟡 IN FLIGHT
 
-- Wire `[deps]`: naad 2.1.0, svara 3.0.0, prani 2.0.1, nidhi 2.0.0,
-  garjan 2.0.0, ghurni 2.0.0, goonj 2.0.0 (all bundles resolve hisab/goonj/
-  sakshi from this manifest).
-- `synthesis/mod`(naad), `sampler`(nidhi), `creature`(prani),
+- **Consumption pattern (solved):** siblings vendored into `lib/` (committed) and
+  `include`d in dependency order `sakshi → hisab → goonj → naad → svara → ghurni
+  → garjan → prani` — **not** `[deps]` (mis-orders cross-bundle types + force-
+  includes the 136 KB `bayan`, overflowing the LEXID cap). Full rationale in
+  `port-audit.md`.
+- ✅ `synthesis/mod`(naad) — 7 tests. Remaining unblocked: `creature`(prani),
   `environment`(garjan), `mechanical`(ghurni), `voice_synth/mod`(svara),
   `acoustics`(goonj).
+- ⛔ `sampler`(nidhi) — nidhi's dist omits its `STREAM_EVT_*` enum
+  (`STREAM_EVT_HEADER` undefined); blocked pending a nidhi re-release.
 - Gate: `synthesis`, `voice`, `creature`, `environment`, `mechanical`,
   `sampler`, `acoustics`.
 

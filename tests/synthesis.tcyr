@@ -1,0 +1,110 @@
+# synthesis.tcyr -- parity tests for src/synthesis.cyr.
+# Ported one-for-one from the 7 #[test] blocks in rust-old/src/synthesis/mod.rs.
+# The tests drive naad's synthesis engines through dhvani's render bridges.
+# Sibling bundles are included in dependency order (sakshi -> hisab -> goonj ->
+# naad), then dhvani's own modules -- see the Wave F note in port-audit.md.
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/synthesis.cyr"
+
+# ---- stereo pan closure: s = osc.next_sample(); (s*L, s*R) ----
+fn panned_tick(state, out_l, out_r) {
+    var s = osc_next_sample(state);
+    var g = panning_pan_gains(0.7, PAN_LAW_EQUAL_POWER);
+    store64(out_l, f64_mul(s, PanGains_left(g)));
+    store64(out_r, f64_mul(s, PanGains_right(g)));
+    return 0;
+}
+
+# 1 second of 440 Hz sine as a granular source buffer.
+fn build_sine(n, freq, sr) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(v, f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, freq), f64_from(i)), sr)));
+        i = i + 1;
+    }
+    return v;
+}
+
+# all samples finite?
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(s, i)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+alloc_init();
+
+# ---- render_sine_to_buffer ----
+test_group("render_sine_to_buffer");
+var osc = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+var sbuf = dhvani_synth_render_to_buffer(&osc_next_sample, osc, 2, 4410, 44100);
+assert_eq(dhvani_buffer_channels(sbuf), 2, "channels 2");
+assert_eq(dhvani_buffer_frames(sbuf), 4410, "frames 4410");
+assert(f64_gt(dhvani_buffer_peak(sbuf), 0.9), "peak > 0.9");
+assert_eq(all_finite(sbuf), 1, "all finite");
+
+# ---- render_fm_synth ----
+test_group("render_fm_synth");
+var fm = fm_engine_new(2, f64_from(44100));
+fm_engine_set_algorithm(fm, FM_ALGO_SERIAL2);
+fm_operator_set_frequency(fm_engine_operator_mut(fm, 0), f64_from(440));
+fm_operator_set_level(fm_engine_operator_mut(fm, 0), F64_ONE);
+fm_operator_set_frequency(fm_engine_operator_mut(fm, 1), f64_from(880));
+fm_operator_set_level(fm_engine_operator_mut(fm, 1), F64_HALF);
+fm_engine_note_on(fm);
+var fmbuf = dhvani_synth_render_to_buffer(&fm_engine_next_sample, fm, 1, 4410, 44100);
+assert(f64_gt(dhvani_buffer_rms(fmbuf), 0), "fm rms > 0");
+
+# ---- render_stereo_panned ----
+test_group("render_stereo_panned");
+var posc = osc_new(WAVEFORM_SAW, f64_from(220), f64_from(44100));
+var pbuf = dhvani_synth_render_stereo_to_buffer(&panned_tick, posc, 4410, 44100);
+assert_eq(dhvani_buffer_channels(pbuf), 2, "channels 2");
+assert(f64_gt(dhvani_buffer_peak(pbuf), 0.5), "peak > 0.5");
+
+# ---- subtractive_synth_works ----
+test_group("subtractive_synth_works");
+var sub = subtractive_new(WAVEFORM_SAW, f64_from(440), f64_from(2000), 0.7, f64_from(44100));
+subtractive_note_on(sub);
+var subbuf = dhvani_synth_render_to_buffer(&subtractive_next_sample, sub, 1, 4410, 44100);
+assert(f64_gt(dhvani_buffer_rms(subbuf), 0), "subtractive rms > 0");
+
+# ---- granular_engine_works ----
+test_group("granular_engine_works");
+var gr = granular_new(f64_from(44100));
+granular_set_source(gr, build_sine(44100, f64_from(440), f64_from(44100)));
+granular_set_grain_rate(gr, f64_from(20));
+granular_set_grain_duration(gr, f64_from(50));
+var grbuf = dhvani_synth_render_to_buffer(&granular_next_sample, gr, 1, 4410, 44100);
+assert_eq(all_finite(grbuf), 1, "granular all finite");
+
+# ---- karplus_strong_works ----
+test_group("karplus_strong_works");
+var ks = physical_ks_new(f64_from(440), 0.99, 0.5, f64_from(44100));
+physical_ks_pluck(ks);
+var ksbuf = dhvani_synth_render_to_buffer(&physical_ks_next_sample, ks, 1, 4410, 44100);
+assert(f64_gt(dhvani_buffer_peak(ksbuf), 0), "karplus peak > 0");
+
+# ---- drum_kick_works ----
+test_group("drum_kick_works");
+var kick = drum_kick_new(f64_from(150), f64_from(40), f64_from(200), 0.8, f64_from(44100));
+drum_kick_trigger(kick);
+var kbuf = dhvani_synth_render_to_buffer(&drum_kick_next_sample, kick, 1, 4410, 44100);
+assert(f64_gt(dhvani_buffer_peak(kbuf), 0), "kick peak > 0");
+
+var rc = assert_summary();
+syscall(60, rc);

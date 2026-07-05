@@ -1,0 +1,56 @@
+# synthesis.cyr -- naad synthesis engines bridged to dhvani's AudioBuffer.
+# Ported from rust-old/src/synthesis/mod.rs. The Rust module is ~90 lines of
+# `pub use naad::...` re-exports (no-ops in Cyrius's flat namespace: consumers
+# call naad's bare symbols -- osc_new / fm_engine_new / drum_kick_new / ... --
+# directly) plus two closure-based render bridges. Only the bridges carry over.
+#
+# Depends on: buffer.cyr (AudioBuffer) + naad (via ordered include; see
+# docs/development/port-audit.md Wave F include order). Rust `impl FnMut()`
+# closures -> fn-ptr + opaque state, dispatched with fncall1 / fncall3 (fnptr
+# stdlib). The per-frame sample callback returns an f64 (bit pattern in the
+# i64 return slot), so naad's `*_next_sample(self)` fns are valid callbacks as-is.
+
+# render_to_buffer: call sample_fp(state) once per frame, duplicate the mono
+# sample across `channels`, and assemble an interleaved AudioBuffer. Falls back
+# to silence if construction fails (matches the Rust unwrap_or_else).
+fn dhvani_synth_render_to_buffer(sample_fp, state, channels, frames, sample_rate) {
+    var samples = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var s = fncall1(sample_fp, state);
+        var c = 0;
+        while (c < channels) { vec_push(samples, s); c = c + 1; }
+        i = i + 1;
+    }
+    var buf = dhvani_buffer_from_interleaved(samples, channels, sample_rate);
+    if (buf == 0) {
+        var ch = channels;
+        if (ch < 1) { ch = 1; }
+        var sr = sample_rate;
+        if (sr < 1) { sr = 1; }
+        return dhvani_buffer_silence(ch, frames, sr);
+    }
+    return buf;
+}
+
+# render_stereo_to_buffer: sample_fp(state, out_l, out_r) writes (left, right)
+# per frame through out-pointers (the Rust closure returned an (f32, f32) tuple).
+fn dhvani_synth_render_stereo_to_buffer(sample_fp, state, frames, sample_rate) {
+    var samples = vec_new();
+    var lp = alloc(8);
+    var rp = alloc(8);
+    var i = 0;
+    while (i < frames) {
+        fncall3(sample_fp, state, lp, rp);
+        vec_push(samples, load64(lp));
+        vec_push(samples, load64(rp));
+        i = i + 1;
+    }
+    var buf = dhvani_buffer_from_interleaved(samples, 2, sample_rate);
+    if (buf == 0) {
+        var sr = sample_rate;
+        if (sr < 1) { sr = 1; }
+        return dhvani_buffer_silence(2, frames, sr);
+    }
+    return buf;
+}

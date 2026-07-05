@@ -58,24 +58,22 @@ path = "../abaco"
 tag = "2.3.1"
 modules = ["dist/abaco.cyr"]
 
-# hisab arrives in Wave F — the synthesis bundles (naad/svara/goonj) reference
-# it; dhvani pulls it transitively then.
-# [deps.hisab]
-# git = "https://github.com/MacCracken/hisab.git"
-# tag = "2.6.7"
-# modules = ["dist/hisab.cyr"]
-#
-# ── Synthesis stack — feature-gated modules; wire when that wave starts.
-#    Each bundle references hisab (+ goonj/sakshi transitively); all resolve
-#    from this manifest. Pinned to released tags for a coherent bundle.
-#
-# [deps.naad]    tag 2.1.0  — synthesis/mod
-# [deps.svara]   tag 3.0.0  — voice_synth/mod   (bundle references naad + goonj + hisab)
-# [deps.prani]   tag 2.0.1  — creature/mod
-# [deps.nidhi]   tag 2.0.0  — sampler/mod
-# [deps.garjan]  tag 2.0.0  — environment/mod
-# [deps.ghurni]  tag 2.0.0  — mechanical/mod
-# [deps.goonj]   tag 2.0.0  — acoustics/mod
+# ── Synthesis stack (Wave F) — sibling dist bundles are NOT wired as [deps]. ──
+#    The `[deps.X] modules=["dist/X.cyr"]` path auto-includes each bundle's
+#    transitive deps in an order that breaks cross-bundle *type* refs (naad
+#    `sizeof(CoupledRooms)` before goonj) AND forces stdlib `hashmap`+`bayan`
+#    (bayan is 136 KB — force-including it overflows the compiler LEXID cap).
+#    Instead the 9 bundles (naad/svara/prani/nidhi/garjan/ghurni/goonj + sakshi
+#    + hisab) are vendored into `lib/` (committed) and each Wave F test/module
+#    `include`s the ones it needs IN DEPENDENCY ORDER:
+#        sakshi → hisab → goonj → naad → svara → ghurni → garjan → prani
+#    hisab compiles clean under this ordering (the "array size" error was a
+#    mis-ordered-concatenation artifact, not a 6.4.4 break). See the Wave F
+#    section of docs/development/port-audit.md for the full rationale.
+#    NOTE: abaco + naad both define amplitude_to_db/db_to_amplitude → benign
+#    "last wins" warning; resolve for the Wave G distlib.
+#    BLOCKED: `sampler` (nidhi) — nidhi's dist omits the STREAM_EVT_* enum it
+#    uses (STREAM_EVT_HEADER undefined); needs nidhi re-released.
 #
 # ── BLOCKED — dependency not yet ported to Cyrius (still Rust) ──────────────
 #    shabda → `g2p` feature                     (port shabda first)
