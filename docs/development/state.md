@@ -47,12 +47,12 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**2 / 64 modules ported** — Wave A in flight (`error` + `clock` green; 34 parity
-assertions). Portable now: ~55 modules across Waves A–G. Deferred: 9 (see below).
+**5 / 64 modules ported** — Wave A in flight (`error`, `clock`, `simd`, `buffer/mod`,
+`buffer/dither` green; **97 parity assertions**). Portable now: ~55 across A–G. Deferred: 9.
 
 | Layer / Wave | Modules | Status |
 |--------------|---------|--------|
-| A — Foundation (core) | ✅ error, ✅ clock · ⬜ simd(scalar), buffer/{mod,convert,resample,dither} | 🟡 |
+| A — Foundation (core) | ✅ error, ✅ clock, ✅ simd(scalar), ✅ buffer/mod, ✅ buffer/dither · ⬜ buffer/{convert,resample,ops} | 🟡 |
 | B–C — DSP (dsp) | oscillator, gain_smoother, envelope, lfo, automation, pan, svf, biquad, dsp/mod, routing, buffer/ops, eq, deesser, compressor, limiter, delay, reverb, graphic_eq | ⬜ |
 | D — Analysis (analysis) | waveform, zcr, mod, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ⬜ |
 | E — MIDI/graph/meter/capture | midi/{mod,voice,routing,v2,translate}, meter, graph, capture/{mod,record} | ⬜ |

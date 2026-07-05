@@ -1,0 +1,58 @@
+# dither.tcyr -- parity tests for src/dither.cyr
+# Ported from the 5 #[test] blocks in rust-old/src/buffer/dither.rs. The Rust
+# fns returned a new Vec; the Cyrius port fills a caller-provided out `vec`, so
+# "preserves length" is checked by driving a matching-size out buffer and
+# confirming the noise stays within a couple LSBs.
+
+include "src/error.cyr"
+include "src/dither.cyr"
+
+alloc_init();
+
+# build a vec of n copies of value v.
+fn fill_vec(n, v) {
+    var out = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(out, v); i = i + 1; }
+    return out;
+}
+
+# max |samples[i] - out[i]| over len.
+fn max_abs_diff(samples, out, len) {
+    var m = 0;
+    var i = 0;
+    while (i < len) {
+        var d = f64_abs(f64_sub(vec_get(samples, i), vec_get(out, i)));
+        if (f64_gt(d, m) == 1) { m = d; }
+        i = i + 1;
+    }
+    return m;
+}
+
+# ---- tpdf_preserves_length + tpdf_noise_is_small ----
+test_group("tpdf_dither");
+var in1 = fill_vec(4096, 0.5);
+var out1 = fill_vec(4096, 0);
+dhvani_dither_tpdf(in1, out1, 16);
+assert_eq(vec_len(out1), 4096, "length preserved");
+assert(f64_lt(max_abs_diff(in1, out1, 4096), 0.001), "TPDF noise < ~2 LSB");
+
+# ---- noise_shaped_preserves_length + noise_shaped_noise_is_small ----
+test_group("noise_shaped_dither");
+var in2 = fill_vec(4096, 0.5);
+var out2 = fill_vec(4096, 0);
+dhvani_dither_noise_shaped(in2, out2, 16);
+assert_eq(vec_len(out2), 4096, "length preserved");
+assert(f64_lt(max_abs_diff(in2, out2, 4096), 0.001), "noise-shaped noise < ~2 LSB");
+
+# ---- empty_input ----
+test_group("empty_input");
+var e_in = vec_new();
+var e_out = vec_new();
+dhvani_dither_tpdf(e_in, e_out, 16);
+assert_eq(vec_len(e_out), 0, "tpdf empty -> empty");
+dhvani_dither_noise_shaped(e_in, e_out, 16);
+assert_eq(vec_len(e_out), 0, "noise-shaped empty -> empty");
+
+var rc = assert_summary();
+syscall(60, rc);

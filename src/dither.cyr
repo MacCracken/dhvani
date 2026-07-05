@@ -1,0 +1,69 @@
+# dither.cyr -- dithering for bit-depth reduction. Ports rust-old/src/buffer/dither.rs.
+# L1, self-contained. TPDF (triangular PDF, flat noise) and noise-shaped (first-
+# order error feedback). Rust returned a fresh Vec<f32>; the Cyrius port writes
+# into a caller-provided output `vec` (alloc-free under the bump allocator).
+#
+# RNG: xorshift32 with u32 wrapping. Cyrius is i64-only, so every shift result is
+# masked to 32 bits (& 0xFFFFFFFF) or the sequence diverges. u32::MAX = 4294967295.
+
+var DH_U32_MAX_F = 4294967295.0;   # u32::MAX as f64 (RNG normalization divisor)
+
+# xorshift32 step: advance a 32-bit state, return the next value.
+#must_use
+fn dh_xorshift32_next(s) {
+    s = (s ^ ((s << 13) & 0xFFFFFFFF)) & 0xFFFFFFFF;
+    s = (s ^ (s >> 17)) & 0xFFFFFFFF;
+    s = (s ^ ((s << 5) & 0xFFFFFFFF)) & 0xFFFFFFFF;
+    return s;
+}
+
+# one uniform sample in [-1, 1): (state / u32::MAX) * 2 - 1.
+#must_use
+fn dh_rng_bipolar(state) {
+    return f64_sub(f64_mul(f64_div(f64_from(state), DH_U32_MAX_F), 2.0), 1.0);
+}
+
+# tpdf_dither(samples, out, target_bits) -- fill `out` (same length as samples)
+# with TPDF-dithered samples. Returns 0.
+fn dhvani_dither_tpdf(samples, out, target_bits) {
+    var lsb = 1 << (target_bits - 1);
+    var quant_step = f64_div(1.0, f64_from(lsb));
+    var rng = 0x12345678;
+    var len = vec_len(samples);
+    var i = 0;
+    while (i < len) {
+        rng = dh_xorshift32_next(rng);
+        var r1 = dh_rng_bipolar(rng);
+        rng = dh_xorshift32_next(rng);
+        var r2 = dh_rng_bipolar(rng);
+        var dither = f64_mul(f64_mul(f64_add(r1, r2), 0.5), quant_step);
+        vec_set(out, i, f64_add(vec_get(samples, i), dither));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# noise_shaped_dither(samples, out, target_bits) -- first-order error-feedback
+# dither into `out`. Returns 0.
+fn dhvani_dither_noise_shaped(samples, out, target_bits) {
+    var lsb = 1 << (target_bits - 1);
+    var quant_step = f64_div(1.0, f64_from(lsb));
+    var rng = 0x12345678;
+    var error = 0;             # +0.0
+    var len = vec_len(samples);
+    var i = 0;
+    while (i < len) {
+        var shaped = f64_sub(vec_get(samples, i), error);
+        rng = dh_xorshift32_next(rng);
+        var r1 = dh_rng_bipolar(rng);
+        rng = dh_xorshift32_next(rng);
+        var r2 = dh_rng_bipolar(rng);
+        var dither = f64_mul(f64_mul(f64_add(r1, r2), 0.5), quant_step);
+        var dithered = f64_add(shaped, dither);
+        var quantized = f64_mul(f64_round(f64_div(dithered, quant_step)), quant_step);
+        error = f64_sub(quantized, shaped);
+        vec_set(out, i, quantized);
+        i = i + 1;
+    }
+    return 0;
+}

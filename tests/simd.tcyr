@@ -1,0 +1,168 @@
+# simd.tcyr -- parity tests for src/simd.cyr (scalar kernels).
+# Ported from the behavioral #[test] blocks in rust-old/src/simd/mod.rs that
+# check concrete numeric outputs. The pure SIMD-vs-scalar parity tests
+# (simd_scalar_parity, i24_parity, u8_parity, biquad_stereo_parity) are DROPPED
+# -- with only the scalar path ported they degrade to scalar-vs-scalar. The
+# biquad kernel is instead checked against a hand-computed first-sample output.
+#
+# NOTE: negative FLOAT literals must go through f64_neg() (a bare `-1.0` is
+# integer-negated -> a wrong bit pattern). Negative INTEGER PCM values
+# (-32768, -8388608) are fine as literals.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# ---- add_buffers_basic ----
+test_group("add_buffers_basic");
+var d1 = vec_new();
+vec_push(d1, 1.0); vec_push(d1, 2.0); vec_push(d1, 3.0); vec_push(d1, 4.0);
+vec_push(d1, 5.0); vec_push(d1, 6.0); vec_push(d1, 7.0); vec_push(d1, 8.0); vec_push(d1, 9.0);
+var s1 = vec_new();
+vec_push(s1, 10.0); vec_push(s1, 20.0); vec_push(s1, 30.0); vec_push(s1, 40.0);
+vec_push(s1, 50.0); vec_push(s1, 60.0); vec_push(s1, 70.0); vec_push(s1, 80.0); vec_push(s1, 90.0);
+dhvani_simd_add_buffers(d1, s1);
+var i = 0;
+var ok = 1;
+while (i < 9) {
+    if (near(vec_get(d1, i), f64_mul(f64_from(i + 1), 11.0), 0.0001) == 0) { ok = 0; }
+    i = i + 1;
+}
+assert_eq(ok, 1, "dst[i] = 11*(i+1)");
+
+# ---- add_buffers_mismatched_len ----
+test_group("add_buffers_mismatched_len");
+var d2 = vec_new(); vec_push(d2, 1.0); vec_push(d2, 2.0); vec_push(d2, 3.0);
+var s2 = vec_new(); vec_push(s2, 10.0); vec_push(s2, 20.0);
+dhvani_simd_add_buffers(d2, s2);
+assert(near(vec_get(d2, 0), 11.0, 0.0001), "[0]=11");
+assert(near(vec_get(d2, 1), 22.0, 0.0001), "[1]=22");
+assert(near(vec_get(d2, 2), 3.0, 0.0001), "[2] untouched");
+
+# ---- apply_gain_basic ----
+test_group("apply_gain_basic");
+var g1 = vec_new();
+vec_push(g1, 0.5); vec_push(g1, f64_neg(0.5)); vec_push(g1, 1.0); vec_push(g1, f64_neg(1.0)); vec_push(g1, 0.25);
+dhvani_simd_apply_gain(g1, 2.0);
+assert(near(vec_get(g1, 0), 1.0, 0.0001), "0.5*2");
+assert(near(vec_get(g1, 1), f64_neg(1.0), 0.0001), "-0.5*2");
+assert(near(vec_get(g1, 2), 2.0, 0.0001), "1*2");
+assert(near(vec_get(g1, 3), f64_neg(2.0), 0.0001), "-1*2");
+assert(near(vec_get(g1, 4), 0.5, 0.0001), "0.25*2");
+
+# ---- clamp_basic ----
+test_group("clamp_basic");
+var c1 = vec_new();
+vec_push(c1, 2.0); vec_push(c1, f64_neg(2.0)); vec_push(c1, 0.5); vec_push(c1, f64_neg(0.5)); vec_push(c1, 1.5);
+dhvani_simd_clamp(c1, f64_neg(1.0), 1.0);
+assert(near(vec_get(c1, 0), 1.0, 0.0001), "2->1");
+assert(near(vec_get(c1, 1), f64_neg(1.0), 0.0001), "-2->-1");
+assert(near(vec_get(c1, 2), 0.5, 0.0001), "0.5 kept");
+assert(near(vec_get(c1, 4), 1.0, 0.0001), "1.5->1");
+
+# ---- peak_abs ----
+test_group("peak_abs");
+var p1 = vec_new();
+vec_push(p1, 0.3); vec_push(p1, f64_neg(0.7)); vec_push(p1, 0.5); vec_push(p1, 0.1); vec_push(p1, f64_neg(0.2));
+assert(near(dhvani_simd_peak_abs(p1), 0.7, 0.0001), "peak = 0.7");
+var pe = vec_new();
+assert_eq(dhvani_simd_peak_abs(pe), 0, "empty peak = 0.0");
+
+# ---- sum_of_squares ----
+test_group("sum_of_squares");
+var q1 = vec_new(); vec_push(q1, 1.0); vec_push(q1, 2.0); vec_push(q1, 3.0);
+assert(near(dhvani_simd_sum_of_squares(q1), 14.0, 0.000001), "1+4+9 = 14");
+
+# ---- noise_gate ----
+test_group("noise_gate");
+var n1 = vec_new();
+vec_push(n1, 0.01); vec_push(n1, f64_neg(0.01)); vec_push(n1, 0.5); vec_push(n1, f64_neg(0.5)); vec_push(n1, 0.001); vec_push(n1, 0.8);
+dhvani_simd_noise_gate(n1, 0.1);
+assert_eq(vec_get(n1, 0), 0, "0.01 gated");
+assert_eq(vec_get(n1, 1), 0, "-0.01 gated");
+assert(near(vec_get(n1, 2), 0.5, 0.0001), "0.5 kept");
+assert(near(vec_get(n1, 3), f64_neg(0.5), 0.0001), "-0.5 kept");
+assert_eq(vec_get(n1, 4), 0, "0.001 gated");
+assert(near(vec_get(n1, 5), 0.8, 0.0001), "0.8 kept");
+
+# ---- i16 <-> f32 roundtrip (integer PCM negatives are literal) ----
+test_group("i16_f32_roundtrip");
+var i16src = vec_new();
+vec_push(i16src, 0); vec_push(i16src, 16384); vec_push(i16src, -16384); vec_push(i16src, 32767); vec_push(i16src, -32768);
+var f32buf = vec_new(); vec_push(f32buf, 0); vec_push(f32buf, 0); vec_push(f32buf, 0); vec_push(f32buf, 0); vec_push(f32buf, 0);
+dhvani_simd_i16_to_f32(i16src, f32buf);
+var i16back = vec_new(); vec_push(i16back, 0); vec_push(i16back, 0); vec_push(i16back, 0); vec_push(i16back, 0); vec_push(i16back, 0);
+dhvani_simd_f32_to_i16(f32buf, i16back);
+var jj = 0;
+var i16ok = 1;
+while (jj < 5) {
+    var diff = vec_get(i16src, jj) - vec_get(i16back, jj);
+    if (diff < 0) { diff = 0 - diff; }
+    if (diff > 1) { i16ok = 0; }
+    jj = jj + 1;
+}
+assert_eq(i16ok, 1, "i16 roundtrip within +-1");
+
+# ---- weighted_sum ----
+test_group("weighted_sum");
+var ws = vec_new(); vec_push(ws, 1.0); vec_push(ws, 2.0); vec_push(ws, 3.0); vec_push(ws, 4.0); vec_push(ws, 5.0);
+var ww = vec_new(); vec_push(ww, 0.5); vec_push(ww, 0.5); vec_push(ww, 0.5); vec_push(ww, 0.5); vec_push(ww, 0.5);
+var osum = alloc(8);
+var owt = alloc(8);
+dhvani_simd_weighted_sum(ws, ww, osum, owt);
+assert(near(load64(osum), 7.5, 0.0001), "weighted sum = 7.5");
+assert(near(load64(owt), 2.5, 0.0001), "weight sum = 2.5");
+var ws2 = vec_new(); vec_push(ws2, 1.0); vec_push(ws2, 2.0); vec_push(ws2, 3.0);
+var ww2 = vec_new(); vec_push(ww2, 1.0); vec_push(ww2, 0); vec_push(ww2, 0.5);
+dhvani_simd_weighted_sum(ws2, ww2, osum, owt);
+assert(near(load64(osum), 2.5, 0.0001), "unequal weighted sum = 2.5");
+assert(near(load64(owt), 1.5, 0.0001), "unequal weight sum = 1.5");
+
+# ---- i24 <-> f32 roundtrip ----
+test_group("i24_f32_roundtrip");
+var i24src = vec_new();
+vec_push(i24src, 0); vec_push(i24src, 4194304); vec_push(i24src, -4194304); vec_push(i24src, 8388607); vec_push(i24src, -8388608);
+var f24 = vec_new(); vec_push(f24, 0); vec_push(f24, 0); vec_push(f24, 0); vec_push(f24, 0); vec_push(f24, 0);
+dhvani_simd_i24_to_f32(i24src, f24);
+var i24back = vec_new(); vec_push(i24back, 0); vec_push(i24back, 0); vec_push(i24back, 0); vec_push(i24back, 0); vec_push(i24back, 0);
+dhvani_simd_f32_to_i24(f24, i24back);
+var kk = 0;
+var i24ok = 1;
+while (kk < 5) {
+    var d = vec_get(i24src, kk) - vec_get(i24back, kk);
+    if (d < 0) { d = 0 - d; }
+    if (d > 1) { i24ok = 0; }
+    kk = kk + 1;
+}
+assert_eq(i24ok, 1, "i24 roundtrip within +-1");
+
+# ---- u8 <-> f32 roundtrip ----
+test_group("u8_f32_roundtrip");
+var u8src = vec_new();
+vec_push(u8src, 0); vec_push(u8src, 64); vec_push(u8src, 128); vec_push(u8src, 192); vec_push(u8src, 255);
+var fu = vec_new(); vec_push(fu, 0); vec_push(fu, 0); vec_push(fu, 0); vec_push(fu, 0); vec_push(fu, 0);
+dhvani_simd_u8_to_f32(u8src, fu);
+assert(f64_lt(f64_abs(vec_get(fu, 2)), 0.01), "u8 128 -> ~0.0");
+assert(near(vec_get(fu, 0), f64_neg(1.0), 0.01), "u8 0 -> ~-1.0");
+
+# ---- biquad_stereo: first-sample output == b0*input (zero initial state) ----
+test_group("biquad_stereo");
+var coeffs = vec_new();
+vec_push(coeffs, 0.004836739652368523);      # b0
+vec_push(coeffs, 0.009673479304737046);      # b1
+vec_push(coeffs, 0.004836739652368523);      # b2
+vec_push(coeffs, f64_neg(1.9029109205028356)); # a1
+vec_push(coeffs, 0.9222578791123097);        # a2
+var state = vec_new(); vec_push(state, 0); vec_push(state, 0); vec_push(state, 0); vec_push(state, 0);
+var bs = vec_new(); vec_push(bs, 1.0); vec_push(bs, 1.0); vec_push(bs, 0.5); vec_push(bs, 0.5);
+dhvani_simd_biquad_stereo(bs, coeffs, state);
+assert(near(vec_get(bs, 0), 0.004836739652368523, 0.000000001), "L[0] = b0*1.0");
+assert(near(vec_get(bs, 1), 0.004836739652368523, 0.000000001), "R[0] = b0*1.0");
+assert_eq(dhvani_is_finite(vec_get(bs, 2)), 1, "L[1] finite");
+assert_eq(dhvani_is_finite(vec_get(state, 0)), 1, "state finite");
+
+var rc = assert_summary();
+syscall(60, rc);

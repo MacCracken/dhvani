@@ -1,0 +1,104 @@
+# buffer.tcyr -- parity tests for src/buffer.cyr
+# Ported one-for-one from the 13 #[test] blocks in rust-old/src/buffer/mod.rs.
+# Result::is_err -> null-handle check (== 0). Negative float literals via f64_neg.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# ---- buffer_from_interleaved ----
+test_group("buffer_from_interleaved");
+var sv1 = vec_new();
+vec_push(sv1, 0.5); vec_push(sv1, f64_neg(0.5)); vec_push(sv1, 0.3); vec_push(sv1, f64_neg(0.3));
+var b1 = dhvani_buffer_from_interleaved(sv1, 2, 44100);
+assert_eq(dhvani_buffer_channels(b1), 2, "channels = 2");
+assert_eq(dhvani_buffer_frames(b1), 2, "frames = 2");
+assert_eq(dhvani_buffer_sample_rate(b1), 44100, "sample_rate = 44100");
+
+# ---- buffer_silence ----
+test_group("buffer_silence");
+var b2 = dhvani_buffer_silence(2, 1024, 48000);
+assert_eq(dhvani_buffer_total_samples(b2), 2048, "total = 2*1024");
+assert_eq(dhvani_buffer_peak(b2), 0, "silence peak = 0.0");
+assert_eq(dhvani_buffer_rms(b2), 0, "silence rms = 0.0");
+
+# ---- buffer_duration ----
+test_group("buffer_duration");
+var b3 = dhvani_buffer_silence(2, 44100, 44100);
+assert(near(dhvani_buffer_duration_secs(b3), 1.0, 0.001), "1s buffer");
+
+# ---- buffer_gain ----
+test_group("buffer_gain");
+var sv4 = vec_new(); vec_push(sv4, 1.0); vec_push(sv4, f64_neg(1.0));
+var b4 = dhvani_buffer_from_interleaved(sv4, 1, 44100);
+dhvani_buffer_apply_gain(b4, 0.5);
+assert(near(vec_get(dhvani_buffer_samples(b4), 0), 0.5, 0.0001), "1.0*0.5");
+assert(near(vec_get(dhvani_buffer_samples(b4), 1), f64_neg(0.5), 0.0001), "-1.0*0.5");
+
+# ---- buffer_clamp ----
+test_group("buffer_clamp");
+var sv5 = vec_new(); vec_push(sv5, 2.0); vec_push(sv5, f64_neg(2.0));
+var b5 = dhvani_buffer_from_interleaved(sv5, 1, 44100);
+dhvani_buffer_clamp(b5);
+assert(near(vec_get(dhvani_buffer_samples(b5), 0), 1.0, 0.0001), "2->1");
+assert(near(vec_get(dhvani_buffer_samples(b5), 1), f64_neg(1.0), 0.0001), "-2->-1");
+
+# ---- buffer_peak ----
+test_group("buffer_peak");
+var sv6 = vec_new(); vec_push(sv6, 0.3); vec_push(sv6, f64_neg(0.7)); vec_push(sv6, 0.5); vec_push(sv6, 0.1);
+var b6 = dhvani_buffer_from_interleaved(sv6, 2, 44100);
+assert(near(dhvani_buffer_peak(b6), 0.7, 0.0001), "peak = 0.7");
+
+# ---- buffer_zero_channels_rejected ----
+test_group("buffer_zero_channels_rejected");
+var sv7 = vec_new(); vec_push(sv7, 0);
+assert_eq(dhvani_buffer_from_interleaved(sv7, 0, 44100), 0, "0 channels -> null");
+
+# ---- mix_two_buffers ----
+test_group("mix_two_buffers");
+var av = vec_new(); vec_push(av, 0.5); vec_push(av, 0.5);
+var bv = vec_new(); vec_push(bv, 0.3); vec_push(bv, 0.3);
+var ba = dhvani_buffer_from_interleaved(av, 1, 44100);
+var bb = dhvani_buffer_from_interleaved(bv, 1, 44100);
+var mbufs = vec_new(); vec_push(mbufs, ba); vec_push(mbufs, bb);
+var mixed = dhvani_buffer_mix(mbufs);
+assert(near(vec_get(dhvani_buffer_samples(mixed), 0), 0.8, 0.0001), "0.5+0.3 = 0.8");
+
+# ---- mix_channel_mismatch ----
+test_group("mix_channel_mismatch");
+var mm = vec_new();
+vec_push(mm, dhvani_buffer_silence(1, 100, 44100));
+vec_push(mm, dhvani_buffer_silence(2, 100, 44100));
+assert_eq(dhvani_buffer_mix(mm), 0, "channel mismatch -> null");
+
+# ---- resample_same_rate ----
+test_group("resample_same_rate");
+var rs = dhvani_buffer_silence(2, 1000, 44100);
+var ro = dhvani_buffer_resample_linear(rs, 44100);
+assert_eq(dhvani_buffer_frames(ro), 1000, "same rate keeps 1000 frames");
+
+# ---- resample_double_rate ----
+test_group("resample_double_rate");
+var dv = vec_new(); vec_push(dv, 1.0); vec_push(dv, 0); vec_push(dv, 1.0); vec_push(dv, 0);
+var db = dhvani_buffer_from_interleaved(dv, 1, 44100);
+var dout = dhvani_buffer_resample_linear(db, 88200);
+assert(dhvani_buffer_frames(dout) > 6, "~2x frames (>=7)");
+assert_eq(dhvani_buffer_sample_rate(dout), 88200, "sample_rate = 88200");
+
+# ---- sample_format_bytes ----
+test_group("sample_format_bytes");
+assert_eq(dhvani_format_bytes_per_sample(DH_FMT_F32), 4, "f32 = 4 bytes");
+assert_eq(dhvani_format_bytes_per_sample(DH_FMT_I16), 2, "i16 = 2 bytes");
+assert_eq(dhvani_format_bytes_per_sample(DH_FMT_I32), 4, "i32 = 4 bytes");
+
+# ---- sample_format_display ----
+test_group("sample_format_display");
+assert_streq(dhvani_format_name(DH_FMT_F32), "f32", "f32 name");
+assert_streq(dhvani_format_name(DH_FMT_I16), "i16", "i16 name");
+
+var rc = assert_summary();
+syscall(60, rc);

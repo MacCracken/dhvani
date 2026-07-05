@@ -1,0 +1,287 @@
+# buffer.cyr -- AudioBuffer: unified f64 sample buffers + mixing, resampling,
+# and a reusable BufferPool. Ports rust-old/src/buffer/mod.rs.
+# L1: depends on error.cyr + simd.cyr (peak/rms/gain/clamp/mix kernels).
+#
+# samples: a `vec` of f64 (was Vec<f32>). channels/sample_rate/frames: integer
+# counts. SampleFormat/Layout enums -> integer codes. Fallible constructors
+# (from_interleaved/mix/resample_linear return Result) -> a valid handle, or 0
+# (null) on error. serde dropped. AudioBufferRef (borrowed view) is deferred --
+# in Cyrius a "ref" is the same handle read via accessors; add when a consumer
+# needs the distinct type.
+
+# ---- SampleFormat (was enum) ----
+var DH_FMT_F32 = 0;
+var DH_FMT_I16 = 1;
+var DH_FMT_I32 = 2;
+var DH_FMT_I24 = 3;
+var DH_FMT_F64 = 4;
+var DH_FMT_U8  = 5;
+
+# ---- Layout (was enum) ----
+var DH_LAYOUT_INTERLEAVED = 0;
+var DH_LAYOUT_PLANAR      = 1;
+
+var DH_MAX_SAMPLE_RATE = 768000;
+
+# bytes_per_sample for a SampleFormat code.
+#must_use
+fn dhvani_format_bytes_per_sample(fmt) {
+    if (fmt == DH_FMT_F32) { return 4; }
+    if (fmt == DH_FMT_I16) { return 2; }
+    if (fmt == DH_FMT_I32) { return 4; }
+    if (fmt == DH_FMT_I24) { return 3; }
+    if (fmt == DH_FMT_F64) { return 8; }
+    if (fmt == DH_FMT_U8)  { return 1; }
+    return 0;
+}
+
+# Display name for a SampleFormat code (was impl Display).
+#must_use
+fn dhvani_format_name(fmt) {
+    if (fmt == DH_FMT_F32) { return "f32"; }
+    if (fmt == DH_FMT_I16) { return "i16"; }
+    if (fmt == DH_FMT_I32) { return "i32"; }
+    if (fmt == DH_FMT_I24) { return "i24"; }
+    if (fmt == DH_FMT_F64) { return "f64"; }
+    if (fmt == DH_FMT_U8)  { return "u8"; }
+    return "unknown";
+}
+
+# build a `vec` of n zeros (was vec![0.0; n]).
+#must_use
+fn dh_vec_zeros(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, 0); i = i + 1; }
+    return v;
+}
+
+#derive(accessors)
+struct DhAudioBuffer { samples; channels; sample_rate; frames; }
+
+# from_interleaved(samples, channels, sample_rate) -> buffer handle, or 0 on
+# error (0 channels, bad sample rate, or length not divisible by channels).
+#must_use
+fn dhvani_buffer_from_interleaved(samples, channels, sample_rate) {
+    if (channels == 0) { return 0; }
+    if (sample_rate == 0) { return 0; }
+    if (sample_rate > DH_MAX_SAMPLE_RATE) { return 0; }
+    var len = vec_len(samples);
+    if (len > 0) {
+        if ((len % channels) > 0) { return 0; }
+    }
+    var self = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(self, samples);
+    DhAudioBuffer_set_channels(self, channels);
+    DhAudioBuffer_set_sample_rate(self, sample_rate);
+    DhAudioBuffer_set_frames(self, len / channels);
+    return self;
+}
+
+# silence(channels, frames, sample_rate) -- a zero-filled buffer.
+#must_use
+fn dhvani_buffer_silence(channels, frames, sample_rate) {
+    var self = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(self, dh_vec_zeros(channels * frames));
+    DhAudioBuffer_set_channels(self, channels);
+    DhAudioBuffer_set_sample_rate(self, sample_rate);
+    DhAudioBuffer_set_frames(self, frames);
+    return self;
+}
+
+# --- accessors ---
+#inline
+#must_use
+fn dhvani_buffer_samples(self) { return DhAudioBuffer_samples(self); }
+#inline
+#must_use
+fn dhvani_buffer_channels(self) { return DhAudioBuffer_channels(self); }
+#inline
+#must_use
+fn dhvani_buffer_sample_rate(self) { return DhAudioBuffer_sample_rate(self); }
+#inline
+#must_use
+fn dhvani_buffer_frames(self) { return DhAudioBuffer_frames(self); }
+#inline
+#must_use
+fn dhvani_buffer_total_samples(self) { return vec_len(DhAudioBuffer_samples(self)); }
+
+# duration in seconds.
+#inline
+#must_use
+fn dhvani_buffer_duration_secs(self) {
+    return f64_div(f64_from(DhAudioBuffer_frames(self)),
+                   f64_from(DhAudioBuffer_sample_rate(self)));
+}
+
+# peak amplitude across all channels.
+#must_use
+fn dhvani_buffer_peak(self) {
+    return dhvani_simd_peak_abs(DhAudioBuffer_samples(self));
+}
+
+# RMS level (0.0 for an empty buffer).
+#must_use
+fn dhvani_buffer_rms(self) {
+    var samples = DhAudioBuffer_samples(self);
+    var len = vec_len(samples);
+    if (len == 0) { return 0; }
+    return f64_sqrt(f64_div(dhvani_simd_sum_of_squares(samples), f64_from(len)));
+}
+
+# multiply all samples by gain.
+fn dhvani_buffer_apply_gain(self, gain) {
+    dhvani_simd_apply_gain(DhAudioBuffer_samples(self), gain);
+    return 0;
+}
+
+# clamp all samples to [-1.0, 1.0].
+fn dhvani_buffer_clamp(self) {
+    dhvani_simd_clamp(DhAudioBuffer_samples(self), DH_NEG_ONE, 1.0);
+    return 0;
+}
+
+# deep-copy a buffer (was #[derive(Clone)]).
+#must_use
+fn dhvani_buffer_clone(self) {
+    var src = DhAudioBuffer_samples(self);
+    var len = vec_len(src);
+    var dst = vec_new();
+    var i = 0;
+    while (i < len) { vec_push(dst, vec_get(src, i)); i = i + 1; }
+    var b = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(b, dst);
+    DhAudioBuffer_set_channels(b, DhAudioBuffer_channels(self));
+    DhAudioBuffer_set_sample_rate(b, DhAudioBuffer_sample_rate(self));
+    DhAudioBuffer_set_frames(b, DhAudioBuffer_frames(self));
+    return b;
+}
+
+# mix(buffers) -- sum a `vec` of buffer handles (same channels + sample rate).
+# Empty -> a silent stereo buffer; channel/rate mismatch -> 0.
+#must_use
+fn dhvani_buffer_mix(buffers) {
+    var n = vec_len(buffers);
+    if (n == 0) { return dhvani_buffer_silence(2, 0, 44100); }
+    var first = vec_get(buffers, 0);
+    var channels = DhAudioBuffer_channels(first);
+    var sample_rate = DhAudioBuffer_sample_rate(first);
+    var max_frames = 0;
+    var i = 0;
+    while (i < n) {
+        var b = vec_get(buffers, i);
+        var bch = DhAudioBuffer_channels(b);
+        if (bch < channels) { return 0; }
+        if (bch > channels) { return 0; }
+        var bsr = DhAudioBuffer_sample_rate(b);
+        if (bsr < sample_rate) { return 0; }
+        if (bsr > sample_rate) { return 0; }
+        var bf = DhAudioBuffer_frames(b);
+        if (bf > max_frames) { max_frames = bf; }
+        i = i + 1;
+    }
+    var mixed = dh_vec_zeros(max_frames * channels);
+    var j = 0;
+    while (j < n) {
+        dhvani_simd_add_buffers(mixed, DhAudioBuffer_samples(vec_get(buffers, j)));
+        j = j + 1;
+    }
+    var out = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(out, mixed);
+    DhAudioBuffer_set_channels(out, channels);
+    DhAudioBuffer_set_sample_rate(out, sample_rate);
+    DhAudioBuffer_set_frames(out, max_frames);
+    return out;
+}
+
+# resample_linear(buf, target_rate) -- linear-interpolated rate conversion.
+# Bad rate -> 0; same rate -> clone; empty -> silence.
+#must_use
+fn dhvani_buffer_resample_linear(buf, target_rate) {
+    if (target_rate == 0) { return 0; }
+    if (target_rate > DH_MAX_SAMPLE_RATE) { return 0; }
+    var src_rate = DhAudioBuffer_sample_rate(buf);
+    if (target_rate == src_rate) { return dhvani_buffer_clone(buf); }
+    var frames = DhAudioBuffer_frames(buf);
+    var ch = DhAudioBuffer_channels(buf);
+    if (frames == 0) { return dhvani_buffer_silence(ch, 0, target_rate); }
+    var ratio = f64_div(f64_from(target_rate), f64_from(src_rate));
+    var new_frames = f64_to(f64_ceil(f64_mul(f64_from(frames), ratio)));
+    var src = DhAudioBuffer_samples(buf);
+    var src_len = vec_len(src);
+    var out = dh_vec_zeros(new_frames * ch);
+    var frame = 0;
+    while (frame < new_frames) {
+        var src_pos = f64_div(f64_from(frame), ratio);
+        var src_frame = f64_to(f64_floor(src_pos));
+        var frac = f64_sub(src_pos, f64_from(src_frame));
+        var c = 0;
+        while (c < ch) {
+            var i0 = src_frame * ch + c;
+            var nxt = src_frame + 1;
+            if (nxt > frames - 1) { nxt = frames - 1; }
+            var i1 = nxt * ch + c;
+            var s0 = 0;
+            if (i0 < src_len) { s0 = vec_get(src, i0); }
+            var s1 = 0;
+            if (i1 < src_len) { s1 = vec_get(src, i1); }
+            vec_set(out, frame * ch + c, f64_add(s0, f64_mul(frac, f64_sub(s1, s0))));
+            c = c + 1;
+        }
+        frame = frame + 1;
+    }
+    var ob = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(ob, out);
+    DhAudioBuffer_set_channels(ob, ch);
+    DhAudioBuffer_set_sample_rate(ob, target_rate);
+    DhAudioBuffer_set_frames(ob, new_frames);
+    return ob;
+}
+
+# ---- BufferPool: reuse buffers to avoid per-cycle allocation ----
+#derive(accessors)
+struct DhBufferPool { buffers; channels; frames; sample_rate; }
+
+# new(capacity, channels, frames, sample_rate) -- pool of `capacity` silent buffers.
+#must_use
+fn dhvani_pool_new(capacity, channels, frames, sample_rate) {
+    var buffers = vec_new();
+    var i = 0;
+    while (i < capacity) {
+        vec_push(buffers, dhvani_buffer_silence(channels, frames, sample_rate));
+        i = i + 1;
+    }
+    var self = alloc(sizeof(DhBufferPool));
+    DhBufferPool_set_buffers(self, buffers);
+    DhBufferPool_set_channels(self, channels);
+    DhBufferPool_set_frames(self, frames);
+    DhBufferPool_set_sample_rate(self, sample_rate);
+    return self;
+}
+
+# acquire -- pop a buffer, or allocate a fresh silent one if the pool is empty.
+#must_use
+fn dhvani_pool_acquire(self) {
+    var buffers = DhBufferPool_buffers(self);
+    if (vec_len(buffers) > 0) { return vec_pop(buffers); }
+    return dhvani_buffer_silence(DhBufferPool_channels(self),
+                                 DhBufferPool_frames(self),
+                                 DhBufferPool_sample_rate(self));
+}
+
+# release -- silence a buffer and return it to the pool.
+fn dhvani_pool_release(self, buf) {
+    var samples = DhAudioBuffer_samples(buf);
+    var len = vec_len(samples);
+    var i = 0;
+    while (i < len) { vec_set(samples, i, 0); i = i + 1; }
+    vec_push(DhBufferPool_buffers(self), buf);
+    return 0;
+}
+
+# number of buffers currently available.
+#inline
+#must_use
+fn dhvani_pool_available(self) {
+    return vec_len(DhBufferPool_buffers(self));
+}
