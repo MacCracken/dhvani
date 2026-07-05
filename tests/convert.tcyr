@@ -1,0 +1,216 @@
+# convert.tcyr -- parity tests for src/convert.cyr
+# Ported one-for-one from the 20 #[test] blocks in rust-old/src/buffer/convert.rs.
+# The i16/i24/u8<->f32 converters delegate to the simd kernels (tested via
+# dhvani_simd_*); the rest exercise convert.cyr. Result::is_err -> null-handle.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/convert.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# |src[i]-dst[i]| <= tol for all i in [0,n)  -> 1 else 0 (integer PCM)
+fn iroundtrip_ok(src, dst, n, tol) {
+    var i = 0;
+    while (i < n) {
+        var d = vec_get(src, i) - vec_get(dst, i);
+        if (d < 0) { d = 0 - d; }
+        if (d > tol) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---- i16_f32_roundtrip (simd kernels) ----
+test_group("i16_f32_roundtrip");
+var o16 = vec_new();
+vec_push(o16, 0); vec_push(o16, 16384); vec_push(o16, -16384); vec_push(o16, 32767); vec_push(o16, -32768);
+var f16 = dh_vec_zeros(5);
+dhvani_simd_i16_to_f32(o16, f16);
+var b16 = dh_vec_zeros(5);
+dhvani_simd_f32_to_i16(f16, b16);
+assert_eq(iroundtrip_ok(o16, b16, 5, 1), 1, "i16 roundtrip <=1");
+
+# ---- i32_f32_roundtrip ----
+test_group("i32_f32_roundtrip");
+var o32 = vec_new(); vec_push(o32, 0); vec_push(o32, 1073741824); vec_push(o32, -1073741824);
+var f32v = dh_vec_zeros(3);
+dhvani_convert_i32_to_f32(o32, f32v);
+var b32 = dh_vec_zeros(3);
+dhvani_convert_f32_to_i32(f32v, b32);
+assert_eq(iroundtrip_ok(o32, b32, 3, 256), 1, "i32 roundtrip <=256");
+
+# ---- f32_to_i16_clamps ----
+test_group("f32_to_i16_clamps");
+var ci16s = vec_new(); vec_push(ci16s, 2.0); vec_push(ci16s, f64_neg(2.0)); vec_push(ci16s, 0.5);
+var ci16d = dh_vec_zeros(3);
+dhvani_simd_f32_to_i16(ci16s, ci16d);
+assert_eq(vec_get(ci16d, 0), 32767, "2.0 -> 32767");
+assert_eq(vec_get(ci16d, 1), -32767, "-2.0 -> -32767");
+
+# ---- f32_to_i32_clamps ----
+test_group("f32_to_i32_clamps");
+var ci32s = vec_new(); vec_push(ci32s, 2.0); vec_push(ci32s, f64_neg(2.0));
+var ci32d = dh_vec_zeros(2);
+dhvani_convert_f32_to_i32(ci32s, ci32d);
+assert_eq(vec_get(ci32d, 0), 2147483647, "2.0 -> i32::MAX");
+assert_eq(vec_get(ci32d, 1), -2147483647, "-2.0 -> -i32::MAX");
+
+# ---- interleaved_planar_roundtrip ----
+test_group("interleaved_planar_roundtrip");
+var ipv = vec_new(); vec_push(ipv, 1.0); vec_push(ipv, 2.0); vec_push(ipv, 3.0); vec_push(ipv, 4.0);
+var ipbuf = dhvani_buffer_from_interleaved(ipv, 2, 44100);
+var planes = dhvani_convert_interleaved_to_planar(ipbuf);
+assert_eq(vec_len(planes), 2, "2 planes");
+assert(near(vec_get(vec_get(planes, 0), 0), 1.0, 0.0001), "L[0]=1");
+assert(near(vec_get(vec_get(planes, 0), 1), 3.0, 0.0001), "L[1]=3");
+assert(near(vec_get(vec_get(planes, 1), 0), 2.0, 0.0001), "R[0]=2");
+assert(near(vec_get(vec_get(planes, 1), 1), 4.0, 0.0001), "R[1]=4");
+var ipback = dhvani_convert_planar_to_interleaved(planes, 44100);
+assert_eq(dhvani_buffer_channels(ipback), 2, "back channels = 2");
+var ips = dhvani_buffer_samples(ipback);
+assert(near(vec_get(ips, 0), 1.0, 0.0001), "s0=1");
+assert(near(vec_get(ips, 1), 2.0, 0.0001), "s1=2");
+assert(near(vec_get(ips, 2), 3.0, 0.0001), "s2=3");
+assert(near(vec_get(ips, 3), 4.0, 0.0001), "s3=4");
+
+# ---- planar_rejects_mismatched_lengths ----
+test_group("planar_rejects_mismatched_lengths");
+var pm0 = vec_new(); vec_push(pm0, 1.0); vec_push(pm0, 2.0);
+var pm1 = vec_new(); vec_push(pm1, 3.0);
+var pmch = vec_new(); vec_push(pmch, pm0); vec_push(pmch, pm1);
+assert_eq(dhvani_convert_planar_to_interleaved(pmch, 44100), 0, "mismatched -> null");
+
+# ---- planar_rejects_empty ----
+test_group("planar_rejects_empty");
+var pe = vec_new();
+assert_eq(dhvani_convert_planar_to_interleaved(pe, 44100), 0, "empty -> null");
+
+# ---- mono_to_stereo_duplicates ----
+test_group("mono_to_stereo_duplicates");
+var msv = vec_new(); vec_push(msv, 0.5); vec_push(msv, f64_neg(0.5));
+var msbuf = dhvani_buffer_from_interleaved(msv, 1, 44100);
+var stereo = dhvani_convert_mono_to_stereo(msbuf);
+assert_eq(dhvani_buffer_channels(stereo), 2, "channels = 2");
+assert_eq(dhvani_buffer_frames(stereo), 2, "frames = 2");
+var sss = dhvani_buffer_samples(stereo);
+assert(near(vec_get(sss, 0), 0.5, 0.0001), "L0=0.5");
+assert(near(vec_get(sss, 1), 0.5, 0.0001), "R0=0.5");
+assert(near(vec_get(sss, 2), f64_neg(0.5), 0.0001), "L1=-0.5");
+assert(near(vec_get(sss, 3), f64_neg(0.5), 0.0001), "R1=-0.5");
+
+# ---- mono_to_stereo_rejects_non_mono ----
+test_group("mono_to_stereo_rejects_non_mono");
+var nm = vec_new(); vec_push(nm, 0.5); vec_push(nm, f64_neg(0.5));
+var nmbuf = dhvani_buffer_from_interleaved(nm, 2, 44100);
+assert_eq(dhvani_convert_mono_to_stereo(nmbuf), 0, "non-mono -> null");
+
+# ---- stereo_to_mono_averages ----
+test_group("stereo_to_mono_averages");
+var smv = vec_new(); vec_push(smv, 1.0); vec_push(smv, 0); vec_push(smv, 0); vec_push(smv, 1.0);
+var smbuf = dhvani_buffer_from_interleaved(smv, 2, 44100);
+var mono = dhvani_convert_stereo_to_mono(smbuf);
+assert_eq(dhvani_buffer_channels(mono), 1, "channels = 1");
+assert_eq(dhvani_buffer_frames(mono), 2, "frames = 2");
+assert(near(vec_get(dhvani_buffer_samples(mono), 0), 0.5, 0.0001), "avg0=0.5");
+assert(near(vec_get(dhvani_buffer_samples(mono), 1), 0.5, 0.0001), "avg1=0.5");
+
+# ---- stereo_to_mono_rejects_non_stereo ----
+test_group("stereo_to_mono_rejects_non_stereo");
+var ns = vec_new(); vec_push(ns, 0.5);
+var nsbuf = dhvani_buffer_from_interleaved(ns, 1, 44100);
+assert_eq(dhvani_convert_stereo_to_mono(nsbuf), 0, "non-stereo -> null");
+
+# ---- downmix_5_1_basic ----
+test_group("downmix_5_1_basic");
+var dmv = dh_vec_zeros(12);
+var di = 0;
+while (di < 12) { vec_set(dmv, di, 1.0); di = di + 1; }
+var dmbuf = dhvani_buffer_from_interleaved(dmv, 6, 48000);
+var dmst = dhvani_convert_downmix_5_1_to_stereo(dmbuf);
+assert_eq(dhvani_buffer_channels(dmst), 2, "channels = 2");
+assert_eq(dhvani_buffer_frames(dmst), 2, "frames = 2");
+var dmexp = f64_add(1.0, f64_mul(2.0, DH_FRAC_1_SQRT_2));
+assert(near(vec_get(dhvani_buffer_samples(dmst), 0), dmexp, 0.001), "L = 1 + 2*coeff");
+
+# ---- downmix_5_1_rejects_non_6ch ----
+test_group("downmix_5_1_rejects_non_6ch");
+var d4 = dhvani_buffer_from_interleaved(dh_vec_zeros(4), 2, 44100);
+assert_eq(dhvani_convert_downmix_5_1_to_stereo(d4), 0, "non-6ch -> null");
+
+# ---- i24_f32_roundtrip (simd kernels) ----
+test_group("i24_f32_roundtrip");
+var o24 = vec_new();
+vec_push(o24, 0); vec_push(o24, 4194304); vec_push(o24, -4194304); vec_push(o24, 8388607); vec_push(o24, -8388608);
+var f24 = dh_vec_zeros(5);
+dhvani_simd_i24_to_f32(o24, f24);
+var b24 = dh_vec_zeros(5);
+dhvani_simd_f32_to_i24(f24, b24);
+assert_eq(iroundtrip_ok(o24, b24, 5, 1), 1, "i24 roundtrip <=1");
+
+# ---- i24_packed_roundtrip ----
+test_group("i24_packed_roundtrip");
+var pks = vec_new(); vec_push(pks, 0); vec_push(pks, 0.5); vec_push(pks, f64_neg(0.5)); vec_push(pks, 1.0); vec_push(pks, f64_neg(1.0));
+var packed = dhvani_convert_f32_to_i24_packed(pks);
+assert_eq(vec_len(packed), 15, "5 samples -> 15 bytes");
+var pback = dhvani_convert_i24_packed_to_f32(packed);
+var pi = 0;
+var pok = 1;
+while (pi < 5) {
+    if (near(vec_get(pks, pi), vec_get(pback, pi), 0.001) == 0) { pok = 0; }
+    pi = pi + 1;
+}
+assert_eq(pok, 1, "packed roundtrip < 0.001");
+
+# ---- f64_f32_roundtrip ----
+test_group("f64_f32_roundtrip");
+var ff = vec_new(); vec_push(ff, 0); vec_push(ff, 0.5); vec_push(ff, f64_neg(0.5)); vec_push(ff, 1.0); vec_push(ff, f64_neg(1.0));
+var ff64 = dh_vec_zeros(5);
+dhvani_convert_f32_to_f64(ff, ff64);
+var ffback = dh_vec_zeros(5);
+dhvani_convert_f64_to_f32(ff64, ffback);
+var fi = 0;
+var fok = 1;
+while (fi < 5) {
+    if (near(vec_get(ff, fi), vec_get(ffback, fi), 0.0000001) == 0) { fok = 0; }
+    fi = fi + 1;
+}
+assert_eq(fok, 1, "f64<->f32 roundtrip exact");
+
+# ---- u8_f32_roundtrip ----
+test_group("u8_f32_roundtrip");
+var o8 = vec_new(); vec_push(o8, 0); vec_push(o8, 64); vec_push(o8, 128); vec_push(o8, 192); vec_push(o8, 255);
+var f8 = dh_vec_zeros(5);
+dhvani_simd_u8_to_f32(o8, f8);
+var b8 = dh_vec_zeros(5);
+dhvani_simd_f32_to_u8(f8, b8);
+assert_eq(iroundtrip_ok(o8, b8, 5, 1), 1, "u8 roundtrip <=1");
+
+# ---- u8_center_is_silence ----
+test_group("u8_center_is_silence");
+var uc = vec_new(); vec_push(uc, 128);
+var ucf = dh_vec_zeros(1);
+dhvani_simd_u8_to_f32(uc, ucf);
+assert(f64_lt(f64_abs(vec_get(ucf, 0)), 0.0001), "u8 128 -> ~0");
+
+# ---- f32_to_u8_clamps ----
+test_group("f32_to_u8_clamps");
+var cu8s = vec_new(); vec_push(cu8s, 2.0); vec_push(cu8s, f64_neg(2.0));
+var cu8d = dh_vec_zeros(2);
+dhvani_simd_f32_to_u8(cu8s, cu8d);
+assert_eq(vec_get(cu8d, 0), 255, "2.0 -> 255");
+assert_eq(vec_get(cu8d, 1), 0, "-2.0 -> 0");
+
+# ---- f32_to_i24_clamps ----
+test_group("f32_to_i24_clamps");
+var ci24s = vec_new(); vec_push(ci24s, 2.0); vec_push(ci24s, f64_neg(2.0));
+var ci24d = dh_vec_zeros(2);
+dhvani_simd_f32_to_i24(ci24s, ci24d);
+assert_eq(vec_get(ci24d, 0), 8388607, "2.0 -> 8388607");
+assert_eq(vec_get(ci24d, 1), -8388607, "-2.0 -> -8388607");
+
+var rc = assert_summary();
+syscall(60, rc);

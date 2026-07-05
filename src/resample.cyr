@@ -1,0 +1,100 @@
+# resample.cyr -- windowed-sinc resampling with configurable quality.
+# Ports rust-old/src/buffer/resample.rs (scalar path; the SIMD weighted_sum
+# path is dropped -- platform-blocked). L1: depends on error + buffer.
+# ResampleQuality enum -> codes. serde dropped. Result -> null-handle sentinel.
+
+var DH_PI  = 3.141592653589793;
+var DH_TAU = 6.283185307179586;
+
+# ResampleQuality (kernel half-width in samples).
+var DH_RESAMPLE_DRAFT = 0;   # 4-point  (half-width 2)
+var DH_RESAMPLE_GOOD  = 1;   # 16-point (half-width 8)
+var DH_RESAMPLE_BEST  = 2;   # 64-point (half-width 32)
+
+#must_use
+fn dhvani_resample_kernel_half_width(quality) {
+    if (quality == DH_RESAMPLE_DRAFT) { return 2; }
+    if (quality == DH_RESAMPLE_GOOD)  { return 8; }
+    if (quality == DH_RESAMPLE_BEST)  { return 32; }
+    return 8;
+}
+
+# windowed_sinc(x, half_width) -- sinc * Blackman-Harris window.
+#must_use
+fn dhvani_resample_windowed_sinc(x, half_width) {
+    var ax = f64_abs(x);
+    if (f64_lt(ax, 0.0000000001) == 1) { return 1.0; }   # |x| < 1e-10 -> 1.0
+    var pix = f64_mul(DH_PI, x);
+    var sinc = f64_div(f64_sin(pix), pix);
+    if (f64_gt(ax, half_width) == 1) { return 0; }        # outside window -> 0
+    var t = f64_mul(f64_add(f64_div(x, half_width), 1.0), 0.5);
+    var tau_t = f64_mul(DH_TAU, t);
+    var window = f64_sub(
+        f64_add(
+            f64_sub(0.35875, f64_mul(0.48829, f64_cos(tau_t))),
+            f64_mul(0.14128, f64_cos(f64_mul(2.0, tau_t)))
+        ),
+        f64_mul(0.01168, f64_cos(f64_mul(3.0, tau_t))));
+    return f64_mul(sinc, window);
+}
+
+# resample_sinc(buf, target_rate, quality) -- buffer handle, or 0 on rate==0.
+# same rate -> clone; empty -> silence.
+#must_use
+fn dhvani_resample_sinc(buf, target_rate, quality) {
+    if (target_rate == 0) { return 0; }
+    var src_rate = DhAudioBuffer_sample_rate(buf);
+    if (target_rate == src_rate) { return dhvani_buffer_clone(buf); }
+    var frames = DhAudioBuffer_frames(buf);
+    var ch = DhAudioBuffer_channels(buf);
+    if (frames == 0) { return dhvani_buffer_silence(ch, 0, target_rate); }
+
+    var ratio = f64_div(f64_from(target_rate), f64_from(src_rate));
+    var new_frames = f64_to(f64_ceil(f64_mul(f64_from(frames), ratio)));
+    var half_width = dhvani_resample_kernel_half_width(quality);
+    # downsampling scales the kernel to avoid aliasing.
+    var filter_scale = 1.0;
+    var kernel_scale = 1.0;
+    if (f64_lt(ratio, 1.0) == 1) {
+        filter_scale = ratio;
+        kernel_scale = ratio;
+    }
+    var src = DhAudioBuffer_samples(buf);
+    var out = dh_vec_zeros(new_frames * ch);
+    var frame = 0;
+    while (frame < new_frames) {
+        var src_pos = f64_div(f64_from(frame), ratio);
+        var src_center = f64_to(f64_floor(src_pos));
+        var frac = f64_sub(src_pos, f64_from(src_center));
+        var scaled_half = f64_to(f64_ceil(f64_div(f64_from(half_width), filter_scale)));
+        var c = 0;
+        while (c < ch) {
+            var sum = 0;
+            var weight_sum = 0;
+            var i = 0 - scaled_half;
+            while (i <= scaled_half) {
+                var src_idx = src_center + i;
+                if (src_idx >= 0) {
+                    if (src_idx < frames) {
+                        var x = f64_mul(f64_sub(f64_from(i), frac), kernel_scale);
+                        var w = dhvani_resample_windowed_sinc(x, f64_from(scaled_half));
+                        sum = f64_add(sum, f64_mul(vec_get(src, src_idx * ch + c), w));
+                        weight_sum = f64_add(weight_sum, w);
+                    }
+                }
+                i = i + 1;
+            }
+            if (f64_gt(f64_abs(weight_sum), 0.0000000001) == 1) {
+                vec_set(out, frame * ch + c, f64_div(sum, weight_sum));
+            }
+            c = c + 1;
+        }
+        frame = frame + 1;
+    }
+    var ob = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(ob, out);
+    DhAudioBuffer_set_channels(ob, ch);
+    DhAudioBuffer_set_sample_rate(ob, target_rate);
+    DhAudioBuffer_set_frames(ob, new_frames);
+    return ob;
+}

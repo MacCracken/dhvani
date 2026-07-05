@@ -1,0 +1,93 @@
+# resample.tcyr -- parity tests for src/resample.cyr
+# Ported from the #[test] blocks in rust-old/src/buffer/resample.rs. The
+# analysis-gated sine_frequency_preserved test is deferred to Wave D. Negative
+# loop start uses integer negation (indices), floats via f64_neg.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/resample.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# build sin(2*pi*freq*i/sr) for `frames` samples.
+fn make_sine(frames, freq, sr) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var phase = f64_div(f64_mul(f64_mul(f64_mul(2.0, DH_PI), freq), f64_from(i)), f64_from(sr));
+        vec_push(v, f64_sin(phase));
+        i = i + 1;
+    }
+    return v;
+}
+
+# ---- same_rate_identity ----
+test_group("same_rate_identity");
+var sv = vec_new(); vec_push(sv, 0.5); vec_push(sv, f64_neg(0.5)); vec_push(sv, 0.3); vec_push(sv, f64_neg(0.3));
+var sbuf = dhvani_buffer_from_interleaved(sv, 1, 44100);
+var sout = dhvani_resample_sinc(sbuf, 44100, DH_RESAMPLE_GOOD);
+assert_eq(dhvani_buffer_frames(sout), dhvani_buffer_frames(sbuf), "same frame count");
+assert(near(vec_get(dhvani_buffer_samples(sout), 0), 0.5, 0.0001), "sample 0 preserved");
+assert(near(vec_get(dhvani_buffer_samples(sout), 1), f64_neg(0.5), 0.0001), "sample 1 preserved");
+
+# ---- zero_rate_rejected ----
+test_group("zero_rate_rejected");
+var zbuf = dhvani_buffer_silence(1, 100, 44100);
+assert_eq(dhvani_resample_sinc(zbuf, 0, DH_RESAMPLE_DRAFT), 0, "rate 0 -> null");
+
+# ---- empty_buffer ----
+test_group("empty_buffer");
+var ebuf = dhvani_buffer_silence(2, 0, 44100);
+var eout = dhvani_resample_sinc(ebuf, 48000, DH_RESAMPLE_GOOD);
+assert_eq(dhvani_buffer_frames(eout), 0, "empty stays empty");
+assert_eq(dhvani_buffer_sample_rate(eout), 48000, "rate = 48000");
+
+# ---- upsample_increases_frames ----
+test_group("upsample_increases_frames");
+var ubuf = dhvani_buffer_silence(1, 1000, 44100);
+var uout = dhvani_resample_sinc(ubuf, 96000, DH_RESAMPLE_DRAFT);
+assert(dhvani_buffer_frames(uout) > 1000, "upsample adds frames");
+assert_eq(dhvani_buffer_sample_rate(uout), 96000, "rate = 96000");
+
+# ---- downsample_decreases_frames ----
+test_group("downsample_decreases_frames");
+var dbuf = dhvani_buffer_silence(1, 1000, 96000);
+var dout = dhvani_resample_sinc(dbuf, 44100, DH_RESAMPLE_DRAFT);
+assert(dhvani_buffer_frames(dout) < 1000, "downsample removes frames");
+assert_eq(dhvani_buffer_sample_rate(dout), 44100, "rate = 44100");
+
+# ---- roundtrip_preserves_signal ----
+test_group("roundtrip_preserves_signal");
+var sine = make_sine(4096, 440.0, 44100);
+var rbuf = dhvani_buffer_from_interleaved(sine, 1, 44100);
+var orig_rms = dhvani_buffer_rms(rbuf);
+var up = dhvani_resample_sinc(rbuf, 48000, DH_RESAMPLE_GOOD);
+var back = dhvani_resample_sinc(up, 44100, DH_RESAMPLE_GOOD);
+assert(f64_lt(f64_abs(f64_sub(dhvani_buffer_rms(back), orig_rms)), f64_mul(orig_rms, 0.1)), "RMS preserved within 10%");
+
+# ---- quality_levels_all_work ----
+test_group("quality_levels_all_work");
+var qsine = make_sine(1024, 440.0, 44100);
+var qbuf = dhvani_buffer_from_interleaved(qsine, 1, 44100);
+var quals = vec_new(); vec_push(quals, DH_RESAMPLE_DRAFT); vec_push(quals, DH_RESAMPLE_GOOD); vec_push(quals, DH_RESAMPLE_BEST);
+var qi = 0;
+var qok = 1;
+while (qi < 3) {
+    var qout = dhvani_resample_sinc(qbuf, 48000, vec_get(quals, qi));
+    if (dhvani_buffer_frames(qout) == 0) { qok = 0; }
+    var qs = dhvani_buffer_samples(qout);
+    var qn = vec_len(qs);
+    var k = 0;
+    while (k < qn) {
+        if (dhvani_is_finite(vec_get(qs, k)) == 0) { qok = 0; }
+        k = k + 1;
+    }
+    qi = qi + 1;
+}
+assert_eq(qok, 1, "all qualities produce finite non-empty output");
+
+var rc = assert_summary();
+syscall(60, rc);

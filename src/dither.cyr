@@ -6,7 +6,9 @@
 # RNG: xorshift32 with u32 wrapping. Cyrius is i64-only, so every shift result is
 # masked to 32 bits (& 0xFFFFFFFF) or the sequence diverges. u32::MAX = 4294967295.
 
-var DH_U32_MAX_F = 4294967295.0;   # u32::MAX as f64 (RNG normalization divisor)
+# u32::MAX = 4294967295 (RNG normalization divisor). Stored as an integer and
+# converted with f64_from at use -- a decimal literal >= ~2^24 misparses.
+var DH_U32_MAX = 4294967295;
 
 # xorshift32 step: advance a 32-bit state, return the next value.
 #must_use
@@ -20,7 +22,7 @@ fn dh_xorshift32_next(s) {
 # one uniform sample in [-1, 1): (state / u32::MAX) * 2 - 1.
 #must_use
 fn dh_rng_bipolar(state) {
-    return f64_sub(f64_mul(f64_div(f64_from(state), DH_U32_MAX_F), 2.0), 1.0);
+    return f64_sub(f64_mul(f64_div(f64_from(state), f64_from(DH_U32_MAX)), 2.0), 1.0);
 }
 
 # tpdf_dither(samples, out, target_bits) -- fill `out` (same length as samples)

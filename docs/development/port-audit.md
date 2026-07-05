@@ -229,30 +229,30 @@ their upstream deps (svara for voice) are already ported.
 
 ## Progress
 
-**5 / 64 modules ported** (Wave A in flight — 97 parity assertions green):
+**8 / 64 modules ported — Wave A (Foundation) COMPLETE. 163 parity assertions green.**
 
-- ✅ `error` → `src/error.cyr` — 9 codes + names + finite/sentinel helpers.
-  `tests/error.tcyr`: **20 green**.
-- ✅ `clock` → `src/clock.cyr` — `AudioClock` struct; Option→NaN sentinel;
-  int↔f64 via `f64_from`/`f64_to`/`f64_trunc`. `tests/clock.tcyr`: **14 green**.
-- ✅ `simd` → `src/simd.cyr` — 14 scalar kernels (add/gain/clamp/peak/rms/gate,
-  i16/i24/u8↔f32, weighted_sum out-params, biquad_stereo). SIMD arms dropped
-  (platform-blocked). `tests/simd.tcyr`: **34 green** (behavioral; degenerate
-  parity tests dropped).
-- ✅ `buffer/mod` → `src/buffer.cyr` — `AudioBuffer` + `BufferPool`;
-  SampleFormat/Layout→codes; from_interleaved/mix/resample_linear
-  (Result→null-handle); peak/rms/gain/clamp delegate to `simd`.
-  `AudioBufferRef` deferred (no tests; a "ref" is the same handle).
-  `tests/buffer.tcyr`: **23 green**.
-- ✅ `buffer/dither` → `src/dither.cyr` — TPDF + noise-shaped, caller-out-slice
-  (alloc-free); u32 xorshift masked to 32 bits. `tests/dither.tcyr`: **6 green**.
-  NOTE: defines `dh_xorshift32_next` — Wave B `oscillator`/`noise` must **reuse**
+| Module | Cyrius | Tests | Notes |
+|--------|--------|------:|-------|
+| ✅ `error` | `src/error.cyr` | 20 | 9 codes + names + finite/sentinel helpers |
+| ✅ `clock` | `src/clock.cyr` | 14 | `AudioClock` struct; Option→NaN sentinel; int↔f64 |
+| ✅ `simd` | `src/simd.cyr` | 34 | 14 scalar kernels; SIMD arms dropped (platform-blocked) |
+| ✅ `buffer/mod` | `src/buffer.cyr` | 23 | `AudioBuffer` + `BufferPool`; mix/resample_linear |
+| ✅ `buffer/dither` | `src/dither.cyr` | 6 | TPDF + noise-shaped; u32 xorshift masked |
+| ✅ `buffer/convert` | `src/convert.cyr` | 44 | i32/planar/mono-stereo/i24-packed/downmix |
+| ✅ `buffer/resample` | `src/resample.cyr` | 12 | windowed-sinc (scalar); Blackman-Harris window |
+| ✅ `buffer/ops` | `src/ops.cyr` | 10 | crossfade + fades (equal-power matched inline) |
+
+**Deferred out of Wave A** (not blockers):
+- `AudioBuffer::AudioBufferRef` (borrowed view — no tests; a "ref" is the same handle).
+- `buffer/ops::normalize_to_lufs` + `resample::sine_frequency_preserved` test →
+  Wave D (need `analysis::measure_r128` / `spectrum_dft`).
+- `dither` defines `dh_xorshift32_next`; Wave B `oscillator`/`noise` must **reuse**
   it (share, don't redefine) to keep the dist bundle collision-free.
 
-Remaining in Wave A: `buffer/convert` (20 tests), `buffer/resample`
-(windowed-sinc, 8 tests), `buffer/ops` (crossfade/fades, 7 tests — defer
-`normalize_to_lufs`, gated on analysis). See [`state.md`](state.md) /
-[`roadmap.md`](roadmap.md).
+**Next: M2 / Wave B (DSP core)** — first task is **wiring abaco** (`[deps.abaco]`
++ vendored `lib/abaco.cyr`; abaco's dist pulls stdlib `ganita`/`bayan` — expand
+dhvani's manifest accordingly), then `oscillator`/`pan`/`svf`/`biquad`/`dsp/mod`.
+See [`state.md`](state.md) / [`roadmap.md`](roadmap.md).
 
 ### Cyrius idioms confirmed (this port)
 

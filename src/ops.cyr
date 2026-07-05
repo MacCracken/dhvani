@@ -1,0 +1,111 @@
+# ops.cyr -- buffer utilities: crossfade + fade in/out.
+# Ports rust-old/src/buffer/ops.rs. L2: depends on error + buffer.
+# CrossfadeType/FadeCurve enums -> codes. Result -> null-handle sentinel.
+#
+# The EqualPower branch called abaco::dsp::equal_power_crossfade, which is
+# (cos(t*PI/2), sin(t*PI/2)); matched inline here so ops stays abaco-free until
+# Wave B wires abaco for the DSP modules. normalize_to_lufs is DEFERRED to
+# Wave D (it needs analysis::measure_r128).
+
+var DH_PI_2 = 1.5707963267948966;   # PI/2 (equal-power crossfade angle scale)
+
+# ---- CrossfadeType ----
+var DH_XFADE_LINEAR      = 0;
+var DH_XFADE_EQUAL_POWER = 1;
+
+# ---- FadeCurve ----
+var DH_FADE_LINEAR      = 0;
+var DH_FADE_EXPONENTIAL = 1;
+
+# crossfade(a, b, kind) -- `a` fades out, `b` fades in over their full length.
+# Requires equal channels/rate/frames; returns 0 on mismatch.
+#must_use
+fn dhvani_ops_crossfade(a, b, kind) {
+    var channels = DhAudioBuffer_channels(a);
+    if (channels != DhAudioBuffer_channels(b)) { return 0; }
+    if (DhAudioBuffer_sample_rate(a) != DhAudioBuffer_sample_rate(b)) { return 0; }
+    var frames = DhAudioBuffer_frames(a);
+    if (frames != DhAudioBuffer_frames(b)) { return 0; }
+    var sa = DhAudioBuffer_samples(a);
+    var sb = DhAudioBuffer_samples(b);
+    var len = vec_len(sa);
+    var out = dh_vec_zeros(len);
+    var i = 0;
+    while (i < len) {
+        var frame = i / channels;
+        var t = 1.0;
+        if (frames > 1) { t = f64_div(f64_from(frame), f64_from(frames - 1)); }
+        var gain_a = 0;
+        var gain_b = 0;
+        if (kind == DH_XFADE_EQUAL_POWER) {
+            var angle = f64_mul(t, DH_PI_2);
+            gain_a = f64_cos(angle);
+            gain_b = f64_sin(angle);
+        } else {
+            gain_a = f64_sub(1.0, t);
+            gain_b = t;
+        }
+        vec_set(out, i, f64_add(f64_mul(vec_get(sa, i), gain_a), f64_mul(vec_get(sb, i), gain_b)));
+        i = i + 1;
+    }
+    var ob = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(ob, out);
+    DhAudioBuffer_set_channels(ob, channels);
+    DhAudioBuffer_set_sample_rate(ob, DhAudioBuffer_sample_rate(a));
+    DhAudioBuffer_set_frames(ob, frames);
+    return ob;
+}
+
+# fade_in(buf, fade_frames, curve) -- ramp the first `fade_frames` up from
+# silence (in place). Clamped to the buffer length.
+fn dhvani_ops_fade_in(buf, fade_frames, curve) {
+    var frames = DhAudioBuffer_frames(buf);
+    var ff = fade_frames;
+    if (ff > frames) { ff = frames; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frame = 0;
+    while (frame < ff) {
+        var t = 1.0;
+        if (ff > 1) { t = f64_div(f64_from(frame), f64_from(ff - 1)); }
+        var gain = t;
+        if (curve == DH_FADE_EXPONENTIAL) { gain = f64_mul(t, t); }
+        var c = 0;
+        while (c < ch) {
+            var idx = frame * ch + c;
+            vec_set(samples, idx, f64_mul(vec_get(samples, idx), gain));
+            c = c + 1;
+        }
+        frame = frame + 1;
+    }
+    return 0;
+}
+
+# fade_out(buf, fade_frames, curve) -- ramp the last `fade_frames` down to
+# silence (in place). Clamped to the buffer length.
+fn dhvani_ops_fade_out(buf, fade_frames, curve) {
+    var frames = DhAudioBuffer_frames(buf);
+    var ff = fade_frames;
+    if (ff > frames) { ff = frames; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var start = frames - ff;
+    var frame = 0;
+    while (frame < ff) {
+        var t = 0;
+        if (ff > 1) { t = f64_div(f64_from(frame), f64_from(ff - 1)); }
+        var gain = f64_sub(1.0, t);
+        if (curve == DH_FADE_EXPONENTIAL) {
+            var inv = f64_sub(1.0, t);
+            gain = f64_mul(inv, inv);
+        }
+        var c = 0;
+        while (c < ch) {
+            var idx = (start + frame) * ch + c;
+            vec_set(samples, idx, f64_mul(vec_get(samples, idx), gain));
+            c = c + 1;
+        }
+        frame = frame + 1;
+    }
+    return 0;
+}

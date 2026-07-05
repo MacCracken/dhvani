@@ -1,0 +1,197 @@
+# convert.cyr -- format, layout, and channel-mapping conversion.
+# Ports rust-old/src/buffer/convert.rs. L2: depends on error + simd (dh_imin,
+# dh_sext24, DH_NEG_ONE) + buffer (AudioBuffer, from_interleaved).
+#
+# The i16/i24/u8 <-> f32 converters that Rust's convert.rs delegated to `simd`
+# are NOT re-wrapped here -- call dhvani_simd_{i16,i24,u8}_* directly. This
+# module adds i32<->f32, i24-packed, f64<->f32, planar<->interleaved, channel
+# up/down-mix, and 5.1 downmix.
+#
+# Same-size sample converters take a caller-provided out `vec` (alloc-free);
+# size-changing ops (packed, planar, channel maps) return a fresh vec/buffer.
+
+var DH_FRAC_1_SQRT_2 = 0.7071067811865476;   # 1/sqrt(2), ITU downmix coeff
+
+# ---- i32 <-> f32 (same size, caller-out) ----
+
+# i32_to_f32(src, dst) -- src[i] / 2^31.
+fn dhvani_convert_i32_to_f32(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
+    var i = 0;
+    while (i < len) {
+        vec_set(dst, i, f64_div(f64_from(vec_get(src, i)), f64_from(2147483648)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# f32_to_i32(src, dst) -- (clamp(src,-1,1) * (2^31 - 1)) truncated to i32.
+fn dhvani_convert_f32_to_i32(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
+    var i = 0;
+    while (i < len) {
+        var c = f64_clamp(vec_get(src, i), DH_NEG_ONE, 1.0);
+        vec_set(dst, i, f64_to(f64_trunc(f64_mul(c, f64_from(2147483647)))));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---- f64 <-> f32 (identity in the all-f64 port; kept for API parity) ----
+fn dhvani_convert_f64_to_f32(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
+    var i = 0;
+    while (i < len) { vec_set(dst, i, vec_get(src, i)); i = i + 1; }
+    return 0;
+}
+fn dhvani_convert_f32_to_f64(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
+    var i = 0;
+    while (i < len) { vec_set(dst, i, vec_get(src, i)); i = i + 1; }
+    return 0;
+}
+
+# ---- 24-bit packed bytes <-> f32 (3 bytes/sample, little-endian) ----
+
+# i24_packed_to_f32(bytes) -> fresh vec of len(bytes)/3 samples.
+#must_use
+fn dhvani_convert_i24_packed_to_f32(bytes) {
+    var n = vec_len(bytes) / 3;
+    var dst = vec_new();
+    var i = 0;
+    while (i < n) {
+        var b0 = vec_get(bytes, i * 3);
+        var b1 = vec_get(bytes, i * 3 + 1);
+        var b2 = vec_get(bytes, i * 3 + 2);
+        var raw = b0 | (b1 << 8) | (b2 << 16);
+        vec_push(dst, f64_div(f64_from(dh_sext24(raw)), 8388608.0));
+        i = i + 1;
+    }
+    return dst;
+}
+
+# f32_to_i24_packed(samples) -> fresh vec of len*3 bytes.
+#must_use
+fn dhvani_convert_f32_to_i24_packed(samples) {
+    var out = vec_new();
+    var len = vec_len(samples);
+    var i = 0;
+    while (i < len) {
+        var c = f64_clamp(vec_get(samples, i), DH_NEG_ONE, 1.0);
+        var val = f64_to(f64_trunc(f64_mul(c, 8388607.0)));
+        vec_push(out, val & 0xFF);
+        vec_push(out, (val >> 8) & 0xFF);
+        vec_push(out, (val >> 16) & 0xFF);
+        i = i + 1;
+    }
+    return out;
+}
+
+# ---- layout: interleaved <-> planar ----
+
+# interleaved_to_planar(buf) -> a vec of `channels` plane vecs.
+#must_use
+fn dhvani_convert_interleaved_to_planar(buf) {
+    var ch = DhAudioBuffer_channels(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var planes = vec_new();
+    var c = 0;
+    while (c < ch) { vec_push(planes, vec_new()); c = c + 1; }
+    var frame = 0;
+    while (frame < frames) {
+        var cc = 0;
+        while (cc < ch) {
+            vec_push(vec_get(planes, cc), vec_get(samples, frame * ch + cc));
+            cc = cc + 1;
+        }
+        frame = frame + 1;
+    }
+    return planes;
+}
+
+# planar_to_interleaved(channels, sample_rate) -> buffer, or 0 on empty /
+# length-mismatch.
+#must_use
+fn dhvani_convert_planar_to_interleaved(channels, sample_rate) {
+    var ch_count = vec_len(channels);
+    if (ch_count == 0) { return 0; }
+    var frames = vec_len(vec_get(channels, 0));
+    var i = 0;
+    while (i < ch_count) {
+        if (vec_len(vec_get(channels, i)) != frames) { return 0; }
+        i = i + 1;
+    }
+    var samples = vec_new();
+    var frame = 0;
+    while (frame < frames) {
+        var c = 0;
+        while (c < ch_count) {
+            vec_push(samples, vec_get(vec_get(channels, c), frame));
+            c = c + 1;
+        }
+        frame = frame + 1;
+    }
+    return dhvani_buffer_from_interleaved(samples, ch_count, sample_rate);
+}
+
+# ---- channel maps ----
+
+# mono_to_stereo(buf) -- duplicate the single channel; 0 if not mono.
+#must_use
+fn dhvani_convert_mono_to_stereo(buf) {
+    if (DhAudioBuffer_channels(buf) != 1) { return 0; }
+    var src = DhAudioBuffer_samples(buf);
+    var len = vec_len(src);
+    var out = vec_new();
+    var i = 0;
+    while (i < len) {
+        var s = vec_get(src, i);
+        vec_push(out, s);
+        vec_push(out, s);
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(out, 2, DhAudioBuffer_sample_rate(buf));
+}
+
+# stereo_to_mono(buf) -- average L and R; 0 if not stereo.
+#must_use
+fn dhvani_convert_stereo_to_mono(buf) {
+    if (DhAudioBuffer_channels(buf) != 2) { return 0; }
+    var src = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var out = vec_new();
+    var frame = 0;
+    while (frame < frames) {
+        var l = vec_get(src, frame * 2);
+        var r = vec_get(src, frame * 2 + 1);
+        vec_push(out, f64_mul(f64_add(l, r), 0.5));
+        frame = frame + 1;
+    }
+    return dhvani_buffer_from_interleaved(out, 1, DhAudioBuffer_sample_rate(buf));
+}
+
+# downmix_5_1_to_stereo(buf) -- ITU-R BS.775 (L,R,C,LFE,Ls,Rs); LFE dropped.
+# 0 if not 6 channels.
+#must_use
+fn dhvani_convert_downmix_5_1_to_stereo(buf) {
+    if (DhAudioBuffer_channels(buf) != 6) { return 0; }
+    var src = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var out = vec_new();
+    var frame = 0;
+    while (frame < frames) {
+        var base = frame * 6;
+        var l = vec_get(src, base);
+        var r = vec_get(src, base + 1);
+        var c = vec_get(src, base + 2);
+        var ls = vec_get(src, base + 4);
+        var rs = vec_get(src, base + 5);
+        var lo = f64_add(f64_add(l, f64_mul(DH_FRAC_1_SQRT_2, c)), f64_mul(DH_FRAC_1_SQRT_2, ls));
+        var ro = f64_add(f64_add(r, f64_mul(DH_FRAC_1_SQRT_2, c)), f64_mul(DH_FRAC_1_SQRT_2, rs));
+        vec_push(out, lo);
+        vec_push(out, ro);
+        frame = frame + 1;
+    }
+    return dhvani_buffer_from_interleaved(out, 2, DhAudioBuffer_sample_rate(buf));
+}

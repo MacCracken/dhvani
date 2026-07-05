@@ -47,13 +47,14 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**5 / 64 modules ported** — Wave A in flight (`error`, `clock`, `simd`, `buffer/mod`,
-`buffer/dither` green; **97 parity assertions**). Portable now: ~55 across A–G. Deferred: 9.
+**8 / 64 modules ported** — **Wave A (Foundation) COMPLETE**: error, clock, simd(scalar),
+and the full buffer family (mod/convert/resample/dither/ops) green; **163 parity
+assertions**. Portable now: ~55 across A–G. Deferred: 9.
 
 | Layer / Wave | Modules | Status |
 |--------------|---------|--------|
-| A — Foundation (core) | ✅ error, ✅ clock, ✅ simd(scalar), ✅ buffer/mod, ✅ buffer/dither · ⬜ buffer/{convert,resample,ops} | 🟡 |
-| B–C — DSP (dsp) | oscillator, gain_smoother, envelope, lfo, automation, pan, svf, biquad, dsp/mod, routing, buffer/ops, eq, deesser, compressor, limiter, delay, reverb, graphic_eq | ⬜ |
+| A — Foundation (core) | ✅ error, ✅ clock, ✅ simd(scalar), ✅ buffer/{mod,convert,resample,dither,ops} | ✅ |
+| B–C — DSP (dsp) | oscillator, gain_smoother, envelope, lfo, automation, pan, svf, biquad, dsp/mod, routing, eq, deesser, compressor, limiter, delay, reverb, graphic_eq | ⬜ (next; wire abaco first) |
 | D — Analysis (analysis) | waveform, zcr, mod, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ⬜ |
 | E — MIDI/graph/meter/capture | midi/{mod,voice,routing,v2,translate}, meter, graph, capture/{mod,record} | ⬜ |
 | F — Synthesis stack | synthesis, sampler, creature, environment, mechanical, voice_synth/mod, acoustics | ⬜ |

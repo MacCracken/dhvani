@@ -1,0 +1,74 @@
+# ops.tcyr -- parity tests for src/ops.cyr
+# Ported from the #[test] blocks in rust-old/src/buffer/ops.rs. The
+# analysis-gated normalize_to_target_lufs test is deferred to Wave D.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/ops.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# build a buffer of `frames` mono samples all equal to `v`.
+fn const_buf(frames, v, sr) {
+    var s = vec_new();
+    var i = 0;
+    while (i < frames) { vec_push(s, v); i = i + 1; }
+    return dhvani_buffer_from_interleaved(s, 1, sr);
+}
+
+# ---- linear_crossfade_midpoint ----
+test_group("linear_crossfade_midpoint");
+var ca = const_buf(4, 1.0, 44100);
+var cb = const_buf(4, 0, 44100);
+var cr = dhvani_ops_crossfade(ca, cb, DH_XFADE_LINEAR);
+assert(near(vec_get(dhvani_buffer_samples(cr), 0), 1.0, 0.01), "start = 100% a");
+assert(f64_lt(f64_abs(vec_get(dhvani_buffer_samples(cr), 3)), 0.01), "end = 100% b (~0)");
+
+# ---- equal_power_crossfade ----
+test_group("equal_power_crossfade");
+var ea = const_buf(100, 1.0, 44100);
+var eb = const_buf(100, 1.0, 44100);
+var er = dhvani_ops_crossfade(ea, eb, DH_XFADE_EQUAL_POWER);
+var es = dhvani_buffer_samples(er);
+var ei = 0;
+var eok = 1;
+while (ei < 100) {
+    var v = vec_get(es, ei);
+    if (dhvani_is_finite(v) == 0) { eok = 0; }
+    if (f64_gt(v, 0.5) == 0) { eok = 0; }
+    ei = ei + 1;
+}
+assert_eq(eok, 1, "equal-power stays finite and > 0.5");
+
+# ---- crossfade_channel_mismatch ----
+test_group("crossfade_channel_mismatch");
+var ma = dhvani_buffer_silence(1, 100, 44100);
+var mb = dhvani_buffer_silence(2, 100, 44100);
+assert_eq(dhvani_ops_crossfade(ma, mb, DH_XFADE_LINEAR), 0, "channel mismatch -> null");
+
+# ---- fade_in_starts_silent ----
+test_group("fade_in_starts_silent");
+var fib = const_buf(100, 1.0, 44100);
+dhvani_ops_fade_in(fib, 50, DH_FADE_LINEAR);
+assert(f64_lt(f64_abs(vec_get(dhvani_buffer_samples(fib), 0)), 0.02), "starts ~silent");
+assert(near(vec_get(dhvani_buffer_samples(fib), 99), 1.0, 0.0001), "past fade unchanged");
+
+# ---- fade_out_ends_silent ----
+test_group("fade_out_ends_silent");
+var fob = const_buf(100, 1.0, 44100);
+dhvani_ops_fade_out(fob, 50, DH_FADE_LINEAR);
+assert(f64_lt(f64_abs(vec_get(dhvani_buffer_samples(fob), 99)), 0.02), "ends ~silent");
+assert(near(vec_get(dhvani_buffer_samples(fob), 0), 1.0, 0.0001), "before fade unchanged");
+
+# ---- fade_exponential ----
+test_group("fade_exponential");
+var feb = const_buf(100, 1.0, 44100);
+dhvani_ops_fade_in(feb, 50, DH_FADE_EXPONENTIAL);
+assert(f64_lt(f64_abs(vec_get(dhvani_buffer_samples(feb), 0)), 0.01), "exp starts ~silent");
+assert(f64_lt(vec_get(dhvani_buffer_samples(feb), 25), 0.5), "exp quieter than linear at midpoint");
+
+var rc = assert_summary();
+syscall(60, rc);

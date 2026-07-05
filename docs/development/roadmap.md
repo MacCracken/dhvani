@@ -31,12 +31,14 @@
 - `VERSION` → 2.0.0; smoke binary builds (`cyrius build`).
 - Tracking docs: state.md, port-audit.md, roadmap.md.
 
-### M1 — Foundation (Wave A) — core, always-on
+### M1 — Foundation (Wave A) — core, always-on — ✅ COMPLETE
 
-`error` · `clock` · `simd` (scalar kernels only) · `buffer/{mod,convert,resample,dither}`.
-- Port `BufferPool` early — it's the alloc-free convention for the whole crate.
-- **Decide `abaco` vs `hisab`** for dhvani's own math; record the ADR.
-- Gate: none (core). Acceptance: buffer roundtrip + format-conversion parity.
+`error` · `clock` · `simd` (scalar kernels only) ·
+`buffer/{mod,convert,resample,dither,ops}` — **163 parity assertions green**.
+- `BufferPool` landed (the alloc-free convention for the whole crate).
+- Math decision: **keep abaco** (its DSP helpers are ready-made). abaco wiring
+  itself is the first task of Wave B (where it's actually consumed).
+- Deferred: `AudioBufferRef`, `normalize_to_lufs` (→ Wave D).
 
 ### M2 — DSP core (Waves B–C) — `dsp`
 
