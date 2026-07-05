@@ -1,0 +1,285 @@
+# eq.cyr -- Parametric EQ: N-band biquad cascade with configurable band types.
+# Ports rust-old/src/dsp/eq.rs. L1: deps error + simd + buffer + abaco + biquad.
+#
+# BandType enum -> integer code. EqBandConfig -> struct. ParametricEq holds a
+# vec of band configs (parallel) and a vec of biquad filter handles, plus a
+# struct-owned dry scratch vec (allocated once, reused per process() call) so the
+# dry/wet mix path never clones buf.samples per call (alloc-hot: the bump
+# allocator never frees). band()/set_band() Option -> index-valid / sentinel.
+# to_filter_type() -> (biquad code, gain_db) threaded as separate args to
+# dhvani_biquad_new / dhvani_biquad_set_params. serde + Display dropped.
+
+# ---- BandType (was enum) ----
+var DH_BAND_PEAKING   = 0;
+var DH_BAND_LOWSHELF  = 1;
+var DH_BAND_HIGHSHELF = 2;
+var DH_BAND_LOWPASS   = 3;
+var DH_BAND_HIGHPASS  = 4;
+var DH_BAND_BANDPASS  = 5;
+var DH_BAND_NOTCH     = 6;
+
+# BandType -> biquad filter-type code (was to_filter_type()). The gain_db payload
+# of the Peaking/LowShelf/HighShelf variants is threaded separately (the biquad
+# port already takes gain_db as its own arg).
+#must_use
+fn dhvani_eq_band_to_filter_type(band_type) {
+    if (band_type == DH_BAND_PEAKING)   { return DH_BQ_PEAKING; }
+    if (band_type == DH_BAND_LOWSHELF)  { return DH_BQ_LOWSHELF; }
+    if (band_type == DH_BAND_HIGHSHELF) { return DH_BQ_HIGHSHELF; }
+    if (band_type == DH_BAND_LOWPASS)   { return DH_BQ_LOWPASS; }
+    if (band_type == DH_BAND_HIGHPASS)  { return DH_BQ_HIGHPASS; }
+    if (band_type == DH_BAND_BANDPASS)  { return DH_BQ_BANDPASS; }
+    return DH_BQ_NOTCH;
+}
+
+# ---- EqBandConfig ----
+#derive(accessors)
+struct DhEqBandConfig { band_type; freq_hz; gain_db; q; enabled; }
+
+# new(band_type, freq_hz, gain_db, q, enabled).
+#must_use
+fn dhvani_eq_band_config_new(band_type, freq_hz, gain_db, q, enabled) {
+    var cfg = alloc(sizeof(DhEqBandConfig));
+    DhEqBandConfig_set_band_type(cfg, band_type);
+    DhEqBandConfig_set_freq_hz(cfg, freq_hz);
+    DhEqBandConfig_set_gain_db(cfg, gain_db);
+    DhEqBandConfig_set_q(cfg, q);
+    DhEqBandConfig_set_enabled(cfg, enabled);
+    return cfg;
+}
+
+# --- EqBandConfig accessors ---
+#inline
+#must_use
+fn dhvani_eq_band_config_band_type(cfg) { return DhEqBandConfig_band_type(cfg); }
+#inline
+#must_use
+fn dhvani_eq_band_config_freq_hz(cfg) { return DhEqBandConfig_freq_hz(cfg); }
+#inline
+#must_use
+fn dhvani_eq_band_config_gain_db(cfg) { return DhEqBandConfig_gain_db(cfg); }
+#inline
+#must_use
+fn dhvani_eq_band_config_q(cfg) { return DhEqBandConfig_q(cfg); }
+#inline
+#must_use
+fn dhvani_eq_band_config_enabled(cfg) { return DhEqBandConfig_enabled(cfg); }
+
+# ---- ParametricEq ----
+# configs + filts are parallel vecs (was Vec<(EqBandConfig, BiquadFilter)>).
+# dry_scratch is a struct-owned f64 vec reused every process() call so the
+# dry/wet path never allocates per call.
+#derive(accessors)
+struct DhParametricEq { configs; filts; sample_rate; channels; bypassed; mix; dry_scratch; }
+
+# build a biquad filter for a band config.
+#must_use
+fn dhvani_eq_build_filter(cfg, sample_rate, channels) {
+    return dhvani_biquad_new(
+        dhvani_eq_band_to_filter_type(DhEqBandConfig_band_type(cfg)),
+        DhEqBandConfig_gain_db(cfg),
+        DhEqBandConfig_freq_hz(cfg),
+        DhEqBandConfig_q(cfg),
+        sample_rate,
+        channels);
+}
+
+# new(bands, sample_rate, channels) -- bands is a vec of DhEqBandConfig handles.
+#must_use
+fn dhvani_eq_new(bands, sample_rate, channels) {
+    var self = alloc(sizeof(DhParametricEq));
+    var configs = vec_new();
+    var filts = vec_new();
+    var n = vec_len(bands);
+    var i = 0;
+    while (i < n) {
+        var cfg = vec_get(bands, i);
+        vec_push(configs, cfg);
+        vec_push(filts, dhvani_eq_build_filter(cfg, sample_rate, channels));
+        i = i + 1;
+    }
+    DhParametricEq_set_configs(self, configs);
+    DhParametricEq_set_filts(self, filts);
+    DhParametricEq_set_sample_rate(self, sample_rate);
+    DhParametricEq_set_channels(self, channels);
+    DhParametricEq_set_bypassed(self, 0);
+    DhParametricEq_set_mix(self, 1.0);
+    DhParametricEq_set_dry_scratch(self, vec_new());
+    return self;
+}
+
+fn dhvani_eq_set_bypass(self, bypassed) {
+    DhParametricEq_set_bypassed(self, bypassed);
+    return 0;
+}
+
+#must_use
+fn dhvani_eq_is_bypassed(self) {
+    if (DhParametricEq_bypassed(self) == 1) { return 1; }
+    return 0;
+}
+
+# process(buf) -- run each enabled band's filter in series, in place. When
+# mix < 1.0, snapshot dry into the struct-owned scratch (reused, resized to the
+# sample count) then blend dry*(1-mix) + wet*mix. No per-call allocation.
+#inline
+fn dhvani_eq_process(self, buf) {
+    if (DhParametricEq_bypassed(self) == 1) { return 0; }
+    var configs = DhParametricEq_configs(self);
+    var filts = DhParametricEq_filts(self);
+    var n = vec_len(configs);
+    var mix = DhParametricEq_mix(self);
+    if (f64_lt(mix, 1.0) == 1) {
+        var samples = DhAudioBuffer_samples(buf);
+        var len = vec_len(samples);
+        var scratch = DhParametricEq_dry_scratch(self);
+        var slen = vec_len(scratch);
+        # resize scratch to len, reusing existing capacity.
+        while (slen < len) { vec_push(scratch, 0); slen = slen + 1; }
+        # copy dry samples into scratch.
+        var k = 0;
+        while (k < len) { vec_set(scratch, k, vec_get(samples, k)); k = k + 1; }
+        var i = 0;
+        while (i < n) {
+            if (DhEqBandConfig_enabled(vec_get(configs, i)) == 1) {
+                dhvani_biquad_process(vec_get(filts, i), buf);
+            }
+            i = i + 1;
+        }
+        var dry = f64_sub(1.0, mix);
+        var j = 0;
+        while (j < len) {
+            var d = vec_get(scratch, j);
+            var s = vec_get(samples, j);
+            vec_set(samples, j, f64_add(f64_mul(d, dry), f64_mul(s, mix)));
+            j = j + 1;
+        }
+    } else {
+        var i2 = 0;
+        while (i2 < n) {
+            if (DhEqBandConfig_enabled(vec_get(configs, i2)) == 1) {
+                dhvani_biquad_process(vec_get(filts, i2), buf);
+            }
+            i2 = i2 + 1;
+        }
+    }
+    return 0;
+}
+
+# set_band(index, config) -- rebuild that band's coeffs, replace config. No-op
+# if index out of range (Option::None branch).
+fn dhvani_eq_set_band(self, index, config) {
+    var configs = DhParametricEq_configs(self);
+    if (index < vec_len(configs)) {
+        var filt = vec_get(DhParametricEq_filts(self), index);
+        dhvani_biquad_set_params(
+            filt,
+            dhvani_eq_band_to_filter_type(DhEqBandConfig_band_type(config)),
+            DhEqBandConfig_gain_db(config),
+            DhEqBandConfig_freq_hz(config),
+            DhEqBandConfig_q(config));
+        vec_set(configs, index, config);
+    }
+    return 0;
+}
+
+# add_band(config) -- append a new band + its filter.
+fn dhvani_eq_add_band(self, config) {
+    vec_push(DhParametricEq_configs(self), config);
+    vec_push(DhParametricEq_filts(self),
+             dhvani_eq_build_filter(config,
+                                    DhParametricEq_sample_rate(self),
+                                    DhParametricEq_channels(self)));
+    return 0;
+}
+
+# remove_band(index) -- remove a band by index. No-op if out of range.
+fn dhvani_eq_remove_band(self, index) {
+    var configs = DhParametricEq_configs(self);
+    if (index < vec_len(configs)) {
+        vec_remove(configs, index);
+        vec_remove(DhParametricEq_filts(self), index);
+    }
+    return 0;
+}
+
+# number of bands.
+#inline
+#must_use
+fn dhvani_eq_band_count(self) {
+    return vec_len(DhParametricEq_configs(self));
+}
+
+# band(index) -- config handle, or 0 (null / None) if index out of range.
+#must_use
+fn dhvani_eq_band(self, index) {
+    var configs = DhParametricEq_configs(self);
+    if (index < vec_len(configs)) {
+        return vec_get(configs, index);
+    }
+    return 0;
+}
+
+# set_params(bands) -- replace all bands + rebuild all filters. bands is a vec
+# of DhEqBandConfig handles.
+fn dhvani_eq_set_params(self, bands) {
+    var configs = vec_new();
+    var filts = vec_new();
+    var sr = DhParametricEq_sample_rate(self);
+    var ch = DhParametricEq_channels(self);
+    var n = vec_len(bands);
+    var i = 0;
+    while (i < n) {
+        var cfg = vec_get(bands, i);
+        vec_push(configs, cfg);
+        vec_push(filts, dhvani_eq_build_filter(cfg, sr, ch));
+        i = i + 1;
+    }
+    DhParametricEq_set_configs(self, configs);
+    DhParametricEq_set_filts(self, filts);
+    return 0;
+}
+
+# set_mix(mix) -- clamp to [0, 1].
+fn dhvani_eq_set_mix(self, mix) {
+    DhParametricEq_set_mix(self, f64_clamp(mix, 0, 1.0));
+    return 0;
+}
+
+#inline
+#must_use
+fn dhvani_eq_mix(self) { return DhParametricEq_mix(self); }
+
+# set_sample_rate(sample_rate) -- update rate, rebuild all coeffs.
+fn dhvani_eq_set_sample_rate(self, sample_rate) {
+    DhParametricEq_set_sample_rate(self, sample_rate);
+    var configs = DhParametricEq_configs(self);
+    var filts = DhParametricEq_filts(self);
+    var n = vec_len(configs);
+    var i = 0;
+    while (i < n) {
+        var cfg = vec_get(configs, i);
+        var filt = vec_get(filts, i);
+        dhvani_biquad_set_sample_rate(filt, sample_rate);
+        dhvani_biquad_set_params(
+            filt,
+            dhvani_eq_band_to_filter_type(DhEqBandConfig_band_type(cfg)),
+            DhEqBandConfig_gain_db(cfg),
+            DhEqBandConfig_freq_hz(cfg),
+            DhEqBandConfig_q(cfg));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# reset all filter states.
+fn dhvani_eq_reset(self) {
+    var filts = DhParametricEq_filts(self);
+    var n = vec_len(filts);
+    var i = 0;
+    while (i < n) {
+        dhvani_biquad_reset(vec_get(filts, i));
+        i = i + 1;
+    }
+    return 0;
+}

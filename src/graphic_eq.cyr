@@ -1,0 +1,278 @@
+# graphic_eq.cyr -- 10-band ISO graphic equalizer with named presets.
+# Ports rust-old/src/dsp/graphic_eq.rs. L2: deps error + simd + buffer + abaco
+# + biquad + eq. Wraps ParametricEq (dhvani_eq_*) with fixed ISO center
+# frequencies at Q=1.4.
+#
+# GraphicEqSettings.bands (Rust [f32;10]) -> a `vec` of 10 f64 slots. enabled ->
+# integer flag (0/1). preset(name) matches string literals via streq(...) ==
+# (the abaco pattern) and returns a settings handle with the 10-band vec.
+# ISO_BANDS / BAND_NAMES are functions returning the i-th entry (Cyrius has no
+# static array tables; a small if-chain is the idiom, mirroring dhvani_err_name).
+#
+# rebuild() -- ALLOC-FREE: the inner ParametricEq always has exactly 10 bands
+# (one per ISO frequency), so rebuild() reuses it via in-place
+# dhvani_eq_set_band on each band rather than allocating a fresh ParametricEq
+# every load_preset/set_band call. The bump allocator never frees, so replacing
+# the inner eq per parameter change would leak a full eq (10 biquads + configs)
+# each time. set_band recomputes only that band's coeffs and swaps its config.
+# serde round-trip + Display tests are the only drops.
+
+var DH_GEQ_Q          = 0x3FF6666666666666;   # GRAPHIC_EQ_Q = 1.4 (exact hex; 1.4 has no finite binary form so the decimal literal would misparse)
+var DH_GEQ_MAX_GAIN   = 12.0;                  # MAX_GAIN_DB
+var DH_GEQ_FLAT_EPS   = 0x3F847AE147AE147B;    # 0.01 (is_flat / enabled threshold; 0.01 is not exactly representable -> hex)
+
+# ISO center frequency (Hz) for band index i (0..9). All integer-valued so
+# decimal literals below 2^24 are safe.
+#must_use
+fn dhvani_geq_iso_band(i) {
+    if (i == 0) { return 31.0; }
+    if (i == 1) { return 62.0; }
+    if (i == 2) { return 125.0; }
+    if (i == 3) { return 250.0; }
+    if (i == 4) { return 500.0; }
+    if (i == 5) { return 1000.0; }
+    if (i == 6) { return 2000.0; }
+    if (i == 7) { return 4000.0; }
+    if (i == 8) { return 8000.0; }
+    return 16000.0;
+}
+
+# Display name for band index i (was BAND_NAMES). Out of range -> "?".
+#must_use
+fn dhvani_geq_band_name(i) {
+    if (i == 0) { return "31 Hz"; }
+    if (i == 1) { return "62 Hz"; }
+    if (i == 2) { return "125 Hz"; }
+    if (i == 3) { return "250 Hz"; }
+    if (i == 4) { return "500 Hz"; }
+    if (i == 5) { return "1 kHz"; }
+    if (i == 6) { return "2 kHz"; }
+    if (i == 7) { return "4 kHz"; }
+    if (i == 8) { return "8 kHz"; }
+    if (i == 9) { return "16 kHz"; }
+    return "?";
+}
+
+# ---- GraphicEqSettings ----
+# bands is a `vec` of 10 f64 gains (dB). enabled is 0/1.
+#derive(accessors)
+struct DhGraphicEqSettings { bands; enabled; }
+
+# default() -- all bands 0 dB, disabled.
+#must_use
+fn dhvani_geq_settings_default() {
+    var s = alloc(sizeof(DhGraphicEqSettings));
+    DhGraphicEqSettings_set_bands(s, dh_vec_zeros(10));
+    DhGraphicEqSettings_set_enabled(s, 0);
+    return s;
+}
+
+# flat() -- alias for default (all bands 0 dB, disabled).
+#must_use
+fn dhvani_geq_settings_flat() {
+    return dhvani_geq_settings_default();
+}
+
+# is_flat -- true if disabled OR every band's |gain| < 0.01.
+#must_use
+fn dhvani_geq_settings_is_flat(self) {
+    if (DhGraphicEqSettings_enabled(self) == 0) { return 1; }
+    var bands = DhGraphicEqSettings_bands(self);
+    var i = 0;
+    while (i < 10) {
+        if (f64_ge(f64_abs(vec_get(bands, i)), DH_GEQ_FLAT_EPS) == 1) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# set_band(band, gain_db) -- set a band's gain, clamped to [-12, 12]. No-op if
+# band >= 10.
+fn dhvani_geq_settings_set_band(self, band, gain_db) {
+    if (band < 10) {
+        vec_set(DhGraphicEqSettings_bands(self), band,
+                f64_clamp(gain_db, f64_neg(DH_GEQ_MAX_GAIN), DH_GEQ_MAX_GAIN));
+    }
+    return 0;
+}
+
+# preset(name) -- named preset. Unknown names -> flat (all 0), enabled=true.
+#                          31   62  125  250  500   1k   2k   4k   8k  16k
+#must_use
+fn dhvani_geq_settings_preset(name) {
+    var b = dh_vec_zeros(10);
+    if (streq(name, "rock") == 1) {
+        vec_set(b, 0, 4.0); vec_set(b, 1, 3.0); vec_set(b, 2, 1.0); vec_set(b, 3, f64_neg(1.0)); vec_set(b, 4, f64_neg(2.0));
+        vec_set(b, 5, 0); vec_set(b, 6, 2.0); vec_set(b, 7, 3.0); vec_set(b, 8, 4.0); vec_set(b, 9, 4.0);
+    } elif (streq(name, "pop") == 1) {
+        vec_set(b, 0, f64_neg(1.0)); vec_set(b, 1, 1.0); vec_set(b, 2, 3.0); vec_set(b, 3, 4.0); vec_set(b, 4, 3.0);
+        vec_set(b, 5, 0); vec_set(b, 6, f64_neg(1.0)); vec_set(b, 7, 0); vec_set(b, 8, 1.0); vec_set(b, 9, 2.0);
+    } elif (streq(name, "jazz") == 1) {
+        vec_set(b, 0, 2.0); vec_set(b, 1, 1.0); vec_set(b, 2, 0); vec_set(b, 3, 1.0); vec_set(b, 4, f64_neg(1.0));
+        vec_set(b, 5, f64_neg(1.0)); vec_set(b, 6, 0); vec_set(b, 7, 1.0); vec_set(b, 8, 2.0); vec_set(b, 9, 3.0);
+    } elif (streq(name, "classical") == 1) {
+        vec_set(b, 0, 0); vec_set(b, 1, 0); vec_set(b, 2, 0); vec_set(b, 3, 0); vec_set(b, 4, 0);
+        vec_set(b, 5, 0); vec_set(b, 6, f64_neg(2.0)); vec_set(b, 7, f64_neg(3.0)); vec_set(b, 8, f64_neg(2.0)); vec_set(b, 9, 0);
+    } elif (streq(name, "bass") == 1) {
+        vec_set(b, 0, 6.0); vec_set(b, 1, 5.0); vec_set(b, 2, 4.0); vec_set(b, 3, 2.0); vec_set(b, 4, 0);
+        vec_set(b, 5, 0); vec_set(b, 6, 0); vec_set(b, 7, 0); vec_set(b, 8, 0); vec_set(b, 9, 0);
+    } elif (streq(name, "treble") == 1) {
+        vec_set(b, 0, 0); vec_set(b, 1, 0); vec_set(b, 2, 0); vec_set(b, 3, 0); vec_set(b, 4, 0);
+        vec_set(b, 5, 0); vec_set(b, 6, 2.0); vec_set(b, 7, 4.0); vec_set(b, 8, 5.0); vec_set(b, 9, 6.0);
+    } elif (streq(name, "vocal") == 1) {
+        vec_set(b, 0, f64_neg(2.0)); vec_set(b, 1, f64_neg(1.0)); vec_set(b, 2, 0); vec_set(b, 3, 2.0); vec_set(b, 4, 4.0);
+        vec_set(b, 5, 4.0); vec_set(b, 6, 3.0); vec_set(b, 7, 1.0); vec_set(b, 8, 0); vec_set(b, 9, f64_neg(1.0));
+    } elif (streq(name, "electronic") == 1) {
+        vec_set(b, 0, 5.0); vec_set(b, 1, 4.0); vec_set(b, 2, 1.0); vec_set(b, 3, 0); vec_set(b, 4, f64_neg(2.0));
+        vec_set(b, 5, 0); vec_set(b, 6, 1.0); vec_set(b, 7, 3.0); vec_set(b, 8, 4.0); vec_set(b, 9, 5.0);
+    } elif (streq(name, "acoustic") == 1) {
+        vec_set(b, 0, 2.0); vec_set(b, 1, 1.0); vec_set(b, 2, 0); vec_set(b, 3, 1.0); vec_set(b, 4, 2.0);
+        vec_set(b, 5, 1.0); vec_set(b, 6, 2.0); vec_set(b, 7, 3.0); vec_set(b, 8, 2.0); vec_set(b, 9, 1.0);
+    }
+    # else: unknown -> all zeros (already zeroed).
+    var s = alloc(sizeof(DhGraphicEqSettings));
+    DhGraphicEqSettings_set_bands(s, b);
+    DhGraphicEqSettings_set_enabled(s, 1);
+    return s;
+}
+
+# preset_count / preset_name(i) -- the available preset names (was
+# preset_names() -> &'static [&str]). "flat" first, then the 9 named presets.
+#must_use
+fn dhvani_geq_preset_count() { return 10; }
+#must_use
+fn dhvani_geq_preset_name(i) {
+    if (i == 0) { return "flat"; }
+    if (i == 1) { return "rock"; }
+    if (i == 2) { return "pop"; }
+    if (i == 3) { return "jazz"; }
+    if (i == 4) { return "classical"; }
+    if (i == 5) { return "bass"; }
+    if (i == 6) { return "treble"; }
+    if (i == 7) { return "vocal"; }
+    if (i == 8) { return "electronic"; }
+    if (i == 9) { return "acoustic"; }
+    return "?";
+}
+
+# --- GraphicEqSettings accessors ---
+#inline
+#must_use
+fn dhvani_geq_settings_bands(self) { return DhGraphicEqSettings_bands(self); }
+# band gain at index i (0 if out of range).
+#inline
+#must_use
+fn dhvani_geq_settings_band(self, i) {
+    if (i < 10) { return vec_get(DhGraphicEqSettings_bands(self), i); }
+    return 0;
+}
+#inline
+#must_use
+fn dhvani_geq_settings_enabled(self) { return DhGraphicEqSettings_enabled(self); }
+
+# ---- GraphicEq ----
+#derive(accessors)
+struct DhGraphicEq { inner; settings; sample_rate; channels; }
+
+# build_eq(settings, sample_rate, channels) -- a fresh ParametricEq with 10
+# peaking bands at the ISO frequencies, Q=1.4, each enabled iff |gain| >= 0.01.
+#must_use
+fn dhvani_geq_build_eq(settings, sample_rate, channels) {
+    var bands = DhGraphicEqSettings_bands(settings);
+    var cfgs = vec_new();
+    var i = 0;
+    while (i < 10) {
+        var gain_db = vec_get(bands, i);
+        var enabled = 0;
+        if (f64_ge(f64_abs(gain_db), DH_GEQ_FLAT_EPS) == 1) { enabled = 1; }
+        vec_push(cfgs, dhvani_eq_band_config_new(DH_BAND_PEAKING, dhvani_geq_iso_band(i), gain_db, DH_GEQ_Q, enabled));
+        i = i + 1;
+    }
+    return dhvani_eq_new(cfgs, sample_rate, channels);
+}
+
+# new(sample_rate, channels) -- all bands flat, disabled.
+#must_use
+fn dhvani_geq_new(sample_rate, channels) {
+    var self = alloc(sizeof(DhGraphicEq));
+    var settings = dhvani_geq_settings_default();
+    DhGraphicEq_set_settings(self, settings);
+    DhGraphicEq_set_inner(self, dhvani_geq_build_eq(settings, sample_rate, channels));
+    DhGraphicEq_set_sample_rate(self, sample_rate);
+    DhGraphicEq_set_channels(self, channels);
+    return self;
+}
+
+# rebuild -- ALLOC-FREE: re-derive the 10 band configs from the current settings
+# and push them into the existing inner ParametricEq via in-place set_band (only
+# each band's coeffs are recomputed; no eq/biquad allocation). Rust allocated a
+# fresh ParametricEq here; under the bump allocator that leaks, so we mutate.
+fn dhvani_geq_rebuild(self) {
+    var inner = DhGraphicEq_inner(self);
+    var settings = DhGraphicEq_settings(self);
+    var bands = DhGraphicEqSettings_bands(settings);
+    var i = 0;
+    while (i < 10) {
+        var gain_db = vec_get(bands, i);
+        var enabled = 0;
+        if (f64_ge(f64_abs(gain_db), DH_GEQ_FLAT_EPS) == 1) { enabled = 1; }
+        dhvani_eq_set_band(inner, i,
+            dhvani_eq_band_config_new(DH_BAND_PEAKING, dhvani_geq_iso_band(i), gain_db, DH_GEQ_Q, enabled));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# process(buf) -- run the 10-band EQ in place. Bypass entirely if flat/disabled.
+# Adapts to a changed sample rate before processing.
+#inline
+fn dhvani_geq_process(self, buf) {
+    if (dhvani_geq_settings_is_flat(DhGraphicEq_settings(self)) == 1) { return 0; }
+    var bsr = DhAudioBuffer_sample_rate(buf);
+    if (bsr != DhGraphicEq_sample_rate(self)) {
+        DhGraphicEq_set_sample_rate(self, bsr);
+        # sample rate changed: rebuild inner coeffs at the new rate.
+        dhvani_eq_set_sample_rate(DhGraphicEq_inner(self), bsr);
+        dhvani_geq_rebuild(self);
+    }
+    dhvani_eq_process(DhGraphicEq_inner(self), buf);
+    return 0;
+}
+
+# load_preset(name) -- replace settings with a named preset, rebuild coeffs.
+fn dhvani_geq_load_preset(self, name) {
+    DhGraphicEq_set_settings(self, dhvani_geq_settings_preset(name));
+    dhvani_geq_rebuild(self);
+    return 0;
+}
+
+# set_band(band, gain_db) -- set a band's gain, rebuild coeffs.
+fn dhvani_geq_set_band(self, band, gain_db) {
+    dhvani_geq_settings_set_band(DhGraphicEq_settings(self), band, gain_db);
+    dhvani_geq_rebuild(self);
+    return 0;
+}
+
+# set_settings(settings) -- apply full settings, rebuild coeffs.
+fn dhvani_geq_set_settings(self, settings) {
+    DhGraphicEq_set_settings(self, settings);
+    dhvani_geq_rebuild(self);
+    return 0;
+}
+
+# settings() -- current settings handle.
+#inline
+#must_use
+fn dhvani_geq_settings(self) { return DhGraphicEq_settings(self); }
+
+# set_enabled(enabled) -- toggle the EQ without rebuilding.
+fn dhvani_geq_set_enabled(self, enabled) {
+    DhGraphicEqSettings_set_enabled(DhGraphicEq_settings(self), enabled);
+    return 0;
+}
+
+# reset() -- clear inner filter state (call on seek / track change).
+fn dhvani_geq_reset(self) {
+    dhvani_eq_reset(DhGraphicEq_inner(self));
+    return 0;
+}

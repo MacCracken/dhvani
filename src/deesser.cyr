@@ -1,0 +1,166 @@
+# deesser.cyr -- De-esser: sibilance reduction via a biquad BandPass sidechain.
+# Ports rust-old/src/dsp/deesser.rs. L2: deps error + simd + buffer +
+# abaco (db_to_amplitude) + biquad (BandPass detector).
+#
+# Detects energy in the sibilant band (typ. 4-9 kHz) with a BandPass biquad
+# sidechain and ducks the signal when it exceeds threshold. The Rust used a
+# pre-allocated Vec<f32> `sidechain` reclaimed each call via std::mem::take
+# wrapped in a temp AudioBuffer. The Cyrius port owns a `sidechain` vec AND a
+# `scratch` AudioBuffer wrapper, both allocated once in new(); process() resizes
+# the sidechain vec in place -- no per-call allocation on the hot path.
+#
+# DeEsserParams::validate -> DHVANI_ERR_NONE / negative DHVANI_ERR_INVALID_PARAMETER.
+# new()/set_params Result -> handle-or-null / error code. serde + Display dropped.
+
+#derive(accessors)
+struct DhDeEsserParams { freq_hz; threshold_db; reduction_db; q; }
+
+#derive(accessors)
+struct DhDeEsser { params; detector; sidechain; scratch; sample_rate; channels; bypassed; }
+
+# ---- DeEsserParams ----
+#must_use
+fn dhvani_deesserparams_new(freq_hz, threshold_db, reduction_db, q) {
+    var p = alloc(sizeof(DhDeEsserParams));
+    DhDeEsserParams_set_freq_hz(p, freq_hz);
+    DhDeEsserParams_set_threshold_db(p, threshold_db);
+    DhDeEsserParams_set_reduction_db(p, reduction_db);
+    DhDeEsserParams_set_q(p, q);
+    return p;
+}
+
+# default: freq 6000, threshold -20 dB, reduction 6 dB, q 2.
+#must_use
+fn dhvani_deesserparams_default() {
+    return dhvani_deesserparams_new(6000.0, f64_neg(20.0), 6.0, 2.0);
+}
+
+# validate -- freq_hz>0, reduction_db>=0, q>0.
+#must_use
+fn dhvani_deesserparams_validate(p) {
+    if (f64_le(DhDeEsserParams_freq_hz(p), 0) == 1)     { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhDeEsserParams_reduction_db(p), 0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_le(DhDeEsserParams_q(p), 0) == 1)            { return DHVANI_ERR_INVALID_PARAMETER; }
+    return DHVANI_ERR_NONE;
+}
+
+# ---- DeEsser ----
+# new(params, sample_rate, channels) -- handle, or 0 if params invalid.
+#must_use
+fn dhvani_deesser_new(params, sample_rate, channels) {
+    if (dhvani_is_err(dhvani_deesserparams_validate(params)) == 1) { return 0; }
+    var self = alloc(sizeof(DhDeEsser));
+    var detector = dhvani_biquad_new(DH_BQ_BANDPASS, 0,
+                                     DhDeEsserParams_freq_hz(params),
+                                     DhDeEsserParams_q(params),
+                                     sample_rate, channels);
+    DhDeEsser_set_params(self, params);
+    DhDeEsser_set_detector(self, detector);
+    # reusable sidechain sample vec (grows to buffer length, reused per call)
+    DhDeEsser_set_sidechain(self, vec_new());
+    # reusable AudioBuffer wrapper around the sidechain vec (rebound each call)
+    var scratch = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(scratch, DhDeEsser_sidechain(self));
+    DhAudioBuffer_set_channels(scratch, channels);
+    DhAudioBuffer_set_sample_rate(scratch, sample_rate);
+    DhAudioBuffer_set_frames(scratch, 0);
+    DhDeEsser_set_scratch(self, scratch);
+    DhDeEsser_set_sample_rate(self, sample_rate);
+    DhDeEsser_set_channels(self, channels);
+    DhDeEsser_set_bypassed(self, 0);
+    return self;
+}
+
+fn dhvani_deesser_set_bypass(self, bypassed) { DhDeEsser_set_bypassed(self, bypassed); return 0; }
+#must_use
+fn dhvani_deesser_is_bypassed(self) { if (DhDeEsser_bypassed(self) == 1) { return 1; } return 0; }
+
+# process(buf) -- duck sibilance in place.
+#inline
+fn dhvani_deesser_process(self, buf) {
+    if (DhDeEsser_bypassed(self) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var total = vec_len(samples);
+    var params = DhDeEsser_params(self);
+
+    # Reuse pre-allocated sidechain vec: resize to buf length, copy samples.
+    var side = DhDeEsser_sidechain(self);
+    var cur = vec_len(side);
+    var i = 0;
+    while (i < total) {
+        if (i < cur) { vec_set(side, i, vec_get(samples, i)); }
+        else         { vec_push(side, vec_get(samples, i)); }
+        i = i + 1;
+    }
+    # (buffers only grow here; the reused vec length always >= total)
+
+    # Rebind the reusable scratch AudioBuffer to this call's format, then filter.
+    var scratch = DhDeEsser_scratch(self);
+    DhAudioBuffer_set_samples(scratch, side);
+    DhAudioBuffer_set_channels(scratch, ch);
+    DhAudioBuffer_set_sample_rate(scratch, DhAudioBuffer_sample_rate(buf));
+    DhAudioBuffer_set_frames(scratch, frames);
+    dhvani_biquad_process(DhDeEsser_detector(self), scratch);
+
+    var threshold_lin = db_to_amplitude(DhDeEsserParams_threshold_db(params));
+    var max_reduction_lin = db_to_amplitude(f64_neg(DhDeEsserParams_reduction_db(params)));
+
+    var frame = 0;
+    while (frame < frames) {
+        # Detect sidechain peak across channels.
+        var sidechain_peak = 0;
+        var c = 0;
+        while (c < ch) {
+            sidechain_peak = f64_max(sidechain_peak, f64_abs(vec_get(side, frame * ch + c)));
+            c = c + 1;
+        }
+        # If sidechain exceeds threshold, compute proportional gain reduction.
+        if (f64_gt(sidechain_peak, threshold_lin) == 1) {
+            var excess_ratio = f64_div(sidechain_peak, threshold_lin);
+            var reduction = f64_max(f64_div(1.0, excess_ratio), max_reduction_lin);
+            var c2 = 0;
+            while (c2 < ch) {
+                var idx = frame * ch + c2;
+                var out = f64_mul(vec_get(samples, idx), reduction);
+                if (dhvani_is_finite(out) == 0) { out = 0; }
+                vec_set(samples, idx, out);
+                c2 = c2 + 1;
+            }
+        }
+        frame = frame + 1;
+    }
+    return 0;
+}
+
+# set_sample_rate -- rebuild the detector filter for the new rate.
+fn dhvani_deesser_set_sample_rate(self, sample_rate) {
+    DhDeEsser_set_sample_rate(self, sample_rate);
+    var params = DhDeEsser_params(self);
+    DhDeEsser_set_detector(self, dhvani_biquad_new(DH_BQ_BANDPASS, 0,
+        DhDeEsserParams_freq_hz(params), DhDeEsserParams_q(params),
+        sample_rate, DhDeEsser_channels(self)));
+    return 0;
+}
+
+# reset -- clear detector filter state.
+fn dhvani_deesser_reset(self) {
+    dhvani_biquad_reset(DhDeEsser_detector(self));
+    return 0;
+}
+
+# set_params -- validate, rebuild detector, store; error code on invalid.
+fn dhvani_deesser_set_params(self, params) {
+    var rc = dhvani_deesserparams_validate(params);
+    if (dhvani_is_err(rc) == 1) { return rc; }
+    DhDeEsser_set_detector(self, dhvani_biquad_new(DH_BQ_BANDPASS, 0,
+        DhDeEsserParams_freq_hz(params), DhDeEsserParams_q(params),
+        DhDeEsser_sample_rate(self), DhDeEsser_channels(self)));
+    DhDeEsser_set_params(self, params);
+    return DHVANI_ERR_NONE;
+}
+
+#inline
+#must_use
+fn dhvani_deesser_detector(self) { return DhDeEsser_detector(self); }

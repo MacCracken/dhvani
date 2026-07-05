@@ -1,0 +1,165 @@
+# eq.tcyr -- parity tests for src/eq.cyr
+# Ported one-for-one from the 15 #[test] blocks in rust-old/src/dsp/eq.rs.
+# EqBandConfig -> dhvani_eq_band_config_new(band_type, freq_hz, gain_db, q, enabled).
+# band() Option -> config handle or 0 (null). No serde/Display tests to drop.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/biquad.cyr"
+include "src/eq.cyr"
+
+alloc_init();
+
+# sin(2*pi*freq*i/sr) mono.
+fn make_sine(freq, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr));
+        vec_push(v, f64_sin(ph));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+
+# ---- flat_eq_passthrough ----
+test_group("flat_eq_passthrough");
+var bands1 = vec_new();
+vec_push(bands1, dhvani_eq_band_config_new(DH_BAND_PEAKING, 1000.0, 0, 1.0, 1));
+var eq1 = dhvani_eq_new(bands1, 44100, 1);
+var buf1 = make_sine(440.0, 44100, 4096);
+var orms1 = dhvani_buffer_rms(buf1);
+dhvani_eq_process(eq1, buf1);
+assert(f64_lt(f64_abs(f64_sub(dhvani_buffer_rms(buf1), orms1)), f64_mul(orms1, 0.01)), "0 dB peaking near-passthrough");
+
+# ---- peaking_boosts_frequency ----
+test_group("peaking_boosts_frequency");
+var bands2 = vec_new();
+vec_push(bands2, dhvani_eq_band_config_new(DH_BAND_PEAKING, 440.0, 12.0, 1.0, 1));
+var eq2 = dhvani_eq_new(bands2, 44100, 1);
+var buf2 = make_sine(440.0, 44100, 4096);
+var orms2 = dhvani_buffer_rms(buf2);
+dhvani_eq_process(eq2, buf2);
+assert(f64_gt(dhvani_buffer_rms(buf2), f64_mul(orms2, 1.5)), "peaking boosts 440Hz");
+
+# ---- disabled_band_no_effect ----
+test_group("disabled_band_no_effect");
+var bands3 = vec_new();
+vec_push(bands3, dhvani_eq_band_config_new(DH_BAND_PEAKING, 440.0, 24.0, 1.0, 0));
+var eq3 = dhvani_eq_new(bands3, 44100, 1);
+var buf3 = make_sine(440.0, 44100, 4096);
+var s3 = dhvani_buffer_samples(buf3);
+var orig3 = vec_new();
+var k3 = 0;
+while (k3 < 4096) { vec_push(orig3, vec_get(s3, k3)); k3 = k3 + 1; }
+dhvani_eq_process(eq3, buf3);
+var i3 = 0; var ok3 = 1;
+while (i3 < 4096) { if (vec_get(s3, i3) != vec_get(orig3, i3)) { ok3 = 0; } i3 = i3 + 1; }
+assert_eq(ok3, 1, "disabled band leaves signal unchanged");
+
+# ---- add_remove_band ----
+test_group("add_remove_band");
+var eq4 = dhvani_eq_new(vec_new(), 44100, 1);
+assert_eq(dhvani_eq_band_count(eq4), 0, "starts empty");
+dhvani_eq_add_band(eq4, dhvani_eq_band_config_new(DH_BAND_LOWPASS, 5000.0, 0, 0.707, 1));
+assert_eq(dhvani_eq_band_count(eq4), 1, "one after add");
+dhvani_eq_remove_band(eq4, 0);
+assert_eq(dhvani_eq_band_count(eq4), 0, "zero after remove");
+
+# ---- set_band_updates_config ----
+test_group("set_band_updates_config");
+var bands5 = vec_new();
+vec_push(bands5, dhvani_eq_band_config_new(DH_BAND_PEAKING, 1000.0, 0, 1.0, 1));
+var eq5 = dhvani_eq_new(bands5, 44100, 1);
+dhvani_eq_set_band(eq5, 0, dhvani_eq_band_config_new(DH_BAND_HIGHSHELF, 5000.0, 6.0, 0.707, 1));
+var cfg5 = dhvani_eq_band(eq5, 0);
+assert_eq(dhvani_eq_band_config_band_type(cfg5), DH_BAND_HIGHSHELF, "band type updated");
+assert(f64_lt(f64_abs(f64_sub(dhvani_eq_band_config_freq_hz(cfg5), 5000.0)), DH_EPSILON), "freq updated");
+
+# ---- lowpass_band_attenuates_highs ----
+test_group("lowpass_band_attenuates_highs");
+var bands6 = vec_new();
+vec_push(bands6, dhvani_eq_band_config_new(DH_BAND_LOWPASS, 500.0, 0, 0.707, 1));
+var eq6 = dhvani_eq_new(bands6, 44100, 1);
+var buf6 = make_sine(10000.0, 44100, 4096);
+var orms6 = dhvani_buffer_rms(buf6);
+dhvani_eq_process(eq6, buf6);
+assert(f64_lt(dhvani_buffer_rms(buf6), f64_mul(orms6, 0.1)), "lowpass attenuates highs");
+
+# ---- reset_clears_all_bands ----
+test_group("reset_clears_all_bands");
+var bands7 = vec_new();
+vec_push(bands7, dhvani_eq_band_config_new(DH_BAND_PEAKING, 440.0, 12.0, 1.0, 1));
+var eq7 = dhvani_eq_new(bands7, 44100, 1);
+var buf7 = make_sine(440.0, 44100, 256);
+dhvani_eq_process(eq7, buf7);
+dhvani_eq_reset(eq7);
+var silence7 = dhvani_buffer_silence(1, 64, 44100);
+dhvani_eq_process(eq7, silence7);
+assert(f64_lt(dhvani_buffer_peak(silence7), 0.001), "no transient after reset");
+
+# ---- empty_eq_passthrough ----
+test_group("empty_eq_passthrough");
+var eq8 = dhvani_eq_new(vec_new(), 44100, 1);
+var buf8 = make_sine(440.0, 44100, 1024);
+var s8 = dhvani_buffer_samples(buf8);
+var orig8 = vec_new();
+var k8 = 0;
+while (k8 < 1024) { vec_push(orig8, vec_get(s8, k8)); k8 = k8 + 1; }
+dhvani_eq_process(eq8, buf8);
+var i8 = 0; var ok8 = 1;
+while (i8 < 1024) { if (vec_get(s8, i8) != vec_get(orig8, i8)) { ok8 = 0; } i8 = i8 + 1; }
+assert_eq(ok8, 1, "empty eq leaves signal unchanged");
+
+# ---- remove_band_out_of_bounds ----
+test_group("remove_band_out_of_bounds");
+var eq9 = dhvani_eq_new(vec_new(), 44100, 1);
+dhvani_eq_remove_band(eq9, 99);
+assert_eq(dhvani_eq_band_count(eq9), 0, "remove OOB no panic");
+
+# ---- set_band_out_of_bounds ----
+test_group("set_band_out_of_bounds");
+var eq10 = dhvani_eq_new(vec_new(), 44100, 1);
+dhvani_eq_set_band(eq10, 99, dhvani_eq_band_config_new(DH_BAND_PEAKING, 1000.0, 0, 1.0, 1));
+assert_eq(dhvani_eq_band_count(eq10), 0, "set OOB no panic");
+
+# ---- band_returns_none_for_invalid_index ----
+test_group("band_returns_none_for_invalid_index");
+var eq11 = dhvani_eq_new(vec_new(), 44100, 1);
+assert_eq(dhvani_eq_band(eq11, 0), 0, "band(0) is null on empty");
+assert_eq(dhvani_eq_band(eq11, 99), 0, "band(99) is null on empty");
+
+# ---- notch_band ----
+test_group("notch_band");
+var bands12 = vec_new();
+vec_push(bands12, dhvani_eq_band_config_new(DH_BAND_NOTCH, 1000.0, 0, 10.0, 1));
+var eq12 = dhvani_eq_new(bands12, 44100, 1);
+var buf12 = make_sine(1000.0, 44100, 4096);
+var orms12 = dhvani_buffer_rms(buf12);
+dhvani_eq_process(eq12, buf12);
+assert(f64_lt(dhvani_buffer_rms(buf12), f64_mul(orms12, 0.2)), "notch attenuates 1kHz");
+
+# ---- highpass_band ----
+test_group("highpass_band");
+var bands13 = vec_new();
+vec_push(bands13, dhvani_eq_band_config_new(DH_BAND_HIGHPASS, 5000.0, 0, 0.707, 1));
+var eq13 = dhvani_eq_new(bands13, 44100, 1);
+var buf13 = make_sine(100.0, 44100, 4096);
+var orms13 = dhvani_buffer_rms(buf13);
+dhvani_eq_process(eq13, buf13);
+assert(f64_lt(dhvani_buffer_rms(buf13), f64_mul(orms13, 0.1)), "highpass attenuates 100Hz");
+
+# ---- bandpass_band ----
+test_group("bandpass_band");
+var bands14 = vec_new();
+vec_push(bands14, dhvani_eq_band_config_new(DH_BAND_BANDPASS, 1000.0, 0, 5.0, 1));
+var eq14 = dhvani_eq_new(bands14, 44100, 1);
+var buf14 = make_sine(100.0, 44100, 4096);
+var orms14 = dhvani_buffer_rms(buf14);
+dhvani_eq_process(eq14, buf14);
+assert(f64_lt(dhvani_buffer_rms(buf14), f64_mul(orms14, 0.3)), "bandpass attenuates 100Hz off-center");
+
+var rc = assert_summary();
+syscall(60, rc);

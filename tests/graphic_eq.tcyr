@@ -1,0 +1,183 @@
+# graphic_eq.tcyr -- parity tests for src/graphic_eq.cyr
+# Ported one-for-one from the 13 #[test] blocks in rust-old/src/dsp/graphic_eq.rs.
+# DROPPED: serde_roundtrip (serde JSON round-trip -- no serde in the Cyrius port).
+# No Display-string tests exist to drop. band_names uses assert_streq for the
+# &'static str returns.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/biquad.cyr"
+include "src/eq.cyr"
+include "src/graphic_eq.cyr"
+
+alloc_init();
+
+# sin(2*pi*freq*i/sr) mono, optionally scaled by `amp`.
+fn geq_sine(freq, sr, frames, amp) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr));
+        vec_push(v, f64_mul(f64_sin(ph), amp));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+
+# ---- flat_is_passthrough ----
+# enabled=true but all bands 0 dB -> is_flat -> buffer unchanged.
+test_group("flat_is_passthrough");
+var eqa = dhvani_geq_new(44100, 2);
+dhvani_geq_set_enabled(eqa, 1);
+var bufa = geq_sine(1000.0, 44100, 4096, 1.0);
+var sa = dhvani_buffer_samples(bufa);
+var origa = vec_new();
+var ka = 0;
+while (ka < 4096) { vec_push(origa, vec_get(sa, ka)); ka = ka + 1; }
+dhvani_geq_process(eqa, bufa);
+var ia = 0; var oka = 1;
+while (ia < 4096) { if (vec_get(sa, ia) != vec_get(origa, ia)) { oka = 0; } ia = ia + 1; }
+assert_eq(oka, 1, "flat EQ does not modify buffer");
+
+# ---- boost_increases_energy ----
+test_group("boost_increases_energy");
+var eqb = dhvani_geq_new(44100, 1);
+dhvani_geq_set_enabled(eqb, 1);
+dhvani_geq_set_band(eqb, 5, 12.0);
+var bufb = geq_sine(1000.0, 44100, 4096, 0.5);
+var sb = dhvani_buffer_samples(bufb);
+# original RMS (before processing) -- compute over the sample vec.
+var sumb = 0;
+var kb = 0;
+while (kb < 4096) { var xb = vec_get(sb, kb); sumb = f64_add(sumb, f64_mul(xb, xb)); kb = kb + 1; }
+var orms_b = f64_sqrt(f64_div(sumb, f64_from(4096)));
+dhvani_geq_process(eqb, bufb);
+var boosted_b = dhvani_buffer_rms(bufb);
+assert(f64_gt(boosted_b, orms_b), "boost should increase energy");
+
+# ---- cut_decreases_energy ----
+test_group("cut_decreases_energy");
+var eqc = dhvani_geq_new(44100, 1);
+dhvani_geq_set_enabled(eqc, 1);
+dhvani_geq_set_band(eqc, 5, f64_neg(12.0));
+var bufc = geq_sine(1000.0, 44100, 4096, 0.5);
+var sc = dhvani_buffer_samples(bufc);
+var sumc = 0;
+var kc = 0;
+while (kc < 4096) { var xc = vec_get(sc, kc); sumc = f64_add(sumc, f64_mul(xc, xc)); kc = kc + 1; }
+var orms_c = f64_sqrt(f64_div(sumc, f64_from(4096)));
+dhvani_geq_process(eqc, bufc);
+var cut_c = dhvani_buffer_rms(bufc);
+assert(f64_lt(cut_c, orms_c), "cut should decrease energy");
+
+# ---- preset_loading ----
+test_group("preset_loading");
+var eqd = dhvani_geq_new(48000, 2);
+dhvani_geq_load_preset(eqd, "rock");
+var setd = dhvani_geq_settings(eqd);
+assert_eq(dhvani_geq_settings_enabled(setd), 1, "rock preset enabled");
+assert_eq(dhvani_geq_settings_is_flat(setd), 0, "rock preset not flat");
+assert(f64_gt(dhvani_geq_settings_band(setd, 0), 0), "rock preset bass boost");
+
+# ---- all_presets_valid_range ----
+# every band of every preset lies within [-12, 12].
+test_group("all_presets_valid_range");
+var pn = 0; var okd = 1;
+while (pn < dhvani_geq_preset_count()) {
+    var setp = dhvani_geq_settings_preset(dhvani_geq_preset_name(pn));
+    var bp = dhvani_geq_settings_bands(setp);
+    var bi = 0;
+    while (bi < 10) {
+        var bv = vec_get(bp, bi);
+        if (f64_lt(bv, f64_neg(DH_GEQ_MAX_GAIN)) == 1) { okd = 0; }
+        if (f64_gt(bv, DH_GEQ_MAX_GAIN) == 1) { okd = 0; }
+        bi = bi + 1;
+    }
+    pn = pn + 1;
+}
+assert_eq(okd, 1, "all preset bands within +/-12 dB");
+
+# ---- unknown_preset_is_flat ----
+test_group("unknown_preset_is_flat");
+var sete = dhvani_geq_settings_preset("nonexistent");
+var be = dhvani_geq_settings_bands(sete);
+var ie = 0; var oke = 1;
+while (ie < 10) { if (vec_get(be, ie) != 0) { oke = 0; } ie = ie + 1; }
+assert_eq(oke, 1, "unknown preset has all-zero bands");
+
+# ---- band_names ----
+test_group("band_names");
+assert_streq(dhvani_geq_band_name(0), "31 Hz", "band 0 name");
+assert_streq(dhvani_geq_band_name(5), "1 kHz", "band 5 name");
+assert_streq(dhvani_geq_band_name(9), "16 kHz", "band 9 name");
+assert_streq(dhvani_geq_band_name(10), "?", "out-of-range band name");
+
+# ---- set_band_clamps ----
+test_group("set_band_clamps");
+var setf = dhvani_geq_settings_default();
+dhvani_geq_settings_set_band(setf, 0, 20.0);
+assert_eq(dhvani_geq_settings_band(setf, 0), 12.0, "high gain clamps to 12");
+dhvani_geq_settings_set_band(setf, 0, f64_neg(20.0));
+assert_eq(dhvani_geq_settings_band(setf, 0), f64_neg(12.0), "low gain clamps to -12");
+
+# ---- set_band_out_of_range_ignored ----
+test_group("set_band_out_of_range_ignored");
+var setg = dhvani_geq_settings_default();
+dhvani_geq_settings_set_band(setg, 99, 6.0);
+assert_eq(dhvani_geq_settings_is_flat(setg), 1, "out-of-range set_band leaves flat");
+
+# ---- disabled_is_passthrough ----
+test_group("disabled_is_passthrough");
+var eqh = dhvani_geq_new(44100, 1);
+dhvani_geq_load_preset(eqh, "rock");
+dhvani_geq_set_enabled(eqh, 0);
+var bufh = geq_sine(440.0, 44100, 1024, 1.0);
+var sh = dhvani_buffer_samples(bufh);
+var origh = vec_new();
+var kh = 0;
+while (kh < 1024) { vec_push(origh, vec_get(sh, kh)); kh = kh + 1; }
+dhvani_geq_process(eqh, bufh);
+var ih = 0; var okh = 1;
+while (ih < 1024) { if (vec_get(sh, ih) != vec_get(origh, ih)) { okh = 0; } ih = ih + 1; }
+assert_eq(okh, 1, "disabled EQ is passthrough");
+
+# ---- stereo_processing ----
+test_group("stereo_processing");
+var eqi = dhvani_geq_new(48000, 2);
+dhvani_geq_set_enabled(eqi, 1);
+dhvani_geq_set_band(eqi, 5, 6.0);
+# sin(2*pi*1000*(i/2)/48000) * 0.5, interleaved 2ch (4096 samples).
+var vi = vec_new();
+var si = 0;
+while (si < 4096) {
+    var phi = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 1000.0), f64_from(si / 2)), f64_from(48000));
+    vec_push(vi, f64_mul(f64_sin(phi), 0.5));
+    si = si + 1;
+}
+var bufi = dhvani_buffer_from_interleaved(vi, 2, 48000);
+dhvani_geq_process(eqi, bufi);
+assert_eq(DhAudioBuffer_channels(bufi), 2, "stereo preserved");
+var samps_i = dhvani_buffer_samples(bufi);
+var ni = vec_len(samps_i);
+var ci = 0; var oki = 1;
+while (ci < ni) { if (dhvani_is_finite(vec_get(samps_i, ci)) == 0) { oki = 0; } ci = ci + 1; }
+assert_eq(oki, 1, "all stereo samples finite");
+
+# ---- reset_clears_state ----
+# Process some audio to build up state, then reset (must not panic / must run).
+test_group("reset_clears_state");
+var eqj = dhvani_geq_new(44100, 1);
+dhvani_geq_set_enabled(eqj, 1);
+dhvani_geq_set_band(eqj, 5, 6.0);
+var vj = vec_new();
+var sj = 0;
+while (sj < 1024) { vec_push(vj, 0.5); sj = sj + 1; }
+var bufj = dhvani_buffer_from_interleaved(vj, 1, 44100);
+dhvani_geq_process(eqj, bufj);
+var rcj = dhvani_geq_reset(eqj);
+assert_eq(rcj, 0, "reset completes");
+
+var rc = assert_summary();
+syscall(60, rc);

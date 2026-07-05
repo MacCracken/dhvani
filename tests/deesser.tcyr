@@ -1,0 +1,108 @@
+# deesser.tcyr -- parity tests for src/deesser.cyr
+# Ported one-for-one from the 7 #[test] blocks in rust-old/src/dsp/deesser.rs.
+# No serde/Display tests to drop. The Rust `sidechain_buffer_reused` test asserts
+# Vec::capacity() stability across calls; Cyrius vecs expose no capacity, so it is
+# ported as the observable reuse invariant: non-empty after process, length stable
+# across two equal-size process calls.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/biquad.cyr"
+include "src/deesser.cyr"
+
+alloc_init();
+
+# amplitude * sin(2*pi*freq*i/44100) mono @44100 (frames samples).
+fn make_sine(freq, amplitude, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(44100));
+        vec_push(v, f64_mul(amplitude, f64_sin(ph)));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, 44100);
+}
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    while (i < n) { if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# ---- low_frequency_unaffected ----
+test_group("low_frequency_unaffected");
+var d1 = dhvani_deesser_new(dhvani_deesserparams_new(6000.0, f64_neg(30.0), 12.0, 2.0), 44100, 1);
+var b1 = make_sine(200.0, 0.8, 4096);
+var orig1 = dhvani_buffer_rms(b1);
+dhvani_deesser_process(d1, b1);
+# 200Hz should not trigger the de-esser at 6kHz: rms change < 10% of original.
+assert(f64_lt(f64_abs(f64_sub(dhvani_buffer_rms(b1), orig1)), f64_mul(orig1, 0.1)), "200Hz not de-essed at 6kHz");
+
+# ---- sibilance_reduced ----
+test_group("sibilance_reduced");
+var d2 = dhvani_deesser_new(dhvani_deesserparams_new(6000.0, f64_neg(30.0), 12.0, 1.0), 44100, 1);
+var b2 = make_sine(6000.0, 0.8, 4096);
+var orig2 = dhvani_buffer_rms(b2);
+dhvani_deesser_process(d2, b2);
+assert(f64_lt(dhvani_buffer_rms(b2), f64_mul(orig2, 0.8)), "6kHz reduced by de-esser");
+
+# ---- below_threshold_passthrough ----
+test_group("below_threshold_passthrough");
+var d3 = dhvani_deesser_new(dhvani_deesserparams_new(6000.0, 0, 12.0, 2.0), 44100, 1);
+var b3 = make_sine(6000.0, 0.1, 4096);
+var orig3 = dhvani_buffer_rms(b3);
+dhvani_deesser_process(d3, b3);
+# Signal too quiet to trigger: rms change < 15% of original.
+assert(f64_lt(f64_abs(f64_sub(dhvani_buffer_rms(b3), orig3)), f64_mul(orig3, 0.15)), "below-threshold near-unchanged");
+
+# ---- reset_clears_state ----
+test_group("reset_clears_state");
+var d4 = dhvani_deesser_new(dhvani_deesserparams_default(), 44100, 1);
+var b4 = make_sine(6000.0, 0.8, 256);
+dhvani_deesser_process(d4, b4);
+dhvani_deesser_reset(d4);
+var out4 = dhvani_biquad_process_sample(dhvani_deesser_detector(d4), 0, 0);
+assert(f64_lt(f64_abs(out4), DH_EPSILON), "reset clears detector state");
+
+# ---- set_params_updates_detector ----
+test_group("set_params_updates_detector");
+var d5 = dhvani_deesser_new(dhvani_deesserparams_default(), 44100, 1);
+var rc5 = dhvani_deesser_set_params(d5, dhvani_deesserparams_new(8000.0, f64_neg(20.0), 8.0, 3.0));
+assert_eq(rc5, DHVANI_ERR_NONE, "set_params ok");
+var b5 = make_sine(8000.0, 0.8, 4096);
+dhvani_deesser_process(d5, b5);
+assert_eq(all_finite(b5), 1, "set_params output finite");
+
+# ---- stereo_deessing ----
+test_group("stereo_deessing");
+var d6 = dhvani_deesser_new(dhvani_deesserparams_new(6000.0, f64_neg(30.0), 12.0, 1.0), 44100, 2);
+var sv6 = vec_new();
+var si6 = 0;
+while (si6 < 8192) {
+    var ph6 = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 6000.0), f64_from(si6 / 2)), f64_from(44100));
+    vec_push(sv6, f64_mul(0.8, f64_sin(ph6)));
+    si6 = si6 + 1;
+}
+var b6 = dhvani_buffer_from_interleaved(sv6, 2, 44100);
+dhvani_deesser_process(d6, b6);
+assert_eq(all_finite(b6), 1, "stereo output finite");
+
+# ---- sidechain_buffer_reused ----
+test_group("sidechain_buffer_reused");
+var d7 = dhvani_deesser_new(dhvani_deesserparams_default(), 44100, 1);
+var b7 = make_sine(6000.0, 0.8, 1024);
+dhvani_deesser_process(d7, b7);
+# After process the sidechain vec is populated (reusable).
+var len_after_first = vec_len(DhDeEsser_sidechain(d7));
+assert(len_after_first > 0, "sidechain populated after first process");
+# Process again with an equal-size buffer: same allocation, length unchanged.
+var b7b = make_sine(6000.0, 0.8, 1024);
+dhvani_deesser_process(d7, b7b);
+assert_eq(vec_len(DhDeEsser_sidechain(d7)), len_after_first, "sidechain length stable (reused)");
+
+var rc = assert_summary();
+syscall(60, rc);

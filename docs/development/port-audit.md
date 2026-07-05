@@ -283,8 +283,24 @@ their upstream deps (svara for voice) are already ported.
   delay (chorus/flanger, sine LFO, interpolated reads). **9 green**.
 - ✅ `reverb` → `src/reverb.cyr` — Schroeder/Freeverb (4 combs → 2 allpass per
   channel; damped feedback; rate-scaled delays). **6 green**.
-- ⬜ Next: `eq`/`deesser` (L2, wrap biquad), `graphic_eq` (L3, wraps eq). Then
-  re-enable the 7 deferred `dsp.tcyr` integration tests.
+- ✅ `eq` → `src/eq.cyr` — parametric EQ; BandType→codes; parallel config/filter
+  vecs; **struct-owned dry-scratch** (kills the per-call `.clone()` alloc). **18 green**.
+- ✅ `deesser` → `src/deesser.cyr` — sidechain bandpass detector; struct-owned
+  sidechain+scratch reuse (alloc-free). **9 green**.
+- ✅ `graphic_eq` → `src/graphic_eq.cyr` — 10-band ISO; wraps eq; **in-place
+  rebuild** (avoids per-preset eq realloc); preset tables via if-chains;
+  hex consts for `1.4`/`0.01`. **19 green**.
+- ✅ `dsp/mod` re-completed to **19/19 tests** (33 assertions) — the 7 deferred
+  integration tests (compressor/limiter/delay/eq) re-enabled.
+
+**Waves A+B+C COMPLETE — entire DSP surface ported (25/64, 412 assertions).**
+Ported via a 4-agent workflow (eq+deesser parallel → graphic_eq → verify);
+independently reviewed (hex constants, dry/wet blend, reduction formula) — parity holds.
+
+Next: **Wave D (analysis)** — `waveform`/`zcr` (L0), `analysis/mod`/`fft`/
+`dynamics`/`loudness` (L1, loudness needs biquad), `stft`/`chroma`/`convolution`/
+`noise_reduction` (L2, conv/nr need fft), `key`/`onset` (L3), `beat` (L4). Then
+the deferred `buffer/ops::normalize_to_lufs` + `resample` spectrum test unblock.
 
 ### Cyrius idioms confirmed (this port)
 

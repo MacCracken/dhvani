@@ -1,9 +1,9 @@
 # dsp.tcyr -- parity tests for src/dsp.cyr (the dsp/mod facade)
-# Ports the #[test] blocks from rust-old/src/dsp/mod.rs whose deps are ported:
-# the free functions (noise_gate/hard_limiter/normalize), abaco db conversions,
-# soft_knee_gain, plus biquad/clock integration checks. DEFERRED to Wave C
-# (need compressor/limiter/delay/eq): compressor_bypass, compressor_set_sample_rate,
-# limiter_bypass, delay_latency_frames, modulated_delay_*, parametric_eq_set_params.
+# All 19 #[test] blocks from rust-old/src/dsp/mod.rs, ported one-for-one:
+# the facade free functions (noise_gate/hard_limiter/normalize), abaco db
+# conversions, soft_knee_gain, plus biquad/clock/compressor/limiter/delay/eq
+# integration checks (the Wave-C integration tests re-enabled now those modules
+# are ported).
 
 include "src/error.cyr"
 include "src/simd.cyr"
@@ -12,11 +12,26 @@ include "lib/abaco.cyr"
 include "src/clock.cyr"
 include "src/biquad.cyr"
 include "src/dsp.cyr"
+include "src/compressor.cyr"
+include "src/limiter.cyr"
+include "src/delay.cyr"
+include "src/eq.cyr"
 
 alloc_init();
 
 fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
 fn fill(n, v) { var out = vec_new(); var i = 0; while (i < n) { vec_push(out, v); i = i + 1; } return out; }
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s); var i = 0;
+    while (i < n) { if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+fn vecs_equal(a, b, n) {
+    var i = 0;
+    while (i < n) { if (vec_get(a, i) != vec_get(b, i)) { return 0; } i = i + 1; }
+    return 1;
+}
 
 # ---- noise_gate_silences_below_threshold ----
 test_group("noise_gate_silences_below_threshold");
@@ -98,6 +113,63 @@ test_group("clock_set_tempo");
 var ck2 = dhvani_clock_with_tempo(44100, 120.0);
 dhvani_clock_set_tempo(ck2, 140.0);
 assert(near(dhvani_clock_tempo_bpm(ck2), 140.0, 0.0000001), "tempo updated to 140");
+
+# ---- compressor_bypass (integration) ----
+test_group("compressor_bypass");
+var cbp = dhvani_comp_new(dhvani_compparams_new(f64_neg(40.0), 10.0, 10.0, 100.0, 0, 0, 1.0), 44100);
+dhvani_comp_set_bypass(cbp, 1);
+var cbv = fill(64, 1.0);
+var cbo = fill(64, 1.0);
+var cbb = dhvani_buffer_from_interleaved(cbv, 1, 44100);
+dhvani_comp_process(cbp, cbb);
+assert_eq(vecs_equal(dhvani_buffer_samples(cbb), cbo, 64), 1, "bypassed compressor unchanged");
+
+# ---- compressor_set_sample_rate (integration) ----
+test_group("compressor_set_sample_rate");
+var csr = dhvani_comp_new(dhvani_compparams_default(), 44100);
+dhvani_comp_set_sample_rate(csr, 48000);
+var csb = dhvani_buffer_from_interleaved(fill(64, 0.5), 1, 48000);
+dhvani_comp_process(csr, csb);
+assert_eq(all_finite(csb), 1, "compressor finite after rate change");
+
+# ---- limiter_bypass (integration) ----
+test_group("limiter_bypass");
+var lbp = dhvani_lim_new(dhvani_limparams_new(f64_neg(20.0), 50.0, 0, 1.0), 44100);
+dhvani_lim_set_bypass(lbp, 1);
+var lbv = fill(64, 1.0);
+var lbo = fill(64, 1.0);
+var lbb = dhvani_buffer_from_interleaved(lbv, 1, 44100);
+dhvani_lim_process(lbp, lbb);
+assert_eq(vecs_equal(dhvani_buffer_samples(lbb), lbo, 64), 1, "bypassed limiter unchanged");
+
+# ---- delay_latency_frames (integration) ----
+test_group("delay_latency_frames");
+var dl = dhvani_delay_new(10.0, 10.0, 0, 1.0, 44100, 1);
+assert_eq(dhvani_delay_latency_frames(dl), 441, "10ms @44100 = 441 samples");
+
+# ---- modulated_delay_latency_frames (integration) ----
+test_group("modulated_delay_latency_frames");
+var mdl = dhvani_moddelay_new(dhvani_moddelayparams_default(), 44100, 1);
+assert(dhvani_moddelay_latency_frames(mdl) > 0, "modulated delay latency > 0");
+
+# ---- modulated_delay_set_params (integration) ----
+test_group("modulated_delay_set_params");
+var mds = dhvani_moddelay_new(dhvani_moddelayparams_default(), 44100, 1);
+dhvani_moddelay_set_params(mds, dhvani_moddelayparams_new(1.0, 0.5, 2.0, 0.5, 0.8));
+var mdb = dhvani_buffer_from_interleaved(fill(256, 0.5), 1, 44100);
+dhvani_moddelay_process(mds, mdb);
+assert_eq(all_finite(mdb), 1, "modulated delay finite after set_params");
+
+# ---- parametric_eq_set_params (integration) ----
+test_group("parametric_eq_set_params");
+var pe = dhvani_eq_new(vec_new(), 44100, 1);
+assert_eq(dhvani_eq_band_count(pe), 0, "starts with 0 bands");
+var pebands = vec_new();
+vec_push(pebands, dhvani_eq_band_config_new(DH_BAND_PEAKING, 1000.0, 6.0, 1.0, 1));
+vec_push(pebands, dhvani_eq_band_config_new(DH_BAND_HIGHSHELF, 8000.0, f64_neg(3.0), 0.707, 1));
+dhvani_eq_set_params(pe, pebands);
+assert_eq(dhvani_eq_band_count(pe), 2, "2 bands after set_params");
+assert_eq(dhvani_eq_band_config_band_type(dhvani_eq_band(pe, 0)), DH_BAND_PEAKING, "band 0 is peaking");
 
 var rc = assert_summary();
 syscall(60, rc);
