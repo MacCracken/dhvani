@@ -78,5 +78,51 @@ while (k < 8) {
 }
 assert_eq(pok, 1, "ring bytes == one-shot to_s16le bytes");
 
+# ---- multi-format PCM: full-scale packs to the right LE bytes per depth ----
+# 1.0 -> i16 0x7FFF, i24 0x7FFFFF, i32 0x7FFFFFFF (little-endian).
+test_group("pcm_formats");
+var mv = vec_new();
+vec_push(mv, 1.0);
+var mb = dhvani_buffer_from_interleaved(mv, 1, 44100);
+var p16 = dhvani_playback_to_pcm(mb, 16);
+assert_eq(load8(p16 + 0), 0xFF, "i16 b0");
+assert_eq(load8(p16 + 1), 0x7F, "i16 b1");
+var p24 = dhvani_playback_to_pcm(mb, 24);
+assert_eq(load8(p24 + 0), 0xFF, "i24 b0");
+assert_eq(load8(p24 + 1), 0xFF, "i24 b1");
+assert_eq(load8(p24 + 2), 0x7F, "i24 b2");
+var p32 = dhvani_playback_to_pcm(mb, 32);
+assert_eq(load8(p32 + 0), 0xFF, "i32 b0");
+assert_eq(load8(p32 + 3), 0x7F, "i32 b3 (msb)");
+
+# ---- round-trip i16/i24/i32 on a sine within quantization ----
+test_group("pcm_roundtrip_depths");
+var sv = vec_new();
+var si = 0;
+while (si < 32) {
+    vec_push(sv, f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, f64_from(440)), f64_from(si)), f64_from(44100))));
+    si = si + 1;
+}
+var sbuf = dhvani_buffer_from_interleaved(sv, 1, 44100);
+var os2 = dhvani_buffer_samples(sbuf);
+var depths = vec_new();
+vec_push(depths, 16);
+vec_push(depths, 24);
+vec_push(depths, 32);
+var dok = 1;
+var di = 0;
+while (di < 3) {
+    var depth = vec_get(depths, di);
+    var back = dhvani_capture_from_pcm(dhvani_playback_to_pcm(sbuf, depth), 32, 1, 44100, depth);
+    var bs2 = dhvani_buffer_samples(back);
+    var m = 0;
+    while (m < 32) {
+        if (f64_ge(f64_abs(f64_sub(vec_get(bs2, m), vec_get(os2, m))), 0.0001) == 1) { dok = 0; }
+        m = m + 1;
+    }
+    di = di + 1;
+}
+assert_eq(dok, 1, "i16/i24/i32 round-trip within 1e-4");
+
 var rc = assert_summary();
 syscall(60, rc);

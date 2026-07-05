@@ -17,8 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RT hot path); the RT loop pushes producer blocks and drains to the device via
   `vani_play_from_ring`. Unit-tested hardware-free (push → ring read-back matches
   the one-shot `to_s16le` bytes).
-- Factored S16_LE packing into an alloc-free `dh_pack_s16le(samples, n, dst)`
-  helper shared by the one-shot (`dhvani_playback_to_s16le`) and RT paths.
+- **Multi-format PCM (S16 / S24 / S32 little-endian)** — generic alloc-free
+  `dh_pack_le` / `dh_unpack_le` (+ `dh_pcm_bytes`/`dh_pcm_scale`) power new
+  format-aware `dhvani_playback_to_pcm` / `dhvani_capture_from_pcm` and `_fmt`
+  variants of the device open, capture read, and ring player
+  (`dhvani_player_new_fmt`). The 2.1.0 S16 fns stay as thin wrappers (unchanged
+  API). Byte-packing + round-trip unit-tested at all three depths.
 
 ## [2.1.0] — vani device I/O
 

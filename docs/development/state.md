@@ -56,9 +56,9 @@ blocked deps/platform): Waves A–F + Wave G assembly (dist bundle, integration/
 dsp-reference/proptest suites, hot-path benches + Rust-vs-Cyrius comparison).
 
 **2.1.x (in progress):** device I/O via vani. `playback` bridges `AudioBuffer` ↔
-S16_LE PCM + device glue (open/write/close/capture) + the 2.1.1 alloc-free ring
-player (`dhvani_player_*`); bundled into the dist (DCE-prunes for vani-free
-consumers). **1639 assertions across 62 suites** (+ 1 scaffold smoke).
+little-endian PCM (**S16/S24/S32**) + device glue (open/write/close/capture) + the
+2.1.1 alloc-free ring player (`dhvani_player_*`); bundled into the dist (DCE-prunes
+for vani-free consumers). **1647 assertions across 62 suites** (+ 1 scaffold smoke).
 
 **abaco 2.3.2** (dep bump): the numerical dsp-reference port caught abaco's dB
 constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.04%/dB
