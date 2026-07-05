@@ -50,10 +50,17 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**54 / 64 modules ported** — **Waves A+B+C+D+E+F COMPLETE**; **Wave G assembly in
-flight**: Wave-D-deferred tests re-enabled + **`dist/dhvani.cyr` bundle built &
-validated**; integration/proptest suites remain. **1211 parity assertions** across
-57 suites (+ 1 scaffold smoke). Deferred: 9 (blocked deps + platform).
+**54 / 64 modules ported** — **Waves A–F COMPLETE**; **Wave G assembly nearly done**:
+deferred tests re-enabled, `dist/dhvani.cyr` bundle built & validated, and the
+integration + dsp-reference + proptest suites ported (67 tests / 414 assertions
+against the assembled bundle). **1625 parity assertions across 61 suites** (+ 1
+scaffold smoke). Remaining Wave G: hot-path benches + release polish, then tag 2.0.0.
+Deferred: 9 (blocked deps + platform).
+
+**abaco 2.3.2** (dep bump): the numerical dsp-reference port caught abaco's dB
+constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.04%/dB
+error across 8 dhvani DSP modules. Fixed upstream (abaco 2.3.2), re-vendored;
+`dsp_reference` now tests the real shipped dB path.
 
 **Bundle:** `[lib].modules` = all 54 modules in L0→L4 order; `cyrius distlib` →
 `dist/dhvani.cyr` (9.4k lines / 340 KB). It **externalizes abaco + the 10 siblings**
@@ -93,10 +100,11 @@ the serde_tests suite and the blocked/platform modules).
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). **Wave G — assembly** (remaining): the integration
-parity suite (`tests/mod` → ~47) + proptest suite (`tests/proptest` → ~20). Done:
-✅ deferred analysis-gated tests, ✅ `dist/dhvani.cyr` bundle + validation. Then tag
-2.0.0. `voice_synth/bhava_bridge` + `g2p` stay dep-blocked (bhava/shabda); `ffi`,
+See [`roadmap.md`](roadmap.md). **Wave G — assembly** (remaining): hot-path `.bcyr`
+benches + release polish (CHANGELOG, confirm `VERSION` = 2.0.0), then tag 2.0.0.
+Done: ✅ deferred analysis-gated tests, ✅ `dist/dhvani.cyr` bundle + validation,
+✅ integration/dsp-reference/proptest suites, ✅ abaco 2.3.2 dB-constant fix.
+`voice_synth/bhava_bridge` + `g2p` stay dep-blocked (bhava/shabda); `ffi`,
 `simd/{x86,aarch64}`, `capture/pw` stay platform-blocked.
 Then **Wave G** — lib facade + `dist/dhvani.cyr` bundle + integration tests, and
 re-enable the deferred `ops::normalize_to_lufs` + `resample` sine tests (now

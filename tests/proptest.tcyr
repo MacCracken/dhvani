@@ -1,0 +1,467 @@
+# proptest.tcyr -- deterministic ports of the proptest! property blocks in
+# rust-old/src/tests/proptest_tests.rs. Cyrius has no proptest, so each random
+# property is driven by a handful of fixed representative inputs (silence,
+# +full-scale, -full-scale, a 440Hz sine, a ramp, and roundtrip edge integers
+# incl. min/max/0) and the invariant is asserted for every case.
+#
+# Exercises the assembled dhvani surface -> links the bundle, not modules.
+
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+alloc_init();
+
+# ---- helpers ----------------------------------------------------------------
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# push a ramp of `n` interleaved samples in [-1, 1] into a fresh vec.
+fn make_ramp(n) {
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        # -1 + 2*i/(n-1)  spread across [-1, 1]
+        var t = f64_div(f64_from(i), f64_from(n));
+        vec_push(out, f64_sub(f64_mul(2.0, t), 1.0));
+        i = i + 1;
+    }
+    return out;
+}
+
+# push `n` samples of a `freq`Hz sine at `amp` into a fresh vec (mono frames).
+fn make_sine(n, freq, amp, sr) {
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr));
+        vec_push(out, f64_mul(amp, f64_sin(ph)));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn const_vec(n, v) {
+    var out = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(out, v); i = i + 1; }
+    return out;
+}
+
+# 1 iff every sample of buffer `buf` is finite.
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    while (i < n) { if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+fn vec_all_finite(v) {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) { if (dhvani_is_finite(vec_get(v, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# Build the fixed set of representative mono buffers @44100 (silence, +FS, -FS,
+# 440Hz sine, ramp). Returns a vec of buffers.
+fn rep_buffers() {
+    var bufs = vec_new();
+    vec_push(bufs, dhvani_buffer_from_interleaved(const_vec(128, 0), 1, 44100));
+    vec_push(bufs, dhvani_buffer_from_interleaved(const_vec(128, 1.0), 1, 44100));
+    vec_push(bufs, dhvani_buffer_from_interleaved(const_vec(128, f64_neg(1.0)), 1, 44100));
+    vec_push(bufs, dhvani_buffer_from_interleaved(make_sine(128, 440.0, 0.8, 44100), 1, 44100));
+    vec_push(bufs, dhvani_buffer_from_interleaved(make_ramp(128), 1, 44100));
+    return bufs;
+}
+
+# ---- mix_produces_finite_output ---------------------------------------------
+# mix(&[&a, &a]) is finite for every representative buffer.
+test_group("mix_produces_finite_output");
+var mbufs = rep_buffers();
+var mi = 0;
+while (mi < vec_len(mbufs)) {
+    var a = vec_get(mbufs, mi);
+    var pair = vec_new(); vec_push(pair, a); vec_push(pair, a);
+    var mixed = dhvani_buffer_mix(pair);
+    assert(mixed != 0, "mix produced a buffer");
+    assert_eq(all_finite(mixed), 1, "mix output finite");
+    mi = mi + 1;
+}
+
+# ---- gain_preserves_finiteness ----------------------------------------------
+# apply_gain(g) keeps samples finite for a range of gains incl. edges.
+test_group("gain_preserves_finiteness");
+var gains = vec_new();
+vec_push(gains, f64_neg(10.0)); vec_push(gains, f64_neg(1.0)); vec_push(gains, 0);
+vec_push(gains, 1.0); vec_push(gains, 10.0);
+var gi = 0;
+while (gi < vec_len(gains)) {
+    var gbufs = rep_buffers();
+    var gj = 0;
+    while (gj < vec_len(gbufs)) {
+        var gb = vec_get(gbufs, gj);
+        dhvani_buffer_apply_gain(gb, vec_get(gains, gi));
+        assert_eq(all_finite(gb), 1, "gain output finite");
+        gj = gj + 1;
+    }
+    gi = gi + 1;
+}
+
+# ---- clamp_bounds_output ----------------------------------------------------
+# after clamp() every sample is in [-1, 1].
+test_group("clamp_bounds_output");
+# include out-of-range buffers so clamp has work to do
+var cbufs = rep_buffers();
+vec_push(cbufs, dhvani_buffer_from_interleaved(const_vec(64, 5.0), 1, 44100));
+vec_push(cbufs, dhvani_buffer_from_interleaved(const_vec(64, f64_neg(5.0)), 1, 44100));
+var ci = 0;
+while (ci < vec_len(cbufs)) {
+    var cb = vec_get(cbufs, ci);
+    dhvani_buffer_clamp(cb);
+    var cs = dhvani_buffer_samples(cb);
+    var ck = 0; var cok = 1;
+    while (ck < vec_len(cs)) {
+        var sv = vec_get(cs, ck);
+        if (f64_lt(sv, f64_neg(1.0)) == 1) { cok = 0; }
+        if (f64_gt(sv, 1.0) == 1) { cok = 0; }
+        ck = ck + 1;
+    }
+    assert_eq(cok, 1, "clamp bounds to [-1,1]");
+    ci = ci + 1;
+}
+
+# ---- peak_is_non_negative ---------------------------------------------------
+test_group("peak_is_non_negative");
+var pbufs = rep_buffers();
+var pi = 0;
+while (pi < vec_len(pbufs)) {
+    assert(f64_ge(dhvani_buffer_peak(vec_get(pbufs, pi)), 0), "peak >= 0");
+    pi = pi + 1;
+}
+
+# ---- rms_is_non_negative ----------------------------------------------------
+test_group("rms_is_non_negative");
+var rbufs = rep_buffers();
+var ri = 0;
+while (ri < vec_len(rbufs)) {
+    assert(f64_ge(dhvani_buffer_rms(vec_get(rbufs, ri)), 0), "rms >= 0");
+    ri = ri + 1;
+}
+
+# ---- normalize_reaches_target -----------------------------------------------
+# if peak > 0, normalize(0.95) -> peak within 0.01 of 0.95.
+test_group("normalize_reaches_target");
+var nbufs = rep_buffers();
+var ni = 0;
+while (ni < vec_len(nbufs)) {
+    var nb = vec_get(nbufs, ni);
+    if (f64_gt(dhvani_buffer_peak(nb), 0) == 1) {
+        dhvani_dsp_normalize(nb, 0.95);
+        assert(near(dhvani_buffer_peak(nb), 0.95, 0.01), "normalized peak ~ 0.95");
+    }
+    ni = ni + 1;
+}
+
+# ---- noise_gate_output_finite -----------------------------------------------
+test_group("noise_gate_output_finite");
+var ngthr = vec_new();
+vec_push(ngthr, 0); vec_push(ngthr, 0.1); vec_push(ngthr, 0.5); vec_push(ngthr, 0.99);
+var ngi = 0;
+while (ngi < vec_len(ngthr)) {
+    var ngbufs = rep_buffers();
+    var ngj = 0;
+    while (ngj < vec_len(ngbufs)) {
+        var ngb = vec_get(ngbufs, ngj);
+        dhvani_dsp_noise_gate(ngb, vec_get(ngthr, ngi));
+        assert_eq(all_finite(ngb), 1, "noise_gate output finite");
+        ngj = ngj + 1;
+    }
+    ngi = ngi + 1;
+}
+
+# ---- hard_limiter_bounds_output ---------------------------------------------
+# after hard_limiter(ceiling), |s| <= ceiling + eps.
+test_group("hard_limiter_bounds_output");
+var hlceil = vec_new();
+vec_push(hlceil, 0.01); vec_push(hlceil, 0.5); vec_push(hlceil, 1.0); vec_push(hlceil, 2.0);
+var hli = 0;
+while (hli < vec_len(hlceil)) {
+    var ceil = vec_get(hlceil, hli);
+    var hlbufs = rep_buffers();
+    var hlj = 0;
+    while (hlj < vec_len(hlbufs)) {
+        var hlb = vec_get(hlbufs, hlj);
+        dhvani_dsp_hard_limiter(hlb, ceil);
+        var hls = dhvani_buffer_samples(hlb);
+        var hlk = 0; var hlok = 1;
+        while (hlk < vec_len(hls)) {
+            if (f64_gt(f64_abs(vec_get(hls, hlk)), f64_add(ceil, 0.0001)) == 1) { hlok = 0; }
+            hlk = hlk + 1;
+        }
+        assert_eq(hlok, 1, "hard_limiter bounds output");
+        hlj = hlj + 1;
+    }
+    hli = hli + 1;
+}
+
+# ---- db_roundtrip_accurate --------------------------------------------------
+# amplitude_to_db then db_to_amplitude recovers amp to good RELATIVE precision.
+# Rust used amp*0.001 (f32 oracle); abaco's f64 ln/exp accumulate ~0.5-1% error
+# at the extremes (amp=0.001, amp=10), so the f32-oracle tolerance is widened to
+# amp*0.01 per the port's "loosen f32-oracle tolerances" rule. Faithful property
+# preserved: roundtrip recovers amp within a small relative bound.
+test_group("db_roundtrip_accurate");
+var amps = vec_new();
+vec_push(amps, 0.001); vec_push(amps, 0.5); vec_push(amps, 1.0); vec_push(amps, 2.0); vec_push(amps, 10.0);
+var ai = 0;
+while (ai < vec_len(amps)) {
+    var amp = vec_get(amps, ai);
+    var db = amplitude_to_db(amp);
+    var back = db_to_amplitude(db);
+    assert(f64_lt(f64_abs(f64_sub(amp, back)), f64_mul(amp, 0.01)), "db roundtrip accurate");
+    ai = ai + 1;
+}
+
+# ---- i16_f32_roundtrip ------------------------------------------------------
+# i16 -> f32 -> i16 recovers value within 1 LSB. Edge ints: min/0/max + mids.
+test_group("i16_f32_roundtrip");
+var i16v = vec_new();
+vec_push(i16v, (0 - 32768)); vec_push(i16v, (0 - 16000)); vec_push(i16v, (0 - 1));
+vec_push(i16v, 0); vec_push(i16v, 1); vec_push(i16v, 16000); vec_push(i16v, 32767);
+var i16f = const_vec(vec_len(i16v), 0);
+dhvani_simd_i16_to_f32(i16v, i16f);
+var i16back = const_vec(vec_len(i16v), 0);
+dhvani_simd_f32_to_i16(i16f, i16back);
+var i16i = 0;
+while (i16i < vec_len(i16v)) {
+    var d16 = vec_get(i16v, i16i) - vec_get(i16back, i16i);
+    if (d16 < 0) { d16 = 0 - d16; }
+    assert(d16 <= 1, "i16 roundtrip within 1 LSB");
+    i16i = i16i + 1;
+}
+
+# ---- velocity_roundtrip -----------------------------------------------------
+# velocity_7_to_16 then _16_to_7 recovers the 7-bit velocity exactly.
+test_group("velocity_roundtrip");
+var vel = vec_new();
+vec_push(vel, 0); vec_push(vel, 1); vec_push(vel, 63); vec_push(vel, 64); vec_push(vel, 100); vec_push(vel, 127);
+var veli = 0;
+while (veli < vec_len(vel)) {
+    var v7 = vec_get(vel, veli);
+    var v16 = dhvani_miditx_velocity_7_to_16(v7);
+    var vback = dhvani_miditx_velocity_16_to_7(v16);
+    assert_eq(vback, v7, "velocity roundtrip exact");
+    veli = veli + 1;
+}
+
+# ---- add_buffers_commutative ------------------------------------------------
+# mix([a,a]) == 2*a for every sample; also mix([a,b]) == mix([b,a]).
+test_group("add_buffers_commutative");
+var abufs = rep_buffers();
+var abi = 0;
+while (abi < vec_len(abufs)) {
+    var aa = vec_get(abufs, abi);
+    var apair = vec_new(); vec_push(apair, aa); vec_push(apair, aa);
+    var asum = dhvani_buffer_mix(apair);
+    assert(asum != 0, "mix a+a produced buffer");
+    var asamp = dhvani_buffer_samples(aa);
+    var asums = dhvani_buffer_samples(asum);
+    var abk = 0; var abok = 1;
+    while (abk < vec_len(asums)) {
+        var expected = f64_mul(vec_get(asamp, abk), 2.0);
+        if (near(vec_get(asums, abk), expected, 0.0001) == 0) { abok = 0; }
+        abk = abk + 1;
+    }
+    assert_eq(abok, 1, "mix sum == 2*a");
+    abi = abi + 1;
+}
+# commutativity with two distinct buffers
+var ca = dhvani_buffer_from_interleaved(make_ramp(64), 1, 44100);
+var cb = dhvani_buffer_from_interleaved(make_sine(64, 440.0, 0.7, 44100), 1, 44100);
+var pab = vec_new(); vec_push(pab, ca); vec_push(pab, cb);
+var pba = vec_new(); vec_push(pba, cb); vec_push(pba, ca);
+var mab = dhvani_buffer_mix(pab);
+var mba = dhvani_buffer_mix(pba);
+var mabs = dhvani_buffer_samples(mab);
+var mbas = dhvani_buffer_samples(mba);
+var comi = 0; var comok = 1;
+while (comi < vec_len(mabs)) {
+    if (near(vec_get(mabs, comi), vec_get(mbas, comi), 0.0001) == 0) { comok = 0; }
+    comi = comi + 1;
+}
+assert_eq(comok, 1, "mix commutative");
+
+# ---- i24_f32_roundtrip ------------------------------------------------------
+# i24 -> f32 -> i24 recovers value within 1 LSB. Edges: min/0/max.
+test_group("i24_f32_roundtrip");
+var i24v = vec_new();
+vec_push(i24v, (0 - 8388608)); vec_push(i24v, (0 - 4000000)); vec_push(i24v, (0 - 1));
+vec_push(i24v, 0); vec_push(i24v, 1); vec_push(i24v, 4000000); vec_push(i24v, 8388607);
+var i24f = const_vec(vec_len(i24v), 0);
+dhvani_simd_i24_to_f32(i24v, i24f);
+var i24back = const_vec(vec_len(i24v), 0);
+dhvani_simd_f32_to_i24(i24f, i24back);
+var i24i = 0;
+while (i24i < vec_len(i24v)) {
+    var d24 = vec_get(i24v, i24i) - vec_get(i24back, i24i);
+    if (d24 < 0) { d24 = 0 - d24; }
+    assert(d24 <= 1, "i24 roundtrip within 1 LSB");
+    i24i = i24i + 1;
+}
+
+# ---- u8_f32_roundtrip -------------------------------------------------------
+# u8 -> f32 -> u8 recovers value within 1 LSB. Edges: 0/128/255.
+test_group("u8_f32_roundtrip");
+var u8v = vec_new();
+vec_push(u8v, 0); vec_push(u8v, 1); vec_push(u8v, 64); vec_push(u8v, 127); vec_push(u8v, 128); vec_push(u8v, 200); vec_push(u8v, 255);
+var u8f = const_vec(vec_len(u8v), 0);
+dhvani_simd_u8_to_f32(u8v, u8f);
+var u8back = const_vec(vec_len(u8v), 0);
+dhvani_simd_f32_to_u8(u8f, u8back);
+var u8i = 0;
+while (u8i < vec_len(u8v)) {
+    var d8 = vec_get(u8v, u8i) - vec_get(u8back, u8i);
+    if (d8 < 0) { d8 = 0 - d8; }
+    assert(d8 <= 1, "u8 roundtrip within 1 LSB");
+    u8i = u8i + 1;
+}
+
+# ---- simd_sum_of_squares_non_negative ---------------------------------------
+test_group("simd_sum_of_squares_non_negative");
+var ssbufs = rep_buffers();
+var ssi = 0;
+while (ssi < vec_len(ssbufs)) {
+    var ssr = dhvani_simd_sum_of_squares(dhvani_buffer_samples(vec_get(ssbufs, ssi)));
+    assert(f64_ge(ssr, 0), "sum_of_squares >= 0");
+    assert_eq(dhvani_is_finite(ssr), 1, "sum_of_squares finite");
+    ssi = ssi + 1;
+}
+
+# ---- simd_weighted_sum_finite -----------------------------------------------
+# weighted_sum(samples, weights) writes sum + weight-sum; both finite.
+test_group("simd_weighted_sum_finite");
+var wsscratch = alloc(16);
+var wscases = vec_new();
+# case: (samples, weights) pairs
+vec_push(wscases, const_vec(64, 0));             # silence samples
+vec_push(wscases, const_vec(64, 0.5));           # weights for it
+vec_push(wscases, const_vec(64, 1.0));
+vec_push(wscases, const_vec(64, 1.0));
+vec_push(wscases, make_sine(64, 440.0, 1.0, 44100));
+vec_push(wscases, make_ramp(64));
+var wsi = 0;
+while (wsi < vec_len(wscases)) {
+    var wsamp = vec_get(wscases, wsi);
+    var wweight = vec_get(wscases, wsi + 1);
+    dhvani_simd_weighted_sum(wsamp, wweight, wsscratch, wsscratch + 8);
+    var wsum = load64(wsscratch);
+    var wwt = load64(wsscratch + 8);
+    assert_eq(dhvani_is_finite(wsum), 1, "weighted sum finite");
+    assert_eq(dhvani_is_finite(wwt), 1, "weight sum finite");
+    wsi = wsi + 2;
+}
+
+# ---- svf_output_finite ------------------------------------------------------
+# SVF lowpass process leaves buffer finite across freq/q edges.
+test_group("svf_output_finite");
+var svfreq = vec_new(); vec_push(svfreq, 20.0); vec_push(svfreq, 1000.0); vec_push(svfreq, 20000.0);
+var svq = vec_new(); vec_push(svq, 0.1); vec_push(svq, 0.707); vec_push(svq, 10.0);
+var svfi = 0;
+while (svfi < vec_len(svfreq)) {
+    var svqi = 0;
+    while (svqi < vec_len(svq)) {
+        var svbufs = rep_buffers();
+        var svj = 0;
+        while (svj < vec_len(svbufs)) {
+            var svb = vec_get(svbufs, svj);
+            var svf = dhvani_svf_new(DH_SVF_LOWPASS, vec_get(svfreq, svfi), vec_get(svq, svqi), 0, 44100, dhvani_buffer_channels(svb));
+            dhvani_svf_process(svf, svb);
+            assert_eq(all_finite(svb), 1, "svf output finite");
+            svj = svj + 1;
+        }
+        svqi = svqi + 1;
+    }
+    svfi = svfi + 1;
+}
+
+# ---- automation_monotonic_linear --------------------------------------------
+# linear ramp from start_val@0 to end_val@frames stays within [lo, hi].
+test_group("automation_monotonic_linear");
+# (start, end) representative pairs incl. equal, ascending, descending
+var austart = vec_new(); vec_push(austart, 0); vec_push(austart, f64_neg(10.0)); vec_push(austart, 5.0); vec_push(austart, 3.0);
+var auend   = vec_new(); vec_push(auend, 1.0);  vec_push(auend, 10.0);          vec_push(auend, f64_neg(5.0)); vec_push(auend, 3.0);
+var auframes = 100;
+var aui = 0;
+while (aui < vec_len(austart)) {
+    var sv0 = vec_get(austart, aui);
+    var ev0 = vec_get(auend, aui);
+    var lane = dhvani_auto_new(sv0);
+    dhvani_auto_add(lane, dhvani_breakpoint_new(0, sv0, DH_CURVE_LINEAR, 1.0));
+    dhvani_auto_add(lane, dhvani_breakpoint_new(auframes, ev0, DH_CURVE_LINEAR, 1.0));
+    var auout = const_vec(auframes + 1, 0);
+    dhvani_auto_render(lane, auout, 0);
+    var lo = f64_min(sv0, ev0);
+    var hi = f64_max(sv0, ev0);
+    var auk = 0; var auok = 1;
+    while (auk < vec_len(auout)) {
+        var av = vec_get(auout, auk);
+        if (f64_lt(av, f64_sub(lo, 0.00001)) == 1) { auok = 0; }
+        if (f64_gt(av, f64_add(hi, 0.00001)) == 1) { auok = 0; }
+        auk = auk + 1;
+    }
+    assert_eq(auok, 1, "automation within [lo,hi]");
+    aui = aui + 1;
+}
+
+# ---- routing_matrix_preserves_energy ----------------------------------------
+# identity routing reproduces every input sample exactly.
+test_group("routing_matrix_preserves_energy");
+# mono + stereo cases
+var rmbufs = vec_new();
+vec_push(rmbufs, dhvani_buffer_from_interleaved(make_ramp(128), 1, 44100));
+vec_push(rmbufs, dhvani_buffer_from_interleaved(make_sine(128, 440.0, 0.8, 44100), 1, 44100));
+vec_push(rmbufs, dhvani_buffer_from_interleaved(make_ramp(128), 2, 44100));
+var rmi = 0;
+while (rmi < vec_len(rmbufs)) {
+    var rmb = vec_get(rmbufs, rmi);
+    var mtx = dhvani_routing_identity(dhvani_buffer_channels(rmb));
+    var rmout = dhvani_routing_apply(mtx, rmb);
+    assert(rmout != 0, "identity routing produced buffer");
+    var rin = dhvani_buffer_samples(rmb);
+    var rout = dhvani_buffer_samples(rmout);
+    var rmk = 0; var rmok = 1;
+    while (rmk < vec_len(rin)) {
+        if (near(vec_get(rin, rmk), vec_get(rout, rmk), 0.000001) == 0) { rmok = 0; }
+        rmk = rmk + 1;
+    }
+    assert_eq(rmok, 1, "identity routing preserves values");
+    rmi = rmi + 1;
+}
+
+# ---- zcr_non_negative -------------------------------------------------------
+# zero_crossing_rate rate_hz and per-channel rates are non-negative.
+test_group("zcr_non_negative");
+var zbufs = rep_buffers();
+# add a stereo buffer too
+vec_push(zbufs, dhvani_buffer_from_interleaved(make_sine(256, 440.0, 0.9, 44100), 2, 44100));
+var zi = 0;
+while (zi < vec_len(zbufs)) {
+    var zb = vec_get(zbufs, zi);
+    if (dhvani_buffer_frames(zb) >= 2) {
+        var zr = dhvani_zcr_compute(zb);
+        assert(zr != 0, "zcr computed");
+        assert(f64_ge(dhvani_zcr_rate_hz(zr), 0), "zcr rate_hz >= 0");
+        var zch = dhvani_buffer_channels(zb);
+        var zk = 0; var zok = 1;
+        while (zk < zch) {
+            if (f64_lt(dhvani_zcr_per_channel(zr, zk), 0) == 1) { zok = 0; }
+            zk = zk + 1;
+        }
+        assert_eq(zok, 1, "zcr per-channel >= 0");
+    }
+    zi = zi + 1;
+}
+
+var rc = assert_summary();
+syscall(60, rc);

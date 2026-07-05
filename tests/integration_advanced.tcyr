@@ -1,0 +1,248 @@
+# integration_advanced.tcyr -- whole-assembled-API integration tests, linking
+# the BUNDLE (dist/dhvani.cyr) rather than individual modules. Doubles as bundle
+# validation: any Wave F sibling refs in the bundle are unreachable here and DCE.
+#
+# Ported one-for-one from rust-old/src/tests/mod.rs:
+#   graph_cycle_detection, stress_graph_concurrent_swap,
+#   stress_long_buffer_dsp_chain, stress_analysis_long_buffer,
+#   true_peak_exceeds_sample_peak_cubic, ebu_r128_silence_is_minus_infinity,
+#   ebu_r128_sine_in_expected_range, ebu_r128_k_weighting_attenuates_lows
+#
+# f32 -> f64 throughout; negative literals via f64_neg; finiteness via
+# dhvani_is_finite. The concurrent-swap test has no threads in Cyrius, so it is
+# ported as a DETERMINISTIC interleaved swap+process loop (faithful to the
+# property: rapid plan swaps never yield NaN/Inf and the processor runs).
+
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+# ---- graph process fns (fn-ptr AudioNode impls) ----
+
+# PassthroughNode: copy first input into the output.
+fn passthrough_process(state, inputs, output) {
+    if (vec_len(inputs) > 0) {
+        var is = dhvani_buffer_samples(vec_get(inputs, 0));
+        var os = dhvani_buffer_samples(output);
+        var n = vec_len(os);
+        var i = 0;
+        while (i < n) { vec_set(os, i, vec_get(is, i)); i = i + 1; }
+    }
+    return 0;
+}
+
+# ValueNode: fill the whole output with state's f64 value.
+fn value_process(state, inputs, output) {
+    var v = load64(state);
+    var s = dhvani_buffer_samples(output);
+    var n = vec_len(s);
+    var i = 0;
+    while (i < n) { vec_set(s, i, v); i = i + 1; }
+    return 0;
+}
+
+# state helper: an f64-holding slot.
+fn mkf(v) { var s = alloc(8); store64(s, v); return s; }
+
+# all_finite(vec) -> 1 if every element finite, else 0.
+fn all_finite(v) {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(v, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+alloc_init();
+
+# ---- graph_cycle_detection ----
+# Two passthrough nodes a->b and b->a form a cycle; compile must fail (return 0).
+test_group("graph_cycle_detection");
+var cg = dhvani_graph_new();
+var c_a = dhvani_node_id_next();
+var c_b = dhvani_node_id_next();
+dhvani_graph_add_node(cg, c_a, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 0, "pass"));
+dhvani_graph_add_node(cg, c_b, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 0, "pass"));
+dhvani_graph_connect(cg, c_a, c_b);
+dhvani_graph_connect(cg, c_b, c_a);
+assert_eq(dhvani_graph_compile(cg), 0, "graph with cycle should fail to compile");
+
+# ---- stress_graph_concurrent_swap ----
+# Deterministic port (no threads): rapidly swap 100 single-ValueNode plans into
+# a live GraphProcessor, processing a block after every swap. Every output block
+# must be all-finite (the property the Rust thread race checked), and the
+# processor must have run.
+test_group("stress_graph_concurrent_swap");
+var sproc = dhvani_graph_proc_new(1, 44100, 256);
+var shandle = dhvani_graph_proc_swap_handle(sproc);
+var scycles = 0;
+var sok = 1;
+var si = 0;
+while (si < 100) {
+    var sg = dhvani_graph_new();
+    var sid = dhvani_node_id_next();
+    dhvani_graph_add_node(sg, sid, dhvani_graph_node_new(&value_process, mkf(f64_div(f64_from(si), 100.0)), 0, 1, 0, 0, 0, 0, "value"));
+    var splan = dhvani_graph_compile(sg);
+    assert(splan != 0, "plan compiles");
+    dhvani_swap_handle_swap(shandle, splan);
+    var sout = dhvani_graph_proc_process(sproc);
+    if (sout != 0) {
+        if (all_finite(dhvani_buffer_samples(sout)) == 0) { sok = 0; }
+    }
+    scycles = scycles + 1;
+    si = si + 1;
+}
+assert_eq(sok, 1, "all swapped-plan outputs finite");
+assert(scycles > 0, "processor should have run");
+
+# ---- stress_long_buffer_dsp_chain ----
+# 10s stereo (440Hz*0.8 + 880Hz*0.3) through HP80 -> comp -> delay -> limiter.
+# All finite and peak <= 1.01.
+test_group("stress_long_buffer_dsp_chain");
+var lsr = 44100;
+var lframes = lsr * 10;
+var lsamps = vec_new();
+var ln = lframes * 2;    # interleaved stereo
+var li = 0;
+while (li < ln) {
+    var lfr = li / 2;    # integer frame index (Rust i/2)
+    var lt = f64_div(f64_from(lfr), f64_from(lsr));
+    var lp440 = f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), lt);
+    var lp880 = f64_mul(f64_mul(f64_mul(2.0, F64_PI), 880.0), lt);
+    var lval = f64_add(f64_mul(f64_sin(lp440), 0.8), f64_mul(f64_sin(lp880), 0.3));
+    vec_push(lsamps, lval);
+    li = li + 1;
+}
+var lbuf = dhvani_buffer_from_interleaved(lsamps, 2, lsr);
+assert(lbuf != 0, "buffer built");
+
+var lhp = dhvani_biquad_new(DH_BQ_HIGHPASS, 0, 80.0, 0.707, f64_from(lsr), 2);
+dhvani_biquad_process(lhp, lbuf);
+
+var lcparams = dhvani_compparams_new(f64_neg(12.0), 4.0, 10.0, 100.0, 0, 0, 1.0);
+var lcomp = dhvani_comp_new(lcparams, lsr);
+assert(lcomp != 0, "compressor built");
+dhvani_comp_process(lcomp, lbuf);
+
+var ldelay = dhvani_delay_new(100.0, 500.0, 0.3, 0.2, lsr, 2);
+assert(ldelay != 0, "delay built");
+dhvani_delay_process(ldelay, lbuf);
+
+var llim = dhvani_lim_new(dhvani_limparams_default(), lsr);
+assert(llim != 0, "limiter built");
+dhvani_lim_process(llim, lbuf);
+
+assert_eq(all_finite(dhvani_buffer_samples(lbuf)), 1, "no NaN/Inf in output");
+assert(f64_le(dhvani_buffer_peak(lbuf), 1.01), "peak <= limiter ceiling");
+
+# ---- stress_analysis_long_buffer ----
+# 5s mono (440*0.5 + 1200*0.3 + 3500*0.1); run r128, dynamics, zcr, spectrum_fft.
+test_group("stress_analysis_long_buffer");
+var asr = 44100;
+var aframes = asr * 5;
+var asamps = vec_new();
+var ai = 0;
+while (ai < aframes) {
+    var at = f64_div(f64_from(ai), f64_from(asr));
+    var av = f64_add(f64_add(
+        f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), at)), 0.5),
+        f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 1200.0), at)), 0.3)),
+        f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 3500.0), at)), 0.1));
+    vec_push(asamps, av);
+    ai = ai + 1;
+}
+var abuf = dhvani_buffer_from_interleaved(asamps, 1, asr);
+
+var ar128 = dhvani_loudness_measure_r128(abuf);
+assert(ar128 != 0, "r128 measured");
+assert_eq(dhvani_is_finite(dhvani_r128_integrated_lufs(ar128)), 1, "integrated finite");
+assert(f64_ge(dhvani_r128_range_lu(ar128), 0.0), "range_lu >= 0");
+
+var adyn = dhvani_analyze_dynamics(abuf);
+assert(adyn != 0, "dynamics computed");
+assert(f64_gt(dhvani_dynamics_max_peak(adyn), 0.0), "max_peak > 0");
+assert(f64_ge(dhvani_dynamics_max_true_peak(adyn), dhvani_dynamics_max_peak(adyn)), "max_true_peak >= max_peak");
+
+var azcr = dhvani_zcr_compute(abuf);
+assert(azcr != 0, "zcr computed");
+assert(f64_gt(dhvani_zcr_rate_hz(azcr), 0.0), "zcr rate > 0");
+
+var aspec = dhvani_fft_spectrum(abuf, 4096);
+assert(aspec != 0, "spectrum computed");
+var apeak = dhvani_spectrum_dominant_frequency(aspec);
+assert(f64_gt(apeak, 400.0), "peak freq > 400");
+assert(f64_lt(apeak, 500.0), "peak freq < 500");
+
+# ---- true_peak_exceeds_sample_peak_cubic ----
+# Alternating +/- values produce inter-sample overshoot; true_peak[0] >= peak[0].
+test_group("true_peak_exceeds_sample_peak_cubic");
+var tsamps = vec_new();
+vec_push(tsamps, 0.0);
+vec_push(tsamps, 0.9);
+vec_push(tsamps, f64_neg(0.9));
+vec_push(tsamps, 0.9);
+vec_push(tsamps, f64_neg(0.9));
+vec_push(tsamps, 0.9);
+vec_push(tsamps, f64_neg(0.9));
+vec_push(tsamps, 0.0);
+var tbuf = dhvani_buffer_from_interleaved(tsamps, 1, 44100);
+var tdyn = dhvani_analyze_dynamics(tbuf);
+var ttp = vec_get(dhvani_dynamics_true_peak(tdyn), 0);
+var tpk = vec_get(dhvani_dynamics_peak(tdyn), 0);
+assert(f64_ge(ttp, tpk), "true_peak >= peak");
+
+# ---- ebu_r128_silence_is_minus_infinity ----
+# silence(2, 44100, 44100); integrated < -60 (or -inf).
+test_group("ebu_r128_silence_is_minus_infinity");
+var esil = dhvani_buffer_silence(2, 44100, 44100);
+var er128 = dhvani_loudness_measure_r128(esil);
+var einteg = dhvani_r128_integrated_lufs(er128);
+var esil_ok = 0;
+if (f64_lt(einteg, f64_neg(60.0)) == 1) { esil_ok = 1; }
+if (dhvani_is_finite(einteg) == 0) { esil_ok = 1; }
+assert_eq(esil_ok, 1, "silence LUFS < -60 or -inf");
+
+# ---- ebu_r128_sine_in_expected_range ----
+# 997Hz 0dBFS stereo sine, 5s @48000; -6 < LUFS < -1.
+test_group("ebu_r128_sine_in_expected_range");
+var xsr = 48000;
+var xframes = xsr * 5;
+var xsamps = vec_new();
+var xn = xframes * 2;
+var xi = 0;
+while (xi < xn) {
+    var xfr = xi / 2;
+    var xph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 997.0), f64_from(xfr)), f64_from(xsr));
+    vec_push(xsamps, f64_sin(xph));
+    xi = xi + 1;
+}
+var xbuf = dhvani_buffer_from_interleaved(xsamps, 2, xsr);
+var xr128 = dhvani_loudness_measure_r128(xbuf);
+var xinteg = dhvani_r128_integrated_lufs(xr128);
+assert(f64_gt(xinteg, f64_neg(6.0)), "997Hz sine LUFS > -6");
+assert(f64_lt(xinteg, f64_neg(1.0)), "997Hz sine LUFS < -1");
+
+# ---- ebu_r128_k_weighting_attenuates_lows ----
+# 50Hz vs 1000Hz mono sine (amp 0.5), 3s @48000; low LUFS < mid LUFS.
+test_group("ebu_r128_k_weighting_attenuates_lows");
+var ksr = 48000;
+var kframes = ksr * 3;
+var klow = vec_new();
+var kmid = vec_new();
+var ki = 0;
+while (ki < kframes) {
+    var klp = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 50.0), f64_from(ki)), f64_from(ksr));
+    var kmp = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 1000.0), f64_from(ki)), f64_from(ksr));
+    vec_push(klow, f64_mul(f64_sin(klp), 0.5));
+    vec_push(kmid, f64_mul(f64_sin(kmp), 0.5));
+    ki = ki + 1;
+}
+var klbuf = dhvani_buffer_from_interleaved(klow, 1, ksr);
+var kmbuf = dhvani_buffer_from_interleaved(kmid, 1, ksr);
+var klow_lufs = dhvani_r128_integrated_lufs(dhvani_loudness_measure_r128(klbuf));
+var kmid_lufs = dhvani_r128_integrated_lufs(dhvani_loudness_measure_r128(kmbuf));
+assert(f64_lt(klow_lufs, kmid_lufs), "K-weighting attenuates 50Hz below 1kHz");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -117,7 +117,7 @@ stdlib = [
 [deps.abaco]
 git = "https://github.com/MacCracken/abaco.git"
 path = "../abaco"
-tag = "2.3.1"
+tag = "2.3.2"
 modules = ["dist/abaco.cyr"]
 
 # ── Synthesis stack (Wave F) — sibling dist bundles are NOT wired as [deps]. ──

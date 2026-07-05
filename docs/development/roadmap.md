@@ -89,8 +89,12 @@
 - ✅ `lib` facade → `[lib] modules` L0→L4 order; `cyrius distlib` → `dist/dhvani.cyr`
   (externalizes abaco + siblings). Collision audit clear (naad 2.1.1 fixed
   amplitude_to_db). Validated by `tests/bundle{,_synth}.tcyr`.
-- ⬜ Port `tests/{mod,proptest}` (drop `serde_tests`); hot-path benches; pin deps
-  to git+tag; **bump/confirm `VERSION` = 2.0.0**.
+- ✅ Ported `tests/{mod,proptest}` (dropped `serde_tests`) against the assembled
+  bundle — 67 tests / 414 assertions (integration + dsp-reference + proptest).
+- ✅ abaco 2.3.2: numerical dsp-reference port caught & fixed abaco's dB constants
+  (wrong `ln(10)`); re-vendored, ripple-free.
+- ⬜ Hot-path `.bcyr` benches; CHANGELOG; confirm deps pinned git+tag &
+  `VERSION` = 2.0.0; then tag 2.0.0.
 
 ## Blocked from porting — deferred past 2.0.0
 

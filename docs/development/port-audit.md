@@ -348,7 +348,19 @@ independently reviewed (hex constants, dry/wet blend, reduction formula) — par
   ALL 10 siblings + dist in one unit overflows the compiler's 16384 LEXID cap — an
   unrealistic "every feature at once" case; per-feature linking is well under it
   (dissolves under scoped modules, see the migration horizon).
-- ⬜ Integration + proptest suites (`tests/mod` → 47, `tests/proptest` → 20).
+- ✅ Integration + dsp-reference + proptest suites (`tests/mod` + `proptest_tests`,
+  `serde_tests` dropped) — ported against the assembled `abaco + dist/dhvani.cyr`
+  (doubles as bundle validation), via a port→adversarial-verify workflow:
+  `integration`(21/41), `integration_advanced`(8/125, graph fn-ptr nodes + stress +
+  EBU R128), `dsp_reference`(18/20, numerical parity), `proptest`(20/228, property
+  tests → deterministic multi-input drivers). **67 tests / 414 assertions.**
+- ✅ **abaco 2.3.2 dep bump** — the `db_conversion_roundtrip_accuracy` port caught
+  abaco's `DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP` encoding `ln(10)=2.303597` (should be
+  2.302585): ~0.04%/dB drift inherited by 8 dhvani DSP modules (compressor, limiter,
+  dynamics, deesser, analysis, biquad, ops, loudness). Fixed upstream, re-vendored;
+  the dB tests now exercise abaco's real functions. Confirmed ripple-free (61 suites,
+  1625 assertions green).
+- ⬜ Hot-path `.bcyr` benches + release polish (CHANGELOG, VERSION), then tag 2.0.0.
 
 **Wave F (synthesis stack) — COMPLETE (54/64, 1200 assertions):**
 

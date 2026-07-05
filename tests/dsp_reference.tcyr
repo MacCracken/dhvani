@@ -1,0 +1,350 @@
+# dsp_reference.tcyr -- INTEGRATION numerical-accuracy parity tests.
+# Ported one-for-one from the `dsp_reference_tests` submodule of
+# rust-old/src/tests/mod.rs (RBJ biquad coeff math, limiter ceiling,
+# compressor ratio, constant-power pan, DC/Nyquist gains, dB roundtrip).
+# Links the assembled bundle (whole dhvani API), not individual modules.
+#
+# f32 -> f64 widening throughout. Reference values, target dBs, frequencies
+# and tolerances copied EXACTLY from the Rust; nothing loosened beyond the
+# f32->f64 widening. Rust std::f32::consts::FRAC_1_SQRT_2 = 0.7071067811865476.
+#
+# NOTE: the Cyrius lexer loses precision on decimal literals past ~9 significant
+# digits (a 16-digit literal parses to a wildly-wrong value), so FRAC_1_SQRT_2
+# is written to 9 sig figs (0.707106781, accurate to ~1e-9 -- orders of
+# magnitude tighter than every tolerance here: 0.01 dB / 0.05 dB / 1e-10).
+
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+alloc_init();
+
+# ---- constants (mirror the Rust `const`s) ----
+# DB_TOLERANCE = 0.01, SR = 48000, FRAMES = 96000, SKIP = 48000.
+var FRAC_1_SQRT_2 = 0.707106781;
+
+# ---- helper: measure_steady_state_db(buf, skip_frames) ----
+# RMS in dB over frames [skip_frames, frames), all channels. DH_NEG_INF sentinel
+# for silence (Rust f32::NEG_INFINITY).
+fn measure_steady_state_db(buf, skip_frames) {
+    var ch = dhvani_buffer_channels(buf);
+    var samples = dhvani_buffer_samples(buf);
+    var nframes = dhvani_buffer_frames(buf);
+    var total = nframes - skip_frames;
+    if (total == 0) { return DH_NEG_INF; }
+    var sum_sq = f64_from(0);
+    var frame = skip_frames;
+    while (frame < nframes) {
+        var c = 0;
+        while (c < ch) {
+            var s = vec_get(samples, frame * ch + c);
+            sum_sq = f64_add(sum_sq, f64_mul(s, s));
+            c = c + 1;
+        }
+        frame = frame + 1;
+    }
+    var rms = f64_sqrt(f64_div(sum_sq, f64_from(total * ch)));
+    if (f64_lt(rms, 0.000000000000001) == 1) { return DH_NEG_INF; }
+    return f64_mul(20.0, f64_div(f64_ln(rms), F64_LN10));
+}
+
+# ---- dB <-> amplitude ----
+# abaco's dsp bundle provides the oracle pair directly:
+#   db_to_amplitude(db)  = exp(db * ln10/20)  = 10^(db/20)
+#   amplitude_to_db(amp) = (20/ln10) * ln(amp) = 20*log10(amp)
+# Earlier the vendored port mis-encoded DB_SCALE/DB_EXP as f64 bit patterns
+# (product 0.99919, not ~1.0), so the round trip drifted ~0.081% of |db| and
+# blew the 0.01 dB tolerance for |db| >= 20; local F64_LN10 helpers routed
+# around it. Fixed upstream in abaco src/dsp.cyr and re-vendored into
+# lib/abaco.cyr, so these tests call the bare functions directly now.
+
+# ---- helper: make_sine_mono(freq_hz, amplitude, sr, frames) ----
+fn make_sine_mono(freq_hz, amplitude, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq_hz), f64_from(i)), f64_from(sr));
+        vec_push(v, f64_mul(amplitude, f64_sin(ph)));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+
+# ================================================================
+# biquad_lp_at_cutoff_minus_3db
+# LPF Butterworth at cutoff (1kHz) -> -3.01 dB, tol 0.05.
+# ================================================================
+test_group("biquad_lp_at_cutoff_minus_3db");
+var filt_a = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, FRAC_1_SQRT_2, 48000, 1);
+var buf_a = make_sine_mono(1000.0, 1.0, 48000, 96000);
+var in_a = measure_steady_state_db(buf_a, 48000);
+dhvani_biquad_process(filt_a, buf_a);
+var out_a = measure_steady_state_db(buf_a, 48000);
+var att_a = f64_sub(out_a, in_a);
+assert(f64_lt(f64_abs(f64_sub(att_a, f64_neg(3.01))), 0.05), "LP at cutoff -3.01 dB");
+
+# ================================================================
+# biquad_lp_passband_unity
+# LPF passband (100Hz, cutoff 5kHz) -> 0 dB, tol 0.01.
+# ================================================================
+test_group("biquad_lp_passband_unity");
+var filt_b = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 5000.0, FRAC_1_SQRT_2, 48000, 1);
+var buf_b = make_sine_mono(100.0, 0.5, 48000, 96000);
+var in_b = measure_steady_state_db(buf_b, 48000);
+dhvani_biquad_process(filt_b, buf_b);
+var out_b = measure_steady_state_db(buf_b, 48000);
+assert(f64_lt(f64_abs(f64_sub(out_b, in_b)), 0.01), "LP passband unity");
+
+# ================================================================
+# biquad_hp_passband_unity
+# HPF passband (5kHz, cutoff 100Hz) -> 0 dB, tol 0.01.
+# ================================================================
+test_group("biquad_hp_passband_unity");
+var filt_c = dhvani_biquad_new(DH_BQ_HIGHPASS, 0, 100.0, FRAC_1_SQRT_2, 48000, 1);
+var buf_c = make_sine_mono(5000.0, 0.5, 48000, 96000);
+var in_c = measure_steady_state_db(buf_c, 48000);
+dhvani_biquad_process(filt_c, buf_c);
+var out_c = measure_steady_state_db(buf_c, 48000);
+assert(f64_lt(f64_abs(f64_sub(out_c, in_c)), 0.01), "HP passband unity");
+
+# ================================================================
+# biquad_hp_at_cutoff_minus_3db
+# HPF Butterworth at cutoff (1kHz) -> -3.01 dB, tol 0.05.
+# ================================================================
+test_group("biquad_hp_at_cutoff_minus_3db");
+var filt_d = dhvani_biquad_new(DH_BQ_HIGHPASS, 0, 1000.0, FRAC_1_SQRT_2, 48000, 1);
+var buf_d = make_sine_mono(1000.0, 1.0, 48000, 96000);
+var in_d = measure_steady_state_db(buf_d, 48000);
+dhvani_biquad_process(filt_d, buf_d);
+var out_d = measure_steady_state_db(buf_d, 48000);
+var att_d = f64_sub(out_d, in_d);
+assert(f64_lt(f64_abs(f64_sub(att_d, f64_neg(3.01))), 0.05), "HP at cutoff -3.01 dB");
+
+# ================================================================
+# biquad_peaking_exact_boost
+# Peaking +6dB at center (1kHz, Q=1) -> +6 dB, tol 0.01.
+# ================================================================
+test_group("biquad_peaking_exact_boost");
+var filt_e = dhvani_biquad_new(DH_BQ_PEAKING, 6.0, 1000.0, 1.0, 48000, 1);
+var buf_e = make_sine_mono(1000.0, 0.25, 48000, 96000);
+var in_e = measure_steady_state_db(buf_e, 48000);
+dhvani_biquad_process(filt_e, buf_e);
+var out_e = measure_steady_state_db(buf_e, 48000);
+assert(f64_lt(f64_abs(f64_sub(f64_sub(out_e, in_e), 6.0)), 0.01), "Peaking +6dB exact");
+
+# ================================================================
+# biquad_peaking_exact_cut
+# Peaking -12dB at center (1kHz, Q=1) -> -12 dB, tol 0.01.
+# ================================================================
+test_group("biquad_peaking_exact_cut");
+var filt_f = dhvani_biquad_new(DH_BQ_PEAKING, f64_neg(12.0), 1000.0, 1.0, 48000, 1);
+var buf_f = make_sine_mono(1000.0, 0.5, 48000, 96000);
+var in_f = measure_steady_state_db(buf_f, 48000);
+dhvani_biquad_process(filt_f, buf_f);
+var out_f = measure_steady_state_db(buf_f, 48000);
+assert(f64_lt(f64_abs(f64_sub(f64_sub(out_f, in_f), f64_neg(12.0))), 0.01), "Peaking -12dB exact");
+
+# ================================================================
+# biquad_peaking_passthrough_off_freq
+# Peaking +12dB @ 10kHz Q=2, signal 100Hz -> 0 dB, tol 0.01.
+# ================================================================
+test_group("biquad_peaking_passthrough_off_freq");
+var filt_g = dhvani_biquad_new(DH_BQ_PEAKING, 12.0, 10000.0, 2.0, 48000, 1);
+var buf_g = make_sine_mono(100.0, 0.5, 48000, 96000);
+var in_g = measure_steady_state_db(buf_g, 48000);
+dhvani_biquad_process(filt_g, buf_g);
+var out_g = measure_steady_state_db(buf_g, 48000);
+assert(f64_lt(f64_abs(f64_sub(out_g, in_g)), 0.01), "Peaking off-freq passthrough");
+
+# ================================================================
+# biquad_low_shelf_exact_boost
+# LowShelf +6dB @ 1kHz, signal 50Hz -> +6 dB, tol 0.01.
+# ================================================================
+test_group("biquad_low_shelf_exact_boost");
+var filt_h = dhvani_biquad_new(DH_BQ_LOWSHELF, 6.0, 1000.0, FRAC_1_SQRT_2, 48000, 1);
+var buf_h = make_sine_mono(50.0, 0.25, 48000, 96000);
+var in_h = measure_steady_state_db(buf_h, 48000);
+dhvani_biquad_process(filt_h, buf_h);
+var out_h = measure_steady_state_db(buf_h, 48000);
+assert(f64_lt(f64_abs(f64_sub(f64_sub(out_h, in_h), 6.0)), 0.01), "Low shelf +6dB exact");
+
+# ================================================================
+# biquad_high_shelf_exact_boost
+# HighShelf +6dB @ 1kHz, signal 15kHz -> +6 dB, tol 0.01.
+# ================================================================
+test_group("biquad_high_shelf_exact_boost");
+var filt_i = dhvani_biquad_new(DH_BQ_HIGHSHELF, 6.0, 1000.0, FRAC_1_SQRT_2, 48000, 1);
+var buf_i = make_sine_mono(15000.0, 0.25, 48000, 96000);
+var in_i = measure_steady_state_db(buf_i, 48000);
+dhvani_biquad_process(filt_i, buf_i);
+var out_i = measure_steady_state_db(buf_i, 48000);
+assert(f64_lt(f64_abs(f64_sub(f64_sub(out_i, in_i), 6.0)), 0.01), "High shelf +6dB exact");
+
+# ================================================================
+# biquad_allpass_unity_magnitude
+# AllPass @ 1kHz -> 0 dB at [100,500,1000,5000,15000] Hz, tol 0.01.
+# ================================================================
+test_group("biquad_allpass_unity_magnitude");
+var filt_j = dhvani_biquad_new(DH_BQ_ALLPASS, 0, 1000.0, FRAC_1_SQRT_2, 48000, 1);
+var freqs_j = vec_new();
+vec_push(freqs_j, 100.0); vec_push(freqs_j, 500.0); vec_push(freqs_j, 1000.0);
+vec_push(freqs_j, 5000.0); vec_push(freqs_j, 15000.0);
+var jf = 0;
+var jok = 1;
+while (jf < vec_len(freqs_j)) {
+    var buf_j = make_sine_mono(vec_get(freqs_j, jf), 0.5, 48000, 96000);
+    var in_j = measure_steady_state_db(buf_j, 48000);
+    dhvani_biquad_reset(filt_j);
+    dhvani_biquad_process(filt_j, buf_j);
+    var out_j = measure_steady_state_db(buf_j, 48000);
+    if (f64_lt(f64_abs(f64_sub(out_j, in_j)), 0.01) == 0) { jok = 0; }
+    jf = jf + 1;
+}
+assert_eq(jok, 1, "AllPass unity magnitude all freqs");
+
+# ================================================================
+# biquad_notch_deep_at_center
+# Notch @ 1kHz Q=10, signal 1kHz -> >40 dB rejection.
+# ================================================================
+test_group("biquad_notch_deep_at_center");
+var filt_k = dhvani_biquad_new(DH_BQ_NOTCH, 0, 1000.0, 10.0, 48000, 1);
+var buf_k = make_sine_mono(1000.0, 0.5, 48000, 96000);
+var in_k = measure_steady_state_db(buf_k, 48000);
+dhvani_biquad_process(filt_k, buf_k);
+var out_k = measure_steady_state_db(buf_k, 48000);
+assert(f64_gt(f64_sub(in_k, out_k), 40.0), "Notch >40 dB rejection");
+
+# ================================================================
+# limiter_ceiling_accuracy
+# ceiling -6 dB, release 10ms; hot 440Hz full-scale sine; after SKIP no
+# |sample| exceeds 10^((ceiling+0.01)/20).
+# ================================================================
+test_group("limiter_ceiling_accuracy");
+var ceiling_db = f64_neg(6.0);
+var lp2 = dhvani_limparams_new(ceiling_db, 10.0, 0, 1.0);
+var lim = dhvani_lim_new(lp2, 48000);
+assert(lim != 0, "limiter built");
+var buf_l = make_sine_mono(440.0, 1.0, 48000, 96000);
+dhvani_lim_process(lim, buf_l);
+var tol_lin = db_to_amplitude(f64_add(ceiling_db, 0.01));
+var sl = dhvani_buffer_samples(buf_l);
+var li = 48000;
+var lok = 1;
+while (li < 96000) {
+    if (f64_le(f64_abs(vec_get(sl, li)), tol_lin) == 0) { lok = 0; }
+    li = li + 1;
+}
+assert_eq(lok, 1, "limiter never exceeds ceiling");
+
+# ================================================================
+# compressor_below_threshold_unity
+# threshold -6, ratio 4, attack 1ms, release 50ms; -20 dBFS 440Hz -> 0 dB gain.
+# ================================================================
+test_group("compressor_below_threshold_unity");
+var cparams = dhvani_compparams_new(f64_neg(6.0), 4.0, 1.0, 50.0, 0, 0, 1.0);
+var comp = dhvani_comp_new(cparams, 48000);
+assert(comp != 0, "compressor built");
+var amp_m = db_to_amplitude(f64_neg(20.0));
+var buf_m = make_sine_mono(440.0, amp_m, 48000, 96000);
+var in_m = measure_steady_state_db(buf_m, 48000);
+dhvani_comp_process(comp, buf_m);
+var out_m = measure_steady_state_db(buf_m, 48000);
+assert(f64_lt(f64_abs(f64_sub(out_m, in_m)), 0.01), "compressor below threshold unity");
+
+# ================================================================
+# panner_center_constant_power
+# center pan (0.0): stereo L^2+R^2 power == mono power, 0 dB tol 0.01.
+# ================================================================
+test_group("panner_center_constant_power");
+var panner = dhvani_pan_new(0);
+var mono_buf = make_sine_mono(440.0, 0.5, 48000, 96000);
+var mono = dhvani_buffer_samples(mono_buf);
+# mono input power over [SKIP, FRAMES)
+var mono_power = f64_from(0);
+var pi = 48000;
+while (pi < 96000) {
+    var ms = vec_get(mono, pi);
+    mono_power = f64_add(mono_power, f64_mul(ms, ms));
+    pi = pi + 1;
+}
+mono_power = f64_div(mono_power, f64_from(96000 - 48000));
+# duplicate to stereo interleaved
+var stereo = vec_new();
+var si = 0;
+while (si < 96000) {
+    var mv = vec_get(mono, si);
+    vec_push(stereo, mv);
+    vec_push(stereo, mv);
+    si = si + 1;
+}
+var buf_p = dhvani_buffer_from_interleaved(stereo, 2, 48000);
+dhvani_pan_process(panner, buf_p);
+var sp = dhvani_buffer_samples(buf_p);
+var stereo_power = f64_from(0);
+var pf = 48000;
+while (pf < 96000) {
+    var l = vec_get(sp, pf * 2);
+    var r = vec_get(sp, pf * 2 + 1);
+    stereo_power = f64_add(stereo_power, f64_add(f64_mul(l, l), f64_mul(r, r)));
+    pf = pf + 1;
+}
+stereo_power = f64_div(stereo_power, f64_from(96000 - 48000));
+var pratio_db = f64_mul(10.0, f64_div(f64_ln(f64_div(stereo_power, mono_power)), F64_LN10));
+assert(f64_lt(f64_abs(pratio_db), 0.01), "Panner center constant power 0 dB");
+
+# ================================================================
+# biquad_coeffs_dc_gain_unity_lp
+# LPF DC gain = (b0+b1+b2)/(1+a1+a2) -> 0 dB, tol 0.01.
+# ================================================================
+test_group("biquad_coeffs_dc_gain_unity_lp");
+var c_lp = dhvani_biquad_design(DH_BQ_LOWPASS, 0, 1000.0, FRAC_1_SQRT_2, 48000);
+var dc_gain = f64_div(
+    f64_add(f64_add(DhBiquadCoeffs_b0(c_lp), DhBiquadCoeffs_b1(c_lp)), DhBiquadCoeffs_b2(c_lp)),
+    f64_add(f64_add(1.0, DhBiquadCoeffs_a1(c_lp)), DhBiquadCoeffs_a2(c_lp)));
+var dc_db = f64_mul(20.0, f64_div(f64_ln(f64_abs(dc_gain)), F64_LN10));
+assert(f64_lt(f64_abs(dc_db), 0.01), "LPF DC gain 0 dB");
+
+# ================================================================
+# biquad_coeffs_dc_gain_zero_hp
+# HPF DC gain ~ 0 (< 1e-10).
+# ================================================================
+test_group("biquad_coeffs_dc_gain_zero_hp");
+var c_hp = dhvani_biquad_design(DH_BQ_HIGHPASS, 0, 1000.0, FRAC_1_SQRT_2, 48000);
+var dc_gain_hp = f64_div(
+    f64_add(f64_add(DhBiquadCoeffs_b0(c_hp), DhBiquadCoeffs_b1(c_hp)), DhBiquadCoeffs_b2(c_hp)),
+    f64_add(f64_add(1.0, DhBiquadCoeffs_a1(c_hp)), DhBiquadCoeffs_a2(c_hp)));
+assert(f64_lt(f64_abs(dc_gain_hp), 0.0000000001), "HPF DC gain ~0");
+
+# ================================================================
+# biquad_coeffs_nyquist_gain_unity_hp
+# HPF Nyquist gain = (b0-b1+b2)/(1-a1+a2) -> 0 dB, tol 0.01.
+# ================================================================
+test_group("biquad_coeffs_nyquist_gain_unity_hp");
+var c_hp2 = dhvani_biquad_design(DH_BQ_HIGHPASS, 0, 1000.0, FRAC_1_SQRT_2, 48000);
+var nyq_gain = f64_div(
+    f64_add(f64_sub(DhBiquadCoeffs_b0(c_hp2), DhBiquadCoeffs_b1(c_hp2)), DhBiquadCoeffs_b2(c_hp2)),
+    f64_add(f64_sub(1.0, DhBiquadCoeffs_a1(c_hp2)), DhBiquadCoeffs_a2(c_hp2)));
+var nyq_db = f64_mul(20.0, f64_div(f64_ln(f64_abs(nyq_gain)), F64_LN10));
+assert(f64_lt(f64_abs(nyq_db), 0.01), "HPF Nyquist gain 0 dB");
+
+# ================================================================
+# db_conversion_roundtrip_accuracy
+# db -> amp -> db within 0.01 for [-60,-40,-20,-6,-3,0,3,6,12,20].
+# ================================================================
+test_group("db_conversion_roundtrip_accuracy");
+var dbs = vec_new();
+vec_push(dbs, f64_neg(60.0)); vec_push(dbs, f64_neg(40.0)); vec_push(dbs, f64_neg(20.0));
+vec_push(dbs, f64_neg(6.0)); vec_push(dbs, f64_neg(3.0)); vec_push(dbs, f64_from(0));
+vec_push(dbs, 3.0); vec_push(dbs, 6.0); vec_push(dbs, 12.0); vec_push(dbs, 20.0);
+var di = 0;
+var dok = 1;
+while (di < vec_len(dbs)) {
+    var db = vec_get(dbs, di);
+    var amp = db_to_amplitude(db);
+    var back = amplitude_to_db(amp);
+    if (f64_lt(f64_abs(f64_sub(back, db)), 0.01) == 0) { dok = 0; }
+    di = di + 1;
+}
+assert_eq(dok, 1, "dB roundtrip accuracy");
+
+var rc = assert_summary();
+syscall(60, rc);

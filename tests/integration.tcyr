@@ -1,0 +1,335 @@
+# integration.tcyr -- ports the top-level cross-module #[test] fns from
+# rust-old/src/tests/mod.rs (behaviour + pipeline + error-rejection). These
+# exercise the WHOLE assembled dhvani API, so we link the BUNDLE, not the
+# individual modules. (The dsp_reference_tests submodule + ebu_r128/graph/stress
+# tests belong to other groups and are NOT ported here.)
+#
+# Rust->Cyrius: f32->f64; Result/Option -> sentinel (0/null or negative
+# DHVANI_ERR_*); f32 tolerances widened to ~1e-4. from_interleaved rejects with
+# a 0 handle; resample_linear rejects a bad rate with 0; comp/lim set_params
+# return a negative DHVANI_ERR_* on invalid.
+
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+alloc_init();
+
+# ---- helpers ----
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+fn fill(n, v) { var out = vec_new(); var i = 0; while (i < n) { vec_push(out, v); i = i + 1; } return out; }
+
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s); var i = 0;
+    while (i < n) { if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# mono sine, `frames` frames, single channel.
+fn make_sine_mono(freq, amp, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr));
+        vec_push(v, f64_mul(amp, f64_sin(ph)));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+
+# interleaved stereo sine of a given `freq` (Rust uses (i/2) as the frame index).
+fn make_sine_stereo(freq, amp, sr, frames) {
+    var v = vec_new();
+    var n = frames * 2;
+    var i = 0;
+    while (i < n) {
+        var frameidx = i / 2;
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(frameidx)), f64_from(sr));
+        vec_push(v, f64_mul(amp, f64_sin(ph)));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, sr);
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# full_pipeline_mix_compress_normalize
+# ─────────────────────────────────────────────────────────────────────
+test_group("full_pipeline_mix_compress_normalize");
+var pa_v = vec_new(); vec_push(pa_v, 0.8); vec_push(pa_v, 0.8); vec_push(pa_v, 0.7); vec_push(pa_v, 0.7);
+var pa = dhvani_buffer_from_interleaved(pa_v, 2, 44100);
+var pb_v = vec_new(); vec_push(pb_v, 0.6); vec_push(pb_v, 0.6); vec_push(pb_v, 0.5); vec_push(pb_v, 0.5);
+var pb = dhvani_buffer_from_interleaved(pb_v, 2, 44100);
+var pbufs = vec_new(); vec_push(pbufs, pa); vec_push(pbufs, pb);
+var mixed = dhvani_buffer_mix(pbufs);
+assert(mixed != 0, "mix succeeded");
+# threshold -4, ratio 4, attack/release 0.01, makeup 0, knee 0, mix 1.0
+var pcomp = dhvani_comp_new(dhvani_compparams_new(f64_neg(4.0), 4.0, 0.01, 0.01, 0, 0, 1.0), 44100);
+dhvani_comp_process(pcomp, mixed);
+dhvani_dsp_normalize(mixed, 0.95);
+assert(f64_le(dhvani_buffer_peak(mixed), 0.96), "peak <= 0.96");
+assert(f64_ge(dhvani_buffer_peak(mixed), 0.94), "peak >= 0.94");
+
+# ─────────────────────────────────────────────────────────────────────
+# resample_preserves_duration
+# ─────────────────────────────────────────────────────────────────────
+test_group("resample_preserves_duration");
+var rd_buf = dhvani_buffer_from_interleaved(fill(44100, 0.5), 1, 44100);
+var rd_out = dhvani_buffer_resample_linear(rd_buf, 48000);
+assert(rd_out != 0, "resample succeeded");
+var orig_dur = dhvani_buffer_duration_secs(rd_buf);
+var new_dur = dhvani_buffer_duration_secs(rd_out);
+assert(f64_lt(f64_abs(f64_sub(orig_dur, new_dur)), 0.02), "duration preserved within 0.02s");
+
+# ─────────────────────────────────────────────────────────────────────
+# clock_syncs_with_buffer
+# ─────────────────────────────────────────────────────────────────────
+test_group("clock_syncs_with_buffer");
+var cs_buf = dhvani_buffer_silence(2, 1024, 48000);
+var cs_clock = dhvani_clock_new(48000);
+dhvani_clock_start(cs_clock);
+dhvani_clock_advance(cs_clock, dhvani_buffer_frames(cs_buf));
+var cs_expected = f64_mul(f64_div(f64_from(1024), f64_from(48000)), 1000.0);
+assert(f64_lt(f64_abs(f64_sub(dhvani_clock_position_ms(cs_clock), cs_expected)), 0.1), "clock position matches buffer duration");
+
+# ─────────────────────────────────────────────────────────────────────
+# noise_gate_then_analyze
+# ─────────────────────────────────────────────────────────────────────
+test_group("noise_gate_then_analyze");
+var ng_v = vec_new();
+vec_push(ng_v, 0.001); vec_push(ng_v, f64_neg(0.001));
+vec_push(ng_v, 0.5); vec_push(ng_v, f64_neg(0.5));
+vec_push(ng_v, 0.002); vec_push(ng_v, f64_neg(0.002));
+var ng_buf = dhvani_buffer_from_interleaved(ng_v, 1, 44100);
+dhvani_dsp_noise_gate(ng_buf, 0.01);
+var ng_s = dhvani_buffer_samples(ng_buf);
+assert_eq(vec_get(ng_s, 0), 0, "sample 0 gated to 0");
+assert(near(vec_get(ng_s, 2), 0.5, 0.0001), "sample 2 kept at 0.5");
+assert_eq(dhvani_analysis_is_silent(ng_buf, f64_neg(60.0)), 0, "not silent after gating");
+
+# ─────────────────────────────────────────────────────────────────────
+# db_roundtrip
+# ─────────────────────────────────────────────────────────────────────
+test_group("db_roundtrip");
+var dbr_amp = 0.707;
+var dbr_db = amplitude_to_db(dbr_amp);
+var dbr_back = db_to_amplitude(dbr_db);
+assert(f64_lt(f64_abs(f64_sub(dbr_amp, dbr_back)), 0.001), "amp->db->amp roundtrip within 0.001");
+
+# ─────────────────────────────────────────────────────────────────────
+# full_dsp_chain_eq_compress_reverb_delay
+# ─────────────────────────────────────────────────────────────────────
+test_group("full_dsp_chain_eq_compress_reverb_delay");
+var fdc_buf = make_sine_stereo(440.0, 0.8, 44100, 4096);
+# EQ: boost 440Hz +6dB peaking
+var fdc_bands = vec_new();
+vec_push(fdc_bands, dhvani_eq_band_config_new(DH_BAND_PEAKING, 440.0, 6.0, 1.0, 1));
+var fdc_eq = dhvani_eq_new(fdc_bands, 44100, 2);
+dhvani_eq_process(fdc_eq, fdc_buf);
+# Compress: threshold -12, ratio 4, attack 5, release 50
+var fdc_comp = dhvani_comp_new(dhvani_compparams_new(f64_neg(12.0), 4.0, 5.0, 50.0, 0, 0, 1.0), 44100);
+dhvani_comp_process(fdc_comp, fdc_buf);
+# Reverb: room 0.3, damping 0.5, mix 0.2
+var fdc_reverb = dhvani_reverb_new(dhvani_reverbparams_new(0.3, 0.5, 0.2), 44100);
+dhvani_reverb_process(fdc_reverb, fdc_buf);
+# Delay: 50ms, max 50ms, feedback 0.3, mix 0.15
+var fdc_delay = dhvani_delay_new(50.0, 50.0, 0.3, 0.15, 44100, 2);
+dhvani_delay_process(fdc_delay, fdc_buf);
+# Normalize
+dhvani_dsp_normalize(fdc_buf, 0.95);
+assert_eq(all_finite(fdc_buf), 1, "output all finite");
+assert(f64_le(dhvani_buffer_peak(fdc_buf), 1.0), "peak <= 1.0");
+assert(f64_ge(dhvani_buffer_peak(fdc_buf), 0.9), "peak >= 0.9");
+
+# ─────────────────────────────────────────────────────────────────────
+# format_conversion_pipeline
+# ─────────────────────────────────────────────────────────────────────
+test_group("format_conversion_pipeline");
+# 1024 i16 samples: ((i/1024*2-1)*30000) as i16
+var fcp_i16 = vec_new();
+var fcp_i = 0;
+while (fcp_i < 1024) {
+    var fcp_f = f64_mul(f64_sub(f64_mul(f64_div(f64_from(fcp_i), 1024.0), 2.0), 1.0), 30000.0);
+    vec_push(fcp_i16, f64_to(f64_trunc(fcp_f)));
+    fcp_i = fcp_i + 1;
+}
+# i16 -> f32
+var fcp_f32 = fill(1024, 0);
+dhvani_simd_i16_to_f32(fcp_i16, fcp_f32);
+var fcp_mono = dhvani_buffer_from_interleaved(fcp_f32, 1, 44100);
+# mono -> stereo
+var fcp_stereo = dhvani_convert_mono_to_stereo(fcp_mono);
+assert_eq(dhvani_buffer_channels(fcp_stereo), 2, "mono->stereo yields 2 channels");
+# DSP: noise gate
+dhvani_dsp_noise_gate(fcp_stereo, 0.01);
+# stereo -> mono
+var fcp_back_mono = dhvani_convert_stereo_to_mono(fcp_stereo);
+assert_eq(dhvani_buffer_channels(fcp_back_mono), 1, "stereo->mono yields 1 channel");
+# mono f32 -> i16
+var fcp_back_i16 = fill(1024, 0);
+dhvani_simd_f32_to_i16(dhvani_buffer_samples(fcp_back_mono), fcp_back_i16);
+assert_eq(vec_len(fcp_back_i16), vec_len(fcp_i16), "back_i16 len matches original");
+
+# ─────────────────────────────────────────────────────────────────────
+# sinc_resample_preserves_frequency
+# ─────────────────────────────────────────────────────────────────────
+test_group("sinc_resample_preserves_frequency");
+var srf_buf = make_sine_mono(440.0, 1.0, 44100, 8192);
+var srf_out = dhvani_resample_sinc(srf_buf, 48000, DH_RESAMPLE_GOOD);
+assert(srf_out != 0, "sinc resample succeeded");
+assert_eq(dhvani_buffer_sample_rate(srf_out), 48000, "resampled sample_rate is 48000");
+var srf_spec = dhvani_analysis_spectrum_dft(srf_out, 4096);
+var srf_dom = dhvani_spectrum_dominant_frequency(srf_spec);
+var srf_tol = f64_mul(dhvani_spectrum_freq_resolution(srf_spec), 2.0);
+assert(f64_lt(f64_abs(f64_sub(srf_dom, 440.0)), srf_tol), "dominant freq near 440Hz");
+
+# ─────────────────────────────────────────────────────────────────────
+# oscillator_zero_freq_silent
+# ─────────────────────────────────────────────────────────────────────
+test_group("oscillator_zero_freq_silent");
+var ozf_osc = dhvani_osc_new(DH_WAVE_SINE, 44100);
+var ozf_sum = 0;
+var ozf_i = 0;
+while (ozf_i < 1000) {
+    ozf_sum = f64_add(ozf_sum, f64_abs(dhvani_osc_sample(ozf_osc, 0)));
+    ozf_i = ozf_i + 1;
+}
+assert(f64_lt(ozf_sum, 0.01), "0 Hz oscillator near-silent");
+
+# ─────────────────────────────────────────────────────────────────────
+# delay_zero_ms_passthrough
+# ─────────────────────────────────────────────────────────────────────
+test_group("delay_zero_ms_passthrough");
+var dzp_v = vec_new(); vec_push(dzp_v, 1.0); vec_push(dzp_v, 0.5); vec_push(dzp_v, 0.25); vec_push(dzp_v, 0);
+var dzp_buf = dhvani_buffer_from_interleaved(dzp_v, 1, 44100);
+var dzp_delay = dhvani_delay_new(0, 10.0, 0, 1.0, 44100, 1);
+dhvani_delay_process(dzp_delay, dzp_buf);
+assert_eq(all_finite(dzp_buf), 1, "0ms delay output finite");
+
+# ─────────────────────────────────────────────────────────────────────
+# envelope_sub_sample_attack
+# ─────────────────────────────────────────────────────────────────────
+test_group("envelope_sub_sample_attack");
+# attack 0.00001s (< 1 sample @44100), decay 0.1, sustain 0.5, release 0.1
+var esa_params = dhvani_adsr_new(0.00001, 0.1, 0.5, 0.1);
+var esa_env = dhvani_env_new(esa_params, 44100);
+dhvani_env_trigger(esa_env);
+var esa_first = dhvani_env_tick(esa_env);
+var esa_second = dhvani_env_tick(esa_env);
+assert(f64_ge(esa_second, 1.0), "sub-sample attack reaches full level within 2 ticks");
+
+# ─────────────────────────────────────────────────────────────────────
+# compressor_parallel_mix
+# ─────────────────────────────────────────────────────────────────────
+test_group("compressor_parallel_mix");
+# threshold -20, ratio 10, attack/release 0.01, makeup 0, knee 0, mix 0.5
+var cpm_comp = dhvani_comp_new(dhvani_compparams_new(f64_neg(20.0), 10.0, 0.01, 0.01, 0, 0, 0.5), 44100);
+var cpm_buf = dhvani_buffer_from_interleaved(fill(4096, 1.0), 1, 44100);
+dhvani_comp_process(cpm_comp, cpm_buf);
+assert_eq(all_finite(cpm_buf), 1, "parallel-mix output finite");
+var cpm_s = dhvani_buffer_samples(cpm_buf);
+var cpm_sum = 0;
+var cpm_n = vec_len(cpm_s);
+var cpm_i = 0;
+while (cpm_i < cpm_n) { cpm_sum = f64_add(cpm_sum, vec_get(cpm_s, cpm_i)); cpm_i = cpm_i + 1; }
+var cpm_avg = f64_div(cpm_sum, f64_from(cpm_n));
+assert(f64_gt(cpm_avg, 0), "avg > 0");
+assert(f64_le(cpm_avg, 1.0), "avg <= 1.0");
+
+# ─────────────────────────────────────────────────────────────────────
+# from_interleaved_rejects_non_divisible_samples
+# ─────────────────────────────────────────────────────────────────────
+test_group("from_interleaved_rejects_non_divisible_samples");
+# 5 samples with 2 channels -> not evenly divisible -> 0 (Err)
+var fir_res = dhvani_buffer_from_interleaved(fill(5, 0), 2, 44100);
+assert_eq(fir_res, 0, "non-divisible sample count rejected");
+
+# ─────────────────────────────────────────────────────────────────────
+# resample_linear_empty_buffer
+# ─────────────────────────────────────────────────────────────────────
+test_group("resample_linear_empty_buffer");
+var rle_buf = dhvani_buffer_silence(2, 0, 44100);
+var rle_out = dhvani_buffer_resample_linear(rle_buf, 48000);
+assert(rle_out != 0, "empty resample succeeded");
+assert_eq(dhvani_buffer_frames(rle_out), 0, "empty buffer -> 0 frames");
+assert_eq(dhvani_buffer_sample_rate(rle_out), 48000, "sample_rate is 48000");
+
+# ─────────────────────────────────────────────────────────────────────
+# resample_linear_rejects_high_rate
+# ─────────────────────────────────────────────────────────────────────
+test_group("resample_linear_rejects_high_rate");
+var rlh_buf = dhvani_buffer_silence(1, 100, 44100);
+var rlh_res = dhvani_buffer_resample_linear(rlh_buf, 800000);
+assert_eq(rlh_res, 0, "high target rate rejected");
+
+# ─────────────────────────────────────────────────────────────────────
+# set_params_rejects_invalid (compressor: ratio < 1.0)
+# ─────────────────────────────────────────────────────────────────────
+test_group("set_params_rejects_invalid");
+var spr_comp = dhvani_comp_new(dhvani_compparams_default(), 44100);
+# ratio 0.5 with otherwise-default params
+var spr_bad = dhvani_compparams_new(f64_neg(20.0), 0.5, 10.0, 100.0, 0, 0, 1.0);
+assert_eq(dhvani_is_err(dhvani_comp_set_params(spr_comp, spr_bad)), 1, "ratio<1 rejected");
+
+# ─────────────────────────────────────────────────────────────────────
+# limiter_set_params_rejects_invalid (positive ceiling)
+# ─────────────────────────────────────────────────────────────────────
+test_group("limiter_set_params_rejects_invalid");
+var lsp_lim = dhvani_lim_new(dhvani_limparams_default(), 44100);
+# ceiling_db 6.0 (positive) is invalid; other params default
+var lsp_bad = dhvani_limparams_new(6.0, 50.0, 0, 1.0);
+assert_eq(dhvani_is_err(dhvani_lim_set_params(lsp_lim, lsp_bad)), 1, "positive ceiling rejected");
+
+# ─────────────────────────────────────────────────────────────────────
+# lfo_set_rate_clamps_negative
+# ─────────────────────────────────────────────────────────────────────
+test_group("lfo_set_rate_clamps_negative");
+var lsc_lfo = dhvani_lfo_new(DH_LFO_SINE, 1.0, 1.0, 44100);
+dhvani_lfo_set_rate(lsc_lfo, f64_neg(5.0));
+assert(f64_ge(dhvani_lfo_rate(lsc_lfo), 0), "rate clamped to >= 0");
+
+# ─────────────────────────────────────────────────────────────────────
+# clock_set_tempo_rejects_nan
+# ─────────────────────────────────────────────────────────────────────
+test_group("clock_set_tempo_rejects_nan");
+var cst_clock = dhvani_clock_new(44100);
+dhvani_clock_set_tempo(cst_clock, DH_NAN);
+assert_eq(dhvani_clock_tempo_bpm(cst_clock), 0, "NaN tempo -> 0");
+dhvani_clock_set_tempo(cst_clock, f64_neg(120.0));
+assert_eq(dhvani_clock_tempo_bpm(cst_clock), 0, "negative tempo -> 0");
+dhvani_clock_set_tempo(cst_clock, 120.0);
+assert(near(dhvani_clock_tempo_bpm(cst_clock), 120.0, 0.0000001), "valid tempo -> 120");
+
+# ─────────────────────────────────────────────────────────────────────
+# triangle_oscillator_produces_output
+# ─────────────────────────────────────────────────────────────────────
+test_group("triangle_oscillator_produces_output");
+var top_osc = dhvani_osc_new(DH_WAVE_TRIANGLE, 44100);
+var top_pos = 0;
+var top_neg = 0;
+var top_i = 0;
+while (top_i < 44100) {
+    var top_s = dhvani_osc_sample(top_osc, 440.0);
+    if (f64_gt(top_s, 0.3) == 1) { top_pos = 1; }
+    if (f64_lt(top_s, f64_neg(0.3)) == 1) { top_neg = 1; }
+    top_i = top_i + 1;
+}
+assert_eq(top_pos, 1, "triangle has positive excursion");
+assert_eq(top_neg, 1, "triangle has negative excursion");
+
+# ─────────────────────────────────────────────────────────────────────
+# biquad_half_mix
+# ─────────────────────────────────────────────────────────────────────
+test_group("biquad_half_mix");
+var bhm_filt = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 500.0, 0.707, 44100, 1);
+dhvani_biquad_set_mix(bhm_filt, 0.5);
+assert(near(dhvani_biquad_mix(bhm_filt), 0.5, 0.0001), "mix is 0.5");
+var bhm_buf = make_sine_mono(10000.0, 1.0, 44100, 4096);
+var bhm_orig_rms = dhvani_buffer_rms(bhm_buf);
+dhvani_biquad_process(bhm_filt, bhm_buf);
+var bhm_rms = dhvani_buffer_rms(bhm_buf);
+assert(f64_gt(bhm_rms, f64_mul(bhm_orig_rms, 0.2)), "dry leaks through (RMS > 0.2*orig)");
+assert(f64_lt(bhm_rms, f64_mul(bhm_orig_rms, 0.8)), "wet attenuates (RMS < 0.8*orig)");
+
+var rc = assert_summary();
+syscall(60, rc);
