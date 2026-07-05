@@ -1,10 +1,15 @@
 # ops.tcyr -- parity tests for src/ops.cyr
-# Ported from the #[test] blocks in rust-old/src/buffer/ops.rs. The
-# analysis-gated normalize_to_target_lufs test is deferred to Wave D.
+# Ported from the #[test] blocks in rust-old/src/buffer/ops.rs. normalize_to_lufs
+# (analysis-gated) is re-enabled in Wave G; it pulls loudness + abaco
+# (measure_r128, db_to_amplitude), so those bundles precede ops here.
 
 include "src/error.cyr"
 include "src/simd.cyr"
 include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/biquad.cyr"
+include "src/loudness.cyr"
 include "src/ops.cyr"
 
 alloc_init();
@@ -16,6 +21,17 @@ fn const_buf(frames, v, sr) {
     var s = vec_new();
     var i = 0;
     while (i < frames) { vec_push(s, v); i = i + 1; }
+    return dhvani_buffer_from_interleaved(s, 1, sr);
+}
+
+# build `frames` mono samples of a `freq` Hz sine at `sr`.
+fn sine_buf(frames, freq, sr) {
+    var s = vec_new();
+    var i = 0;
+    while (i < frames) {
+        vec_push(s, f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, freq), f64_from(i)), f64_from(sr))));
+        i = i + 1;
+    }
     return dhvani_buffer_from_interleaved(s, 1, sr);
 }
 
@@ -69,6 +85,12 @@ var feb = const_buf(100, 1.0, 44100);
 dhvani_ops_fade_in(feb, 50, DH_FADE_EXPONENTIAL);
 assert(f64_lt(f64_abs(vec_get(dhvani_buffer_samples(feb), 0)), 0.01), "exp starts ~silent");
 assert(f64_lt(vec_get(dhvani_buffer_samples(feb), 25), 0.5), "exp quieter than linear at midpoint");
+
+# ---- normalize_to_target_lufs (re-enabled, Wave G) ----
+test_group("normalize_to_target_lufs");
+var nlbuf = sine_buf(44100, f64_from(440), 44100);
+var ngain = dhvani_ops_normalize_to_lufs(nlbuf, f64_neg(f64_from(14)));
+assert_eq(dhvani_is_finite(ngain), 1, "normalize gain finite");
 
 var rc = assert_summary();
 syscall(60, rc);

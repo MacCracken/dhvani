@@ -38,6 +38,7 @@ var DHVANI_ERR_OTHER               = (0 - 9);   # wrapped external error
 var DH_EPSILON = 0x3E80000000000000;   # f32::EPSILON = 2^-23 ~ 1.192e-7
 var DH_POS_INF = 0x7FF0000000000000;   # +inf
 var DH_NEG_INF = 0xFFF0000000000000;   # -inf (amplitude_to_db(<=0) sentinel)
+var DH_NAN     = 0x7FF8000000000000;   # quiet NaN (f64 Err sentinel; not finite)
 
 # 1 if `code` is an error (negative), 0 otherwise.
 #must_use

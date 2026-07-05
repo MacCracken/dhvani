@@ -328,9 +328,16 @@ independently reviewed (hex constants, dry/wet blend, reduction formula) — par
   double-buffered plan swap → shared length-1 pending cell. Dropped
   `process_parallel` (`#[cfg(feature="parallel")]`, rayon). **37 green (20/21 tests)**.
 
-Now-unblocked (fft/loudness available), to re-enable during Wave G assembly:
-`buffer/ops::normalize_to_lufs` (needs loudness `measure_r128`) + `resample`
-`sine_frequency_preserved` (needs `spectrum_dft`).
+**Wave G — assembly (in flight):**
+- ✅ Re-enabled the two analysis-gated tests deferred from Wave D: ported
+  `dhvani_ops_normalize_to_lufs` (measure_r128 → gain → apply; Err→NaN since a
+  valid gain_db can be negative; added `DH_NAN` to error.cyr) with its
+  `normalize_to_target_lufs` test, and `resample`'s `sine_frequency_preserved`
+  (resample 44.1→48k → `spectrum_dft` → dominant bin within 2 freq-bins of 440 Hz).
+  ops.tcyr/resample.tcyr gained the loudness/analysis include chains. **55 suites,
+  1202 assertions.** In the dist bundle `ops` must follow `loudness` (new dep edge).
+- ⬜ `lib` facade → `[lib] modules` dependency order + `dist/dhvani.cyr` (externalize
+  abaco + siblings; keep shipped surface auditable) + integration/proptest suites.
 
 **Wave F (synthesis stack) — COMPLETE (54/64, 1200 assertions):**
 

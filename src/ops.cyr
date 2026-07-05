@@ -3,9 +3,10 @@
 # CrossfadeType/FadeCurve enums -> codes. Result -> null-handle sentinel.
 #
 # The EqualPower branch called abaco::dsp::equal_power_crossfade, which is
-# (cos(t*PI/2), sin(t*PI/2)); matched inline here so ops stays abaco-free until
-# Wave B wires abaco for the DSP modules. normalize_to_lufs is DEFERRED to
-# Wave D (it needs analysis::measure_r128).
+# (cos(t*PI/2), sin(t*PI/2)); matched inline here so ops stays abaco-free.
+# normalize_to_lufs (analysis-gated in Rust) is at the bottom — it pulls
+# dhvani_loudness_measure_r128 + abaco db_to_amplitude, so in the dist bundle
+# ops must follow loudness.
 
 var DH_PI_2 = F64_PI_2;   # PI/2 (equal-power crossfade angle scale; exact-hex stdlib const)
 
@@ -108,4 +109,23 @@ fn dhvani_ops_fade_out(buf, fade_frames, curve) {
         frame = frame + 1;
     }
     return 0;
+}
+
+# normalize_to_lufs(buf, target_lufs) -- measure integrated R128 loudness, apply
+# the gain needed to reach target_lufs, return the applied gain in dB. A silent
+# or too-quiet signal (integrated < -120 LUFS or non-finite) is a no-op -> 0.0.
+# Rust returns Result<f32>: since a valid gain_db can be negative, the Err path
+# (measurement failed, e.g. empty buffer) returns NaN, not a negative code —
+# callers test dhvani_is_finite (finite == success). analysis-gated: needs
+# dhvani_loudness_measure_r128 (loudness.cyr) + db_to_amplitude (abaco).
+#must_use
+fn dhvani_ops_normalize_to_lufs(buf, target_lufs) {
+    var r128 = dhvani_loudness_measure_r128(buf);
+    if (r128 == 0) { return DH_NAN; }
+    var current = dhvani_r128_integrated_lufs(r128);
+    if (dhvani_is_finite(current) == 0) { return 0; }
+    if (f64_lt(current, f64_neg(f64_from(120))) == 1) { return 0; }
+    var gain_db = f64_sub(target_lufs, current);
+    dhvani_buffer_apply_gain(buf, db_to_amplitude(gain_db));
+    return gain_db;
 }

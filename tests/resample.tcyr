@@ -1,11 +1,15 @@
 # resample.tcyr -- parity tests for src/resample.cyr
 # Ported from the #[test] blocks in rust-old/src/buffer/resample.rs. The
-# analysis-gated sine_frequency_preserved test is deferred to Wave D. Negative
-# loop start uses integer negation (indices), floats via f64_neg.
+# analysis-gated sine_frequency_preserved test is re-enabled in Wave G (needs
+# analysis::spectrum_dft). Negative loop start uses integer negation (indices),
+# floats via f64_neg.
 
 include "src/error.cyr"
 include "src/simd.cyr"
 include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
 include "src/resample.cyr"
 
 alloc_init();
@@ -88,6 +92,17 @@ while (qi < 3) {
     qi = qi + 1;
 }
 assert_eq(qok, 1, "all qualities produce finite non-empty output");
+
+# ---- sine_frequency_preserved (re-enabled, Wave G) ----
+# 440Hz sine at 44100 -> resample to 48000 -> DFT -> dominant bin near 440Hz.
+test_group("sine_frequency_preserved");
+var fsine = make_sine(4096, 440.0, 44100);
+var fbuf = dhvani_buffer_from_interleaved(fsine, 1, 44100);
+var fres = dhvani_resample_sinc(fbuf, 48000, DH_RESAMPLE_GOOD);
+var spec = dhvani_analysis_spectrum_dft(fres, 4096);
+var dominant = dhvani_spectrum_dominant_frequency(spec);
+var freqres = dhvani_spectrum_freq_resolution(spec);
+assert(f64_lt(f64_abs(f64_sub(dominant, f64_from(440))), f64_mul(freqres, 2.0)), "dominant freq near 440Hz");
 
 var rc = assert_summary();
 syscall(60, rc);
