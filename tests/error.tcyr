@@ -1,0 +1,49 @@
+# error.tcyr -- parity tests for src/error.cyr
+# Ported from the #[test] blocks in rust-old/src/error.rs:
+#   - error_display  -> every code maps to a non-empty, distinct name
+#   - error_from_boxed -> DROPPED (no Box<dyn Error> / trait objects in Cyrius)
+# Adds direct coverage of the base helpers (dhvani_is_err, dhvani_is_finite).
+
+include "src/error.cyr"
+
+alloc_init();
+
+var NAN_BITS = 0x7FF8000000000000;   # canonical quiet NaN
+
+# ================================================================
+# error_display parity: each variant's name is present and correct.
+# ================================================================
+test_group("error names");
+assert_streq(dhvani_err_name(DHVANI_ERR_NONE), "none", "NONE");
+assert_streq(dhvani_err_name(DHVANI_ERR_FORMAT_MISMATCH), "buffer format mismatch", "FormatMismatch");
+assert_streq(dhvani_err_name(DHVANI_ERR_LENGTH_MISMATCH), "buffer length mismatch", "LengthMismatch");
+assert_streq(dhvani_err_name(DHVANI_ERR_INVALID_SAMPLE_RATE), "invalid sample rate", "InvalidSampleRate");
+assert_streq(dhvani_err_name(DHVANI_ERR_INVALID_CHANNELS), "invalid channel count", "InvalidChannels");
+assert_streq(dhvani_err_name(DHVANI_ERR_DSP), "DSP error", "Dsp");
+assert_streq(dhvani_err_name(DHVANI_ERR_CAPTURE), "capture error", "Capture");
+assert_streq(dhvani_err_name(DHVANI_ERR_INVALID_PARAMETER), "invalid parameter", "InvalidParameter");
+assert_streq(dhvani_err_name(DHVANI_ERR_CONVERSION), "conversion error", "Conversion");
+assert_streq(dhvani_err_name(DHVANI_ERR_OTHER), "other error", "Other");
+assert_streq(dhvani_err_name(f64_from(999)), "unknown error", "out-of-range code");
+
+# ================================================================
+# is_err: 0 is success, every negative variant is an error.
+# ================================================================
+test_group("dhvani_is_err");
+assert_eq(dhvani_is_err(DHVANI_ERR_NONE), 0, "NONE is not an error");
+assert_eq(dhvani_is_err(DHVANI_ERR_FORMAT_MISMATCH), 1, "FormatMismatch is an error");
+assert_eq(dhvani_is_err(DHVANI_ERR_INVALID_CHANNELS), 1, "InvalidChannels is an error");
+assert_eq(dhvani_is_err(DHVANI_ERR_OTHER), 1, "Other is an error");
+
+# ================================================================
+# is_finite: finite values pass, NaN / +-inf fail.
+# ================================================================
+test_group("dhvani_is_finite");
+assert_eq(dhvani_is_finite(f64_from(440)), 1, "440.0 is finite");
+assert_eq(dhvani_is_finite(0), 1, "0.0 is finite");
+assert_eq(dhvani_is_finite(NAN_BITS), 0, "NaN not finite");
+assert_eq(dhvani_is_finite(DH_POS_INF), 0, "+inf not finite");
+assert_eq(dhvani_is_finite(DH_NEG_INF), 0, "-inf not finite");
+
+var rc = assert_summary();
+syscall(60, rc);

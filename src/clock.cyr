@@ -1,0 +1,125 @@
+# clock.cyr -- sample-accurate transport clock (position, tempo, A/V sync).
+# Ports rust-old/src/clock/mod.rs (AudioClock). L0, no internal deps besides
+# error.cyr (dhvani_is_finite). serde derive dropped.
+#
+# TYPES: position_samples (u64) and sample_rate (u32) are INTEGER counts, stored
+# as plain i64 slots (converted to f64 via f64_from only for time math).
+# tempo_bpm is an f64 (bit pattern). running (bool) -> i64 flag (0/1).
+# Option<f64> (position_beats / samples_per_beat, None when tempo<=0) ->
+# DH_CLOCK_NONE (NaN) sentinel; callers test dhvani_is_finite().
+
+var DH_CLOCK_NONE = 0x7FF8000000000000;   # NaN -- Option::None sentinel
+
+#derive(accessors)
+struct DhAudioClock { position_samples; sample_rate; tempo_bpm; running; }
+
+# new(sample_rate) -- clock at position 0, no tempo, stopped.
+#must_use
+fn dhvani_clock_new(sample_rate) {
+    var self = alloc(sizeof(DhAudioClock));
+    DhAudioClock_set_position_samples(self, 0);
+    DhAudioClock_set_sample_rate(self, sample_rate);
+    DhAudioClock_set_tempo_bpm(self, 0);
+    DhAudioClock_set_running(self, 0);
+    return self;
+}
+
+# with_tempo(sample_rate, bpm) -- clock at 0 with tempo (bpm is f64).
+#must_use
+fn dhvani_clock_with_tempo(sample_rate, bpm) {
+    var self = alloc(sizeof(DhAudioClock));
+    DhAudioClock_set_position_samples(self, 0);
+    DhAudioClock_set_sample_rate(self, sample_rate);
+    DhAudioClock_set_tempo_bpm(self, bpm);
+    DhAudioClock_set_running(self, 0);
+    return self;
+}
+
+# position_secs -- position_samples / sample_rate (f64).
+#inline
+#must_use
+fn dhvani_clock_position_secs(self) {
+    return f64_div(f64_from(DhAudioClock_position_samples(self)),
+                   f64_from(DhAudioClock_sample_rate(self)));
+}
+
+# position_ms -- position in milliseconds.
+#inline
+#must_use
+fn dhvani_clock_position_ms(self) {
+    return f64_mul(dhvani_clock_position_secs(self), 1000.0);
+}
+
+# position_beats -- beat position, or DH_CLOCK_NONE (NaN) if tempo<=0.
+#inline
+#must_use
+fn dhvani_clock_position_beats(self) {
+    var tempo = DhAudioClock_tempo_bpm(self);
+    if (f64_le(tempo, 0) == 1) { return DH_CLOCK_NONE; }
+    return f64_div(f64_mul(dhvani_clock_position_secs(self), tempo), 60.0);
+}
+
+# advance(frames) -- add frames to position, only when running.
+fn dhvani_clock_advance(self, frames) {
+    if (DhAudioClock_running(self) == 1) {
+        DhAudioClock_set_position_samples(self,
+            DhAudioClock_position_samples(self) + frames);
+    }
+    return 0;
+}
+
+# start / stop -- toggle the running flag.
+fn dhvani_clock_start(self) { DhAudioClock_set_running(self, 1); return 0; }
+fn dhvani_clock_stop(self)  { DhAudioClock_set_running(self, 0); return 0; }
+
+# reset -- position back to 0 (running state unchanged).
+fn dhvani_clock_reset(self) { DhAudioClock_set_position_samples(self, 0); return 0; }
+
+# seek_secs(secs) -- position = max(secs*sample_rate, 0) truncated to u64.
+fn dhvani_clock_seek_secs(self, secs) {
+    var samples = f64_mul(secs, f64_from(DhAudioClock_sample_rate(self)));
+    DhAudioClock_set_position_samples(self, f64_to(f64_trunc(f64_max(samples, 0))));
+    return 0;
+}
+
+# samples_per_beat -- or DH_CLOCK_NONE (NaN) if tempo<=0.
+#inline
+#must_use
+fn dhvani_clock_samples_per_beat(self) {
+    var tempo = DhAudioClock_tempo_bpm(self);
+    if (f64_le(tempo, 0) == 1) { return DH_CLOCK_NONE; }
+    return f64_div(f64_mul(f64_from(DhAudioClock_sample_rate(self)), 60.0), tempo);
+}
+
+# pts_us -- presentation timestamp in microseconds (u64), for A/V sync.
+#inline
+#must_use
+fn dhvani_clock_pts_us(self) {
+    return f64_to(f64_trunc(f64_mul(dhvani_clock_position_secs(self), 1000000.0)));
+}
+
+# --- accessors (mirror the Rust public getters) ---
+#inline
+#must_use
+fn dhvani_clock_position_samples(self) { return DhAudioClock_position_samples(self); }
+#inline
+#must_use
+fn dhvani_clock_sample_rate(self) { return DhAudioClock_sample_rate(self); }
+#inline
+#must_use
+fn dhvani_clock_tempo_bpm(self) { return DhAudioClock_tempo_bpm(self); }
+#inline
+#must_use
+fn dhvani_clock_is_running(self) { return DhAudioClock_running(self); }
+
+# set_tempo(bpm) -- finite && >0 keeps bpm, else clamps to 0 (matches Rust).
+fn dhvani_clock_set_tempo(self, bpm) {
+    if (dhvani_is_finite(bpm) == 1) {
+        if (f64_gt(bpm, 0) == 1) {
+            DhAudioClock_set_tempo_bpm(self, bpm);
+            return 0;
+        }
+    }
+    DhAudioClock_set_tempo_bpm(self, 0);
+    return 0;
+}

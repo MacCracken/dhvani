@@ -1,0 +1,13 @@
+# dhvani — Cyrius port
+# Ported from 23695 lines of Rust
+
+# Stdlib auto-included via cyrius.cyml
+
+fn main() {
+    alloc_init();
+    println("dhvani ready");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

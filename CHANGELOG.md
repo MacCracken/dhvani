@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — Cyrius port (in progress)
+
+Complete rewrite from Rust to **Cyrius**. dhvani's Rust line shipped through
+1.1.0; the language port is a major break, so it lands as 2.0.0. The
+23,695-line Rust source (64 modules, ~660 tests) is frozen at `rust-old/` as the
+parity oracle — every Cyrius module is cross-checked against it
+function-for-function. Per-module ledger in
+[`docs/development/port-audit.md`](docs/development/port-audit.md); wave
+sequencing in [`docs/development/roadmap.md`](docs/development/roadmap.md).
+
+### Changed
+
+- **Language**: Rust → Cyrius (`.cyr`). Toolchain pinned via
+  `cyrius.cyml [package].cyrius` (6.4.2). Build with
+  `cyrius build src/main.cyr build/dhvani`; test a suite with
+  `cyrius test tests/<mod>.tcyr`.
+- **Scaffold landed** (`cyrius port`, 2026-07-04): Rust frozen at `rust-old/`,
+  `cyrius.cyml`/`src/main.cyr`/CI regenerated, `VERSION` → 2.0.0, smoke binary
+  builds. Module reimplementation proceeds in dependency-ordered waves (A–G).
+- **f32 → f64** throughout (the audio-stack math is f64-only); **enums → integer
+  codes**, **`Result`/`Option` → sentinel/error-code returns**, **closures →
+  fn-ptr**, **tuples → out-params**. No serde, no unwinding/panic.
+- **Dependencies**: the synthesis stack (naad/svara/prani/nidhi/garjan/ghurni/
+  goonj) consumed as Cyrius distlib bundles; `serde`/`thiserror`/`tracing`/
+  `criterion`/`rayon`/`proptest` dropped. Math (`abaco` vs `hisab`) decision
+  pending an ADR.
+
+### Removed / deferred
+
+- **serde surface** + all serde round-trip tests (no serde in Cyrius).
+- **SIMD acceleration** (`simd/x86`, `simd/aarch64`) — raw SSE2/AVX2/NEON
+  intrinsics have no Cyrius equivalent; only the scalar kernels port (accepted
+  throughput regression until Cyrius has a SIMD story).
+- **C-ABI FFI** (`ffi`) — deferred; consumers are Cyrius-native.
+- **PipeWire capture** (`capture/pw`) — platform FFI deferred behind the
+  `pipewire` gate; `capture/{mod,record}` port.
+
+### Blocked (dependency not yet ported to Cyrius)
+
+- **`g2p`** feature — blocked on **shabda** (still Rust).
+- **`bhava-voice`** feature (`voice_synth/bhava_bridge`) — blocked on **bhava**
+  (still Rust). All other deps are ported.
+
 ## [1.1.0] — 2026-04-01
 
 ### Changed

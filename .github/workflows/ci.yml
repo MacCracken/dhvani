@@ -5,199 +5,46 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_call:
+  workflow_call:   # reusable: release.yml gates on this CI workflow
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  check:
-    name: Check & Lint
+  build-and-test:
+    name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Format check
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Clippy (no default features)
-        run: cargo clippy --no-default-features -- -D warnings
-      - name: Type check
-        run: cargo check
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
 
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Audit
-        run: cargo audit
-
-  deny:
-    name: Supply Chain (cargo-deny)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-
-  vet:
-    name: Supply Chain (cargo-vet)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-vet
-        run: cargo install cargo-vet
-      - name: Vet
-        run: cargo vet --locked
-
-  semver:
-    name: Semver Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-semver-checks
-        run: cargo install cargo-semver-checks
-      - name: Check semver
-        run: cargo semver-checks check-release || true
-
-  test:
-    name: Test (${{ matrix.os }})
-    needs: [check]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            cargo-flags: ""
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            cargo-flags: "--no-default-features"
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            cargo-flags: "--no-default-features"
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install Cyrius toolchain
+        # The cyrius.cyml [package].cyrius pin is the single source of
+        # truth for the toolchain version — never hardcode it here. Read
+        # the pin and hand it to the canonical upstream installer, which
+        # fetches + lays out $HOME/.cyrius/{bin,lib}. Do NOT hand-roll
+        # curl+tar+cp — scripts/install.sh is the supported entry point
+        # (matches patra / sigil).
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev
-      - name: Run tests
-        run: cargo test --lib --tests ${{ matrix.cargo-flags }}
-      - name: Run doc tests (default features only)
-        if: matrix.cargo-flags == ''
-        run: cargo test --doc
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
-  test-minimal:
-    name: Test (no features)
-    needs: [check]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Test with no default features (lib + unit tests only, doc tests need features)
-        run: cargo test --no-default-features --lib --tests
+      - name: Resolve dependencies
+        run: cyrius deps
 
-  msrv:
-    name: MSRV (1.89)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.89"
-      - uses: Swatinem/rust-cache@v2
-      - name: Check with MSRV
-        run: cargo check --no-default-features
-      - name: Test with MSRV
-        run: cargo test --no-default-features --lib --tests
-
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    needs: [check]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
+      - name: Build
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov
-      - name: Generate coverage
-        run: cargo llvm-cov --lcov --output-path lcov.info
-      - name: Upload coverage
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: codecov/codecov-action@v4
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
+          mkdir -p build
+          cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
-  bench:
-    name: Benchmarks
-    runs-on: ubuntu-latest
-    needs: [check]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev
-      - name: Run benchmarks
-        run: cargo bench --no-fail-fast
-
-  fuzz:
-    name: Fuzz (5 min)
-    runs-on: ubuntu-latest
-    needs: [check]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
-      - name: Fuzz mix
-        run: cargo +nightly fuzz run fuzz_mix -- -max_total_time=30 || true
-      - name: Fuzz resample
-        run: cargo +nightly fuzz run fuzz_resample -- -max_total_time=30 || true
-      - name: Fuzz dsp
-        run: cargo +nightly fuzz run fuzz_dsp -- -max_total_time=30 || true
-      - name: Fuzz biquad
-        run: cargo +nightly fuzz run fuzz_biquad -- -max_total_time=30 || true
-      - name: Fuzz midi
-        run: cargo +nightly fuzz run fuzz_midi -- -max_total_time=30 || true
-      - name: Fuzz analysis
-        run: cargo +nightly fuzz run fuzz_analysis -- -max_total_time=30 || true
-      - name: Fuzz convert
-        run: cargo +nightly fuzz run fuzz_convert -- -max_total_time=30 || true
-      - name: Fuzz graph
-        run: cargo +nightly fuzz run fuzz_graph -- -max_total_time=30 || true
-      - name: Fuzz noise reduce
-        run: cargo +nightly fuzz run fuzz_noise_reduce -- -max_total_time=30 || true
+      - name: Test
+        # v5.6.28: bare `cyrius test` picks up the [build].test entry
+        # AND auto-discovers tests/*.tcyr — avoids the previous
+        # `cyrius test src/test.cyr` form that hard-failed when the
+        # stub didn't exist (Issue 1) and also wouldn't ever exercise
+        # tests/${proj}.tcyr.
+        run: cyrius test

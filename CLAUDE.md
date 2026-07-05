@@ -1,152 +1,103 @@
-# Dhvani — Claude Code Instructions
+# dhvani — Claude Code Instructions
+
+> **Core rule**: this file is **preferences, process, and procedures** —
+> durable rules that change rarely. Volatile state (current version,
+> module line counts, port progress, test counts, consumers) lives in
+> [`docs/development/state.md`](docs/development/state.md).
+> Do not inline state here.
 
 ## Project Identity
 
-**Dhvani** (Sanskrit: sound) — Core audio engine — buffers, DSP, mixing, resampling, analysis, PipeWire capture
+**dhvani** — Cyrius port of a Rust project (23695 lines preserved at `rust-old/`).
 
-- **Type**: Flat library crate
+- **Type**: Port (Rust → Cyrius)
 - **License**: GPL-3.0-only
-- **MSRV**: 1.89
-- **Version**: SemVer 0.D.M pre-1.0
+- **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
+- **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
+- **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 
-## Consumers
+## Goal
 
-shruti (DAW), jalwa (media player), aethersafta (compositor audio), kiran (game audio)
+dhvani (ध्वनि — "sound") **owns the core audio engine for AGNOS**: sample
+buffers, format conversion (i16/i24/i32/f32/f64/u8), mixing, resampling, DSP
+effects (biquad/SVF/EQ/dynamics/reverb/delay/…), MIDI (v1/v2, voice, routing),
+spectral & temporal analysis (FFT/STFT/chroma/key/beat/onset/loudness), a
+processing graph, metering, and PipeWire capture. Feature-gated layers wrap the
+sibling synthesis engines — naad (synthesis), svara (voice), prani (creature),
+garjan (environment), ghurni (mechanical), nidhi (sampler), goonj (acoustics).
+Consumers: **shruti** (DAW), **jalwa** (media player), **aethersafta**
+(compositor audio), **kiran** (game audio).
 
-**Note**: Uses abaco::dsp for math (amplitude_to_db, poly_blep, panning, filters).
-## Development Process
+## Current State
 
-### P(-1): Scaffold Hardening (before any new features)
+> Volatile state lives in [`docs/development/state.md`](docs/development/state.md) —
+> port progress, surface parity, in-flight work. Refreshed every release.
 
-0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
-1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
-3. Get baseline benchmarks (`./scripts/bench-history.sh`)
-4. Internal deep review — gaps, optimizations, security, logging/errors, docs
-5. External research — domain completeness, missing capabilities, best practices, world-class accuracy
-6. Cleanliness check — must be clean after review
-7. Additional tests/benchmarks from findings
-8. Post-review benchmarks — prove the wins
-9. Repeat if heavy
+This file (`CLAUDE.md`) is durable rules.
 
-### Work Loop / Working Loop (continuous)
+## Scaffolding
 
-1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
-3. Test + benchmark additions for new code
-4. Run benchmarks (`./scripts/bench-history.sh`)
-5. Internal review — performance, memory, security, throughput, correctness
-6. Cleanliness check — must be clean after audit
-7. Deeper tests/benchmarks from audit observations
-8. Run benchmarks again — prove the wins
-9. If audit heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, docs
-11. Version check — VERSION, Cargo.toml, recipe all in sync
-12. Return to step 1
+Project was scaffolded with `cyrius port`. Original Rust at `rust-old/` is the reference oracle — do not modify it; cross-check the port against it.
 
-### Task Sizing
+## Quick Start
 
-- **Low/Medium effort**: Batch freely — multiple items per work loop cycle
-- **Large effort**: Small bites only — break into sub-tasks, verify each before moving to the next. Never batch large items together
-- **If unsure**: Treat it as large. Smaller bites are always safer than overcommitting
-
-### Refactoring
-
-- Refactor when the code tells you to — duplication, unclear boundaries, performance bottlenecks
-- Never refactor speculatively. Wait for the third instance before extracting an abstraction
-- Refactoring is part of the work loop, not a separate phase. If a review (step 5) reveals structural issues, refactor before moving to step 6
-- Every refactor must pass the same cleanliness + benchmark gates as new code
-
-### Key Principles
-
-- **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** Minimum 80%+ coverage target.
-- **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
-- **No magic.** Every operation is measurable, auditable, traceable.
-- **`#[non_exhaustive]`** on all public enums.
-- **`#[must_use]`** on all pure functions.
-- **`#[inline]`** on hot-path functions.
-- **`write!` over `format!`** — avoid temporary allocations.
-- **Cow over clone** — borrow when you can, allocate only when you must.
-- **Vec arena over HashMap** — when indices are known, direct access beats hashing.
-- **Feature-gate optional deps** — consumers pull only what they need.
-- **tracing on all operations** — structured logging for audit trail.
-
-## DO NOT
-- **Do not commit or push** — the user handles all git operations (commit, push, tag)
-
-- **NEVER use `gh` CLI** — use `curl` to GitHub API only
-- Do not add unnecessary dependencies — keep it lean
-- Do not `unwrap()` or `panic!()` in library code
-- Do not skip benchmarks before claiming performance improvements
-- Do not commit `target/` or `Cargo.lock` (library crates only)
-
-## Documentation Structure
-
-```
-Root files (required):
-  README.md          — quick start, features, dependency stack, consumers, license
-  CHANGELOG.md       — per-version changes (Added/Changed/Fixed/Removed)
-  CLAUDE.md          — this file (development process, principles, DO NOTs)
-  CONTRIBUTING.md    — fork, branch, make check, PR workflow
-  SECURITY.md        — supported versions, scope, reporting
-  CODE_OF_CONDUCT.md — Contributor Covenant
-  LICENSE            — GPL-3.0
-
-docs/ (required):
-  architecture/
-    overview.md      — module map, data flow, consumers, dependency stack
-    math.md          — (if applicable) mathematical reference for algorithms/formulas
-  development/
-    roadmap.md       — completed items, backlog, future features (demand-gated), v1.0 criteria
-
-docs/ (when earned — not scaffolded empty):
-  adr/
-    NNN-title.md     — architectural decision records (when non-obvious choices are made)
-  development/
-    threat-model.md  — attack surface, mitigations (when security-relevant)
-    dependency-watch.md — deps to monitor for updates/CVEs
-  guides/
-    usage.md         — patterns, philosophy, code examples
-    testing.md       — test count, coverage, testing patterns
-
-ADR format:
-  # NNN — Title
-  ## Status: Accepted/Superseded
-  ## Context: Why this decision was needed
-  ## Decision: What we chose
-  ## Consequences: Trade-offs, what changes
+```sh
+cyrius deps                              # resolve dependencies
+cyrius build src/main.cyr build/dhvani    # compile
+cyrius test                              # run tests/*.tcyr
 ```
 
-## CHANGELOG Format
+## Key Principles
 
-Follow [Keep a Changelog](https://keepachangelog.com/):
+- **Cross-check against `rust-old/`** — the port's correctness bar is "matches what Rust did". Diverge only with an ADR.
+- **Correctness over cleverness** — if the Cyrius behavior diverges silently from Rust, the bugs win
+- Test after every change, not after the feature is "done"
+- ONE change at a time — never bundle unrelated changes
+- Build with `cyrius build`, not raw `cat file | cc5` — the manifest auto-resolves deps
+- Source files only need project includes — stdlib auto-resolves from `cyrius.cyml`
+- `var buf[N]` = N **bytes**, not N entries
 
-```markdown
-# Changelog
+## Port Conventions (audio engine)
 
-## [Unreleased]
-### Added — new features
-### Changed — changes to existing features
-### Fixed — bug fixes
-### Removed — removed features
-### Security — vulnerability fixes
-### Performance — benchmark-proven improvements (include numbers)
+Full per-module ledger + established conventions live in
+[`docs/development/port-audit.md`](docs/development/port-audit.md). The load-bearing ones:
 
-## [X.Y.Z] - YYYY-MM-DD
-### Added
-- **module_name** — what was added and why
-### Changed
-- item: old behavior → new behavior
-### Fixed
-- issue description (root cause → fix)
-### Performance
-- benchmark_name: before → after (−XX%)
-```
+- **Alloc-free hot paths.** Cyrius runs a **free-less bump allocator** — a
+  per-sample or per-block heap allocation leaks unboundedly across a render.
+  Every process loop must allocate zero bytes/sample; reuse scratch owned by the
+  processor struct. (See naad 2.1.0: 4 hot paths fixed to 0 bytes/sample.)
+- **f32 → f64** throughout (the hisab/ganita math is f64-only; widening is
+  forced and improves precision). Loosen f32-oracle test tolerances where
+  bit-exactness isn't meaningful.
+- **enums → integer `var` codes**; **`Result`/`Option` → sentinel/error-code
+  returns** (`ERR_*`, NaN, `-1`, null) — payloads via `lib/tagged.cyr`. No
+  unwinding, no `panic`.
+- **closures → fn-ptr** (`fnptr`/`callback`); **`Vec`/`SmallVec` → stdlib `vec`**;
+  free fns get a `<module>_` prefix (one flat bundle namespace).
+- **serde round-trip + Display-string tests dropped** (no serde; integer codes).
+  All other `#[test]` blocks ported one-for-one into `tests/<mod>.tcyr`.
+- **Never skip benchmarks** — hot-path `.bcyr` numbers are the proof a port
+  didn't regress. Capture before claiming a win.
+- **Parallel-porting concurrency**: every `cyrius build/test/deps` call
+  re-resolves deps and races on `cyrius.lock` (concurrent runs corrupt it).
+  Serialize toolchain calls behind a file lock:
+  `flock <scratch>/dhvani-build.lock cyrius test …`.
 
-Rules:
-- Every PR/commit that changes behavior gets a CHANGELOG entry
-- Performance claims MUST include benchmark numbers
-- Breaking changes get a **Breaking** section with migration guide
-- Group by module when multiple changes in one release
-- Link to ADR if a change was driven by an architectural decision
+## Rules (Hard Constraints)
+
+- **Do not commit or push** — the user handles all git operations
+- **Never use `gh` CLI** — use `curl` to the GitHub API if needed
+- Do not modify `rust-old/` — it's the parity oracle
+- Do not skip tests before claiming changes work
+- Do not modify `lib/` files (vendored stdlib / dep symlinks)
+- Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
+
+## Documentation
+
+- [`docs/adr/`](docs/adr/) — Architecture Decision Records (*why X over Y?*)
+- [`docs/architecture/`](docs/architecture/) — Non-obvious constraints
+- [`docs/guides/`](docs/guides/) — Task-oriented how-tos
+- [`docs/examples/`](docs/examples/) — Runnable examples
+- [`docs/development/state.md`](docs/development/state.md) — Live state
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through v1.0
+

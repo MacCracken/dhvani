@@ -1,0 +1,80 @@
+# clock.tcyr -- parity tests for src/clock.cyr
+# Ported one-for-one from the 9 #[test] blocks in rust-old/src/clock/mod.rs.
+# Option::is_some/is_none -> dhvani_is_finite (NaN sentinel == None).
+# Approximate float asserts: |a-b| < tol.
+
+include "src/error.cyr"
+include "src/clock.cyr"
+
+alloc_init();
+
+# |a - b| < tol  -> 1 else 0
+fn near(a, b, tol) {
+    return f64_lt(f64_abs(f64_sub(a, b)), tol);
+}
+
+# ---- clock_basic ----
+test_group("clock_basic");
+var c1 = dhvani_clock_new(44100);
+assert_eq(dhvani_clock_position_samples(c1), 0, "starts at sample 0");
+assert_eq(dhvani_clock_is_running(c1), 0, "starts stopped");
+dhvani_clock_start(c1);
+dhvani_clock_advance(c1, 44100);
+assert(near(dhvani_clock_position_secs(c1), 1.0, 0.001), "1s after 44100 frames");
+
+# ---- clock_no_advance_when_stopped ----
+test_group("clock_no_advance_when_stopped");
+var c2 = dhvani_clock_new(44100);
+dhvani_clock_advance(c2, 44100);
+assert_eq(dhvani_clock_position_samples(c2), 0, "stopped clock does not advance");
+
+# ---- clock_seek ----
+test_group("clock_seek");
+var c3 = dhvani_clock_new(48000);
+dhvani_clock_seek_secs(c3, 2.5);
+assert_eq(dhvani_clock_position_samples(c3), 120000, "2.5s @ 48000 = 120000 samples");
+assert(near(dhvani_clock_position_secs(c3), 2.5, 0.001), "position_secs == 2.5");
+
+# ---- clock_tempo ----
+test_group("clock_tempo");
+var c4 = dhvani_clock_with_tempo(44100, 120.0);
+assert_eq(dhvani_is_finite(dhvani_clock_samples_per_beat(c4)), 1, "samples_per_beat is Some");
+assert(near(dhvani_clock_samples_per_beat(c4), 22050.0, 1.0), "22050 samples/beat @ 120bpm");
+
+# ---- clock_beats_position ----
+test_group("clock_beats_position");
+var c5 = dhvani_clock_with_tempo(44100, 120.0);
+dhvani_clock_start(c5);
+dhvani_clock_advance(c5, 44100);   # 1s = 2 beats @ 120bpm
+assert(near(dhvani_clock_position_beats(c5), 2.0, 0.01), "2 beats after 1s");
+
+# ---- clock_no_beats_without_tempo ----
+test_group("clock_no_beats_without_tempo");
+var c6 = dhvani_clock_new(44100);
+assert_eq(dhvani_is_finite(dhvani_clock_position_beats(c6)), 0, "position_beats is None");
+assert_eq(dhvani_is_finite(dhvani_clock_samples_per_beat(c6)), 0, "samples_per_beat is None");
+
+# ---- clock_pts ----
+test_group("clock_pts");
+var c7 = dhvani_clock_new(48000);
+dhvani_clock_start(c7);
+dhvani_clock_advance(c7, 48000);   # 1s
+assert_eq(dhvani_clock_pts_us(c7), 1000000, "1s = 1_000_000 us");
+
+# ---- clock_reset ----
+test_group("clock_reset");
+var c8 = dhvani_clock_new(44100);
+dhvani_clock_start(c8);
+dhvani_clock_advance(c8, 44100);
+dhvani_clock_reset(c8);
+assert_eq(dhvani_clock_position_samples(c8), 0, "reset returns to 0");
+
+# ---- clock_ms ----
+test_group("clock_ms");
+var c9 = dhvani_clock_new(44100);
+dhvani_clock_start(c9);
+dhvani_clock_advance(c9, 441);     # 10ms
+assert(near(dhvani_clock_position_ms(c9), 10.0, 0.1), "10ms after 441 frames");
+
+var rc = assert_summary();
+syscall(60, rc);

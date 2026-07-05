@@ -1,0 +1,72 @@
+# error.cyr -- dhvani error codes + shared f64 tolerances/sentinels + base helpers.
+# L0 base module: included FIRST by every build/test entry. Modules never
+# `include` each other -- the entry file orders them.
+#
+# Ports rust-old/src/error.rs (the `NadaError` enum, 9 variants). Rust carried
+# a String/int payload per variant; the Cyrius port uses integer codes --
+# fallible fns return DHVANI_ERR_NONE (0) on success or a negative code on
+# failure. Diagnostic text via dhvani_err_name(). The rich struct-variant
+# context (expected/actual strings) is dropped (can't ride an i64 code).
+#
+# NAMING: every dhvani top-level symbol is `dhvani_`/`DHVANI_`/`DH_`-prefixed so
+# the dhvani distlib coexists with the sibling bundles it pulls (naad exports
+# bare ERR_NONE / validate_sample_rate / flush_denormal; svara exports SVARA_*)
+# in one flat namespace.
+#
+# FLOATS: dhvani's Rust stored f32 samples; the Cyrius port is f64 throughout
+# (the audio-stack math is f64-only). DH_EPSILON preserves the f32::EPSILON
+# (2^-23) tolerance the Rust tests used, promoted to f64.
+
+# ================================================================
+# Error codes (was `enum NadaError`). One per Rust variant, in order.
+# ================================================================
+var DHVANI_ERR_NONE                = 0;
+var DHVANI_ERR_FORMAT_MISMATCH     = (0 - 1);   # buffer format (rate/channels) mismatch
+var DHVANI_ERR_LENGTH_MISMATCH     = (0 - 2);   # buffer sample count mismatch
+var DHVANI_ERR_INVALID_SAMPLE_RATE = (0 - 3);   # sample rate zero / out of range
+var DHVANI_ERR_INVALID_CHANNELS    = (0 - 4);   # channel count zero / exceeds max
+var DHVANI_ERR_DSP                 = (0 - 5);   # DSP processing error
+var DHVANI_ERR_CAPTURE             = (0 - 6);   # audio capture/output error
+var DHVANI_ERR_INVALID_PARAMETER   = (0 - 7);   # a named parameter out of range
+var DHVANI_ERR_CONVERSION          = (0 - 8);   # format conversion error
+var DHVANI_ERR_OTHER               = (0 - 9);   # wrapped external error
+
+# ================================================================
+# Shared f64 tolerances / sentinels (IEEE-754 bit patterns). Exported for the
+# whole crate (converters, filters, tests). DH_EPSILON = f32::EPSILON promoted.
+# ================================================================
+var DH_EPSILON = 0x3E80000000000000;   # f32::EPSILON = 2^-23 ~ 1.192e-7
+var DH_POS_INF = 0x7FF0000000000000;   # +inf
+var DH_NEG_INF = 0xFFF0000000000000;   # -inf (amplitude_to_db(<=0) sentinel)
+
+# 1 if `code` is an error (negative), 0 otherwise.
+#must_use
+fn dhvani_is_err(code) {
+    if (code < 0) { return 1; }
+    return 0;
+}
+
+# Static name for an error code (for diagnostics / logging). Mirrors the Rust
+# Display messages, minus the runtime payload (expected/actual/name/value).
+#must_use
+fn dhvani_err_name(code) {
+    if (code == DHVANI_ERR_NONE)                { return "none"; }
+    if (code == DHVANI_ERR_FORMAT_MISMATCH)     { return "buffer format mismatch"; }
+    if (code == DHVANI_ERR_LENGTH_MISMATCH)     { return "buffer length mismatch"; }
+    if (code == DHVANI_ERR_INVALID_SAMPLE_RATE) { return "invalid sample rate"; }
+    if (code == DHVANI_ERR_INVALID_CHANNELS)    { return "invalid channel count"; }
+    if (code == DHVANI_ERR_DSP)                 { return "DSP error"; }
+    if (code == DHVANI_ERR_CAPTURE)             { return "capture error"; }
+    if (code == DHVANI_ERR_INVALID_PARAMETER)   { return "invalid parameter"; }
+    if (code == DHVANI_ERR_CONVERSION)          { return "conversion error"; }
+    if (code == DHVANI_ERR_OTHER)               { return "other error"; }
+    return "unknown error";
+}
+
+# Finite test: 1 iff x is neither +/-inf nor NaN. abs(x) < +inf holds for
+# finite x, fails for infinities (inf < inf is false) and NaN (any NaN
+# compare is false). Mirrors Rust `f32::is_finite`.
+#must_use
+fn dhvani_is_finite(x) {
+    return f64_lt(f64_abs(x), DH_POS_INF);
+}

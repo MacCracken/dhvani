@@ -1,0 +1,81 @@
+[package]
+name = "dhvani"
+version = "${file:VERSION}"
+description = "dhvani — core audio engine (buffers, format conversion, mixing, resampling, DSP, analysis, MIDI, graph, synthesis, capture). Cyrius port of a 23,695-line Rust library."
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/dhvani"
+language = "cyrius"
+cyrius = "6.4.2"
+
+[build]
+entry = "src/main.cyr"
+output = "build/dhvani"
+
+# `[lib]` declares the distlib bundle `cyrius distlib` writes into
+# `dist/dhvani.cyr` — every ported module concatenated in dependency order
+# (deps before dependents), each self-contained (no `include` lines), sharing
+# one flat namespace. Grows one entry per ported module; the authoritative
+# order is the ledger in docs/development/port-audit.md. Empty until L0 lands.
+[lib]
+modules = [
+]
+
+# stdlib: base set + the DSP/math set naad/svara use. `math` gives
+# clamp/min/max/lerp/sign + F64_* constants; `ganita` the transcendentals
+# dhvani's DSP leans on (sin/cos/exp/ln/pow/sqrt/tanh/…); `tagged` for the
+# Option-shaped payload returns; `fnptr`/`callback` for the closure→fn-ptr
+# port pattern; `bench` for `.bcyr` harnesses.
+[deps]
+stdlib = [
+    "syscalls",
+    "string",
+    "alloc",
+    "str",
+    "fmt",
+    "vec",
+    "io",
+    "args",
+    "assert",
+    "math",
+    "ganita",
+    "tagged",
+    "fnptr",
+    "callback",
+    "bench",
+]
+
+# ── Dependency wiring — uncomment per port wave (see port-audit.md) ─────────
+#
+# Math base. Rust dhvani used `abaco::dsp` (amplitude_to_db, poly_blep,
+# panning, filters). But every audio sibling dhvani consumes
+# (naad/svara/goonj/prani/garjan/ghurni/nidhi) pulls `hisab`, so dhvani pulls
+# hisab transitively regardless. Whether dhvani's OWN math stays on abaco or
+# standardizes on hisab (as the rest of the audio stack did) is an open port
+# decision — resolve it when the foundation/dsp wave lands and record an ADR.
+# Both are listed; prune the loser once decided.
+#
+# [deps.hisab]
+# git = "https://github.com/MacCracken/hisab.git"
+# tag = "2.6.7"
+# modules = ["dist/hisab.cyr"]
+#
+# [deps.abaco]
+# git = "https://github.com/MacCracken/abaco.git"
+# tag = "2.3.1"
+# modules = ["dist/abaco.cyr"]
+#
+# ── Synthesis stack — feature-gated modules; wire when that wave starts.
+#    Each bundle references hisab (+ goonj/sakshi transitively); all resolve
+#    from this manifest. Pinned to released tags for a coherent bundle.
+#
+# [deps.naad]    tag 2.1.0  — synthesis/mod
+# [deps.svara]   tag 3.0.0  — voice_synth/mod   (bundle references naad + goonj + hisab)
+# [deps.prani]   tag 2.0.1  — creature/mod
+# [deps.nidhi]   tag 2.0.0  — sampler/mod
+# [deps.garjan]  tag 2.0.0  — environment/mod
+# [deps.ghurni]  tag 2.0.0  — mechanical/mod
+# [deps.goonj]   tag 2.0.0  — acoustics/mod
+#
+# ── BLOCKED — dependency not yet ported to Cyrius (still Rust) ──────────────
+#    shabda → `g2p` feature                     (port shabda first)
+#    bhava  → `bhava-voice` / voice_synth/bhava_bridge  (port bhava first)

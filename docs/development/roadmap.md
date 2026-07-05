@@ -1,89 +1,126 @@
-# Dhvani Roadmap
+# dhvani — Roadmap
 
-> **Principle**: Correctness first, then SIMD, then capture backends. Every consumer gets the same audio math.
+> Milestone plan for the Rust → Cyrius port (**→ 2.0.0**). State lives in
+> [`state.md`](state.md); per-module parity in [`port-audit.md`](port-audit.md);
+> this file is the **sequencing** — what ships, in what order, against what
+> dependency gates.
 
----
+## 2.0.0 criteria (port complete)
 
-## v1.0.0 Criteria — All Met
+- [ ] All portable Rust modules ported function-for-function vs `rust-old/`
+      (~55 of 64 — see the blocked list below for the remainder)
+- [ ] Every ported module has a `tests/<mod>.tcyr` suite, all green (each Rust
+      `#[test]` ported one-for-one, minus serde/Display tests)
+- [ ] `[lib]` distlib bundle `dist/dhvani.cyr` assembled; symbol-collision audit
+      clean (one flat namespace)
+- [ ] Hot-path benchmarks captured (buffer mix/convert/resample, biquad/SVF,
+      FFT, graph render) in `docs/benchmarks.md`
+- [ ] `abaco`-vs-`hisab` math decision recorded as an ADR; loser pruned from
+      `cyrius.cyml`
+- [ ] CHANGELOG `[2.0.0]` complete; `VERSION` = 2.0.0
+- [ ] At least one downstream consumer (shruti / jalwa / aethersafta) builds
+      against the Cyrius bundle
+- [ ] Clean gate: `cyrius fmt` + `lint` + tests + bench green
 
-- [x] API frozen: all fields private, accessors only
-- [x] No panics in non-test code
-- [x] All unsafe blocks have `// SAFETY:` comments
-- [x] DSP effects within 0.01 dB of reference implementations
-- [x] SIMD parity verified on x86_64 (SSE2 + AVX2) and aarch64 (NEON)
-- [x] Format conversion: i16, i24, i32, f32, f64, u8 — all with roundtrip tests
-- [x] PipeWire capture/output tested with live daemon
-- [x] 90%+ test coverage (90.02% line coverage via cargo-llvm-cov)
-- [x] docs.rs complete — every public type documented
-- [x] Golden benchmark numbers published
-- [x] Zero clippy warnings
-- [x] Supply chain clean (audit + deny + vet)
+## Milestones
 
----
+### M0 — Port scaffold (2.0.0-dev) — ✅ shipped 2026-07-04
 
-## Consumer Adoption (post-v1)
+- `cyrius port` scaffold; Rust source frozen at `rust-old/` (23,695 lines).
+- `cyrius.cyml` set up (stdlib + DSP-math set; dep wiring commented per-wave).
+- `VERSION` → 2.0.0; smoke binary builds (`cyrius build`).
+- Tracking docs: state.md, port-audit.md, roadmap.md.
 
-- [ ] shruti adopts dhvani (replace shruti-engine + shruti-dsp + shruti-session MIDI)
-- [ ] jalwa adopts dhvani (replace playback buffer + EQ + normalization)
-- [ ] aethersafta adopts dhvani (replace PipeWire capture + mixer)
-- [ ] tazama uses dhvani DSP (replace tazama-media/dsp/)
-- [ ] hoosh uses `dhvani::midi` for music token preprocessing
-- [ ] Cross-crate integration tests
-- [ ] Benchmark regression: dhvani not slower than code it replaces
+### M1 — Foundation (Wave A) — core, always-on
 
----
+`error` · `clock` · `simd` (scalar kernels only) · `buffer/{mod,convert,resample,dither}`.
+- Port `BufferPool` early — it's the alloc-free convention for the whole crate.
+- **Decide `abaco` vs `hisab`** for dhvani's own math; record the ADR.
+- Gate: none (core). Acceptance: buffer roundtrip + format-conversion parity.
 
-## Backlog — Demand-Gated
+### M2 — DSP core (Waves B–C) — `dsp`
 
-### Advanced DSP
+- **Wave B**: `oscillator`, `gain_smoother`, `envelope`, `lfo`, `automation`,
+  `pan`, `svf`, `biquad`, `dsp/mod`, `routing`, `buffer/ops`.
+- **Wave C**: `eq`, `deesser`, `compressor`, `limiter`, `delay`, `reverb`,
+  `graphic_eq`.
+- Fix the bump-allocator hot paths (eq dry-clone, routing/graphic_eq rebuild)
+  before porting their render loops.
+- Gate: `dsp`. Each module green before its dependents start.
 
-- [ ] Multiband compressor
-- [ ] Noise suppression (RNNoise or custom)
-- [ ] Pitch shifting (phase vocoder)
-- [ ] Time stretching (WSOLA / phase vocoder)
+### M3 — Analysis (Wave D) — `analysis`
 
-### MIDI Advanced
+- `waveform`, `zcr`, `analysis/mod`, `fft`, `dynamics`, `loudness` (needs
+  biquad from M2), `stft`, `chroma`, `convolution` + `noise_reduction` (need
+  fft), `key`, `onset`, `beat`.
+- Gate: `analysis`. Unlocks the analysis-gated buffer fns (`normalize_to_lufs`).
 
-- [ ] SMF (Standard MIDI File) read/write
-- [ ] MIDI clock / sync (MTC, SPP)
-- [ ] SysEx handling
-- [ ] MPE zone management
-- [ ] MIDI tokenization for music LLMs
+### M4 — MIDI · graph · meter · capture (Wave E) — `midi` / `graph` / `pipewire`
 
-### Platform Backends
+- `midi/{mod,voice,routing,v2,translate}` (define the 3 missing abaco note
+  constants locally), `meter`, `graph` (largest module, RT-safe — preallocate
+  all node scratch), `capture/{mod,record}` (portable; **not** `capture/pw`).
+- Gate: `midi`, `graph`. Acceptance: graph render alloc-free per block.
 
-- [ ] CoreAudio (macOS)
-- [ ] WASAPI (Windows)
-- [ ] JACK (pro audio)
-- [ ] WASM (Web Audio API)
+### M5 — Synthesis stack (Wave F) — feature-gated sibling wrappers
 
-### High Sample Rate
+- Wire `[deps]`: naad 2.1.0, svara 3.0.0, prani 2.0.1, nidhi 2.0.0,
+  garjan 2.0.0, ghurni 2.0.0, goonj 2.0.0 (all bundles resolve hisab/goonj/
+  sakshi from this manifest).
+- `synthesis/mod`(naad), `sampler`(nidhi), `creature`(prani),
+  `environment`(garjan), `mechanical`(ghurni), `voice_synth/mod`(svara),
+  `acoustics`(goonj).
+- Gate: `synthesis`, `voice`, `creature`, `environment`, `mechanical`,
+  `sampler`, `acoustics`.
 
-- [ ] Validated resampling paths: 44.1k ↔ 48k ↔ 88.2k ↔ 96k ↔ 176.4k ↔ 192k ↔ 352.8k ↔ 384k ↔ 768k
-- [ ] Multi-stage resampling for large ratio conversions
-- [ ] Oversampled DSP mode — 2x/4x internal rate for reduced aliasing
-- [ ] Sinc resampler optimization for high-rate conversions
+### M6 — Assembly & release (Wave G) — 2.0.0 tag
 
-### Format — Niche
+- `lib` facade → `[lib] modules` order; assemble `dist/dhvani.cyr`; collision
+  audit; port `tests/{mod,proptest}` (drop `serde_tests`); hot-path benches;
+  pin deps to git+tag; **bump/confirm `VERSION` = 2.0.0**.
 
-- [ ] u8 a-law / u-law (G.711) — telephony codecs
-- [ ] i8 (signed 8-bit) — embedded audio
-- [ ] DSD (1-bit) — SACD / audiophile playback
-- [ ] Ambisonic (3D audio) channel layouts
+## Blocked from porting — deferred past 2.0.0
 
-### Voice Synthesis
+The audit ([`port-audit.md`](port-audit.md)) found nine modules that cannot port
+now. Two kinds:
 
-- [x] Bhava integration — personality-to-prosody mapping (v1.1.0, feature: `bhava-voice`)
-- [ ] Articulatory modeling — graduate from formant when demand justifies
+### Waiting on an unported Cyrius dependency
 
----
+| Feature | Module(s) | Blocks on | Unblocks when |
+|---------|-----------|-----------|---------------|
+| `g2p` | `g2p/mod` (269 LOC, 14 tests) | **shabda** (still Rust) | shabda ports to Cyrius |
+| `bhava-voice` | `voice_synth/bhava_bridge` (881 LOC, 38 tests) | **bhava** (still Rust) | bhava ports to Cyrius |
 
-## Non-goals
+> All *other* dhvani deps are already ported (abaco, naad, svara, prani, nidhi,
+> garjan, ghurni, goonj). shabda and bhava are the only two holdouts — porting
+> them upstream is the prerequisite for these two dhvani features.
 
-- **Audio I/O (file read/write)** — shravan / tarang
-- **Plugin hosting (VST/CLAP/LV2)** — shruti
-- **Music composition / sequencing / timeline** — shruti
-- **Streaming protocols (RTMP/SRT)** — aethersafta
-- **DAW UI / preset management** — shruti
-- **Neural TTS / ML-based voice** — hoosh
-- **Text-to-phoneme ML models** — hoosh
+### Waiting on a Cyrius platform primitive (no equivalent yet)
+
+| Area | Module(s) | Reason | Path forward |
+|------|-----------|--------|--------------|
+| SIMD acceleration | `simd/x86`, `simd/aarch64` | raw SSE2/AVX2/NEON intrinsics, `#[target_feature]` unsafe, CPU feature detection | scalar kernels ship in 2.0.0; accept the throughput regression until Cyrius has a SIMD story. dhvani owns SIMD dispatch for the ecosystem, so this is the natural home for it later. |
+| C-ABI FFI | `ffi` | `extern "C"`/`#[no_mangle]`/raw-pointer handles/`CString`; free-less allocator breaks `*_free` | defer; consumers are Cyrius-native. Re-architect as an in-language handle table only if a C boundary is needed. |
+| PipeWire capture | `capture/pw` | PipeWire/`spa` unsafe FFI | defer behind the `pipewire` gate until Cyrius has an audio-device backend. |
+
+## Post-2.0.0 — deferred backlog (carried from the Rust roadmap)
+
+Parity first; these resume once the port is green. Demand-gated.
+
+- **Consumer adoption**: shruti (DAW), jalwa (player), aethersafta (compositor),
+  kiran (game audio) build against the Cyrius bundle.
+- **Advanced DSP**: multiband compressor, noise suppression, pitch shift /
+  time stretch (phase vocoder / WSOLA).
+- **MIDI advanced**: SMF read/write, MIDI clock/MTC/SPP, SysEx, MPE.
+- **Platform backends**: JACK, and (pending Cyrius FFI) CoreAudio / WASAPI /
+  WASM — plus the PipeWire capture unblock above.
+- **High sample rate**: validated 44.1k↔…↔768k paths, multi-stage resampling,
+  oversampled DSP.
+- **Formats — niche**: a-law/µ-law (G.711), i8, DSD, ambisonic layouts.
+- **SIMD re-acceleration** once Cyrius exposes vector intrinsics.
+
+## Out of scope (unchanged from Rust)
+
+- Audio file I/O (shravan / tarang), plugin hosting (shruti), composition /
+  sequencing / timeline (shruti), streaming protocols (aethersafta), DAW UI
+  (shruti), neural TTS / text-to-phoneme ML models (hoosh).
