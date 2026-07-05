@@ -1,0 +1,131 @@
+# compressor.cyr -- dynamic range compressor (dB-domain, envelope follower).
+# Ports rust-old/src/dsp/compressor.rs. L1: deps error + simd + buffer + dsp
+# (soft_knee_gain) + abaco (time_constant, amplitude_to_db, db_to_amplitude).
+# new()/set_params() Result -> handle-or-null / error code. serde + with_*
+# builders dropped (untested convenience). knee via dsp::soft_knee_gain.
+
+#derive(accessors)
+struct DhCompressorParams { threshold_db; ratio; attack_ms; release_ms; makeup_gain_db; knee_db; mix; }
+
+#derive(accessors)
+struct DhCompressor { params; envelope_db; gain_reduction_db; sample_rate; bypassed; }
+
+# ---- CompressorParams ----
+#must_use
+fn dhvani_compparams_new(threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, knee_db, mix) {
+    var p = alloc(sizeof(DhCompressorParams));
+    DhCompressorParams_set_threshold_db(p, threshold_db);
+    DhCompressorParams_set_ratio(p, ratio);
+    DhCompressorParams_set_attack_ms(p, attack_ms);
+    DhCompressorParams_set_release_ms(p, release_ms);
+    DhCompressorParams_set_makeup_gain_db(p, makeup_gain_db);
+    DhCompressorParams_set_knee_db(p, knee_db);
+    DhCompressorParams_set_mix(p, mix);
+    return p;
+}
+#must_use
+fn dhvani_compparams_default() { return dhvani_compparams_new(f64_neg(20.0), 4.0, 10.0, 100.0, 0, 0, 1.0); }
+
+# validate -- ratio>=1, attack/release/knee >= 0.
+#must_use
+fn dhvani_compparams_validate(p) {
+    if (f64_lt(DhCompressorParams_ratio(p), 1.0) == 1)       { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhCompressorParams_attack_ms(p), 0) == 1)     { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhCompressorParams_release_ms(p), 0) == 1)    { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhCompressorParams_knee_db(p), 0) == 1)       { return DHVANI_ERR_INVALID_PARAMETER; }
+    return DHVANI_ERR_NONE;
+}
+
+# ---- Compressor ----
+# new(params, sample_rate) -- handle, or 0 if params invalid.
+#must_use
+fn dhvani_comp_new(params, sample_rate) {
+    if (dhvani_is_err(dhvani_compparams_validate(params)) == 1) { return 0; }
+    var self = alloc(sizeof(DhCompressor));
+    DhCompressor_set_params(self, params);
+    DhCompressor_set_envelope_db(self, f64_neg(120.0));
+    DhCompressor_set_gain_reduction_db(self, 0);
+    DhCompressor_set_sample_rate(self, sample_rate);
+    DhCompressor_set_bypassed(self, 0);
+    return self;
+}
+
+# gain curve for an envelope level (dB): slope = 1/ratio - 1.
+#must_use
+fn dhvani_comp_compute_gain(self, env_db) {
+    var p = DhCompressor_params(self);
+    var slope = f64_sub(f64_div(1.0, DhCompressorParams_ratio(p)), 1.0);
+    return dhvani_dsp_soft_knee_gain(env_db, DhCompressorParams_threshold_db(p), DhCompressorParams_knee_db(p), slope);
+}
+
+# process(buf) -- compress in place.
+fn dhvani_comp_process(self, buf) {
+    var p = DhCompressor_params(self);
+    if (f64_le(DhCompressorParams_ratio(p), 1.0) == 1) { return 0; }
+    if (DhCompressor_bypassed(self) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var sr = DhCompressor_sample_rate(self);
+    var attack_coeff = time_constant(DhCompressorParams_attack_ms(p), sr);
+    var release_coeff = time_constant(DhCompressorParams_release_ms(p), sr);
+    var makeup_lin = db_to_amplitude(DhCompressorParams_makeup_gain_db(p));
+    var mix = f64_clamp(DhCompressorParams_mix(p), 0, 1.0);
+    var dry = f64_sub(1.0, mix);
+    var env_db = DhCompressor_envelope_db(self);
+    var frame = 0;
+    while (frame < frames) {
+        var peak = 0;
+        var c = 0;
+        while (c < ch) {
+            peak = f64_max(peak, f64_abs(vec_get(samples, frame * ch + c)));
+            c = c + 1;
+        }
+        var input_db = f64_max(amplitude_to_db(peak), f64_neg(120.0));
+        var coeff = release_coeff;
+        if (f64_gt(input_db, env_db) == 1) { coeff = attack_coeff; }
+        env_db = f64_add(f64_mul(coeff, env_db), f64_mul(f64_sub(1.0, coeff), input_db));
+        var gain_db = dhvani_comp_compute_gain(self, env_db);
+        DhCompressor_set_gain_reduction_db(self, gain_db);
+        if (dhvani_is_finite(gain_db) == 1) {
+            var gain_lin = f64_mul(db_to_amplitude(gain_db), makeup_lin);
+            var c2 = 0;
+            while (c2 < ch) {
+                var idx = frame * ch + c2;
+                var dry_sample = vec_get(samples, idx);
+                var wet_sample = f64_mul(dry_sample, gain_lin);
+                var out = f64_add(f64_mul(dry_sample, dry), f64_mul(wet_sample, mix));
+                if (dhvani_is_finite(out) == 0) { out = 0; }
+                vec_set(samples, idx, out);
+                c2 = c2 + 1;
+            }
+        }
+        frame = frame + 1;
+    }
+    DhCompressor_set_envelope_db(self, env_db);
+    return 0;
+}
+
+#inline
+#must_use
+fn dhvani_comp_gain_reduction_db(self) { return DhCompressor_gain_reduction_db(self); }
+#inline
+#must_use
+fn dhvani_comp_envelope_db(self) { return DhCompressor_envelope_db(self); }
+fn dhvani_comp_set_bypass(self, bypassed) { DhCompressor_set_bypassed(self, bypassed); return 0; }
+#must_use
+fn dhvani_comp_is_bypassed(self) { if (DhCompressor_bypassed(self) == 1) { return 1; } return 0; }
+fn dhvani_comp_set_sample_rate(self, sample_rate) { DhCompressor_set_sample_rate(self, sample_rate); return 0; }
+fn dhvani_comp_reset(self) {
+    DhCompressor_set_envelope_db(self, f64_neg(120.0));
+    DhCompressor_set_gain_reduction_db(self, 0);
+    return 0;
+}
+
+# set_params -- validate then store; error code on invalid.
+fn dhvani_comp_set_params(self, params) {
+    var rc = dhvani_compparams_validate(params);
+    if (dhvani_is_err(rc) == 1) { return rc; }
+    DhCompressor_set_params(self, params);
+    return DHVANI_ERR_NONE;
+}

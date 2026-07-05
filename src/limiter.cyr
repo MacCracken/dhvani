@@ -1,0 +1,122 @@
+# limiter.cyr -- brick-wall envelope limiter (instant attack, soft-knee).
+# Ports rust-old/src/dsp/limiter.rs. L1: deps error + simd + buffer + dsp
+# (soft_knee_gain) + abaco (time_constant, amplitude_to_db, db_to_amplitude).
+# Limiter = inf:1 compression -> soft_knee slope = -1.0. serde + with_* dropped.
+
+#derive(accessors)
+struct DhLimiterParams { ceiling_db; release_ms; knee_db; mix; }
+
+#derive(accessors)
+struct DhEnvelopeLimiter { params; envelope_db; sample_rate; bypassed; }
+
+# ---- LimiterParams ----
+#must_use
+fn dhvani_limparams_new(ceiling_db, release_ms, knee_db, mix) {
+    var p = alloc(sizeof(DhLimiterParams));
+    DhLimiterParams_set_ceiling_db(p, ceiling_db);
+    DhLimiterParams_set_release_ms(p, release_ms);
+    DhLimiterParams_set_knee_db(p, knee_db);
+    DhLimiterParams_set_mix(p, mix);
+    return p;
+}
+#must_use
+fn dhvani_limparams_default() { return dhvani_limparams_new(f64_neg(0.3), 50.0, 0, 1.0); }
+
+# validate -- ceiling <= 0, release/knee >= 0.
+#must_use
+fn dhvani_limparams_validate(p) {
+    if (f64_gt(DhLimiterParams_ceiling_db(p), 0) == 1)    { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhLimiterParams_release_ms(p), 0) == 1)    { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhLimiterParams_knee_db(p), 0) == 1)       { return DHVANI_ERR_INVALID_PARAMETER; }
+    return DHVANI_ERR_NONE;
+}
+
+# ---- EnvelopeLimiter ----
+#must_use
+fn dhvani_lim_new(params, sample_rate) {
+    if (dhvani_is_err(dhvani_limparams_validate(params)) == 1) { return 0; }
+    var self = alloc(sizeof(DhEnvelopeLimiter));
+    DhEnvelopeLimiter_set_params(self, params);
+    DhEnvelopeLimiter_set_envelope_db(self, f64_neg(120.0));
+    DhEnvelopeLimiter_set_sample_rate(self, sample_rate);
+    DhEnvelopeLimiter_set_bypassed(self, 0);
+    return self;
+}
+
+# gain curve (slope = -1.0, i.e. inf:1).
+#must_use
+fn dhvani_lim_compute_gain(self, env_db) {
+    var p = DhEnvelopeLimiter_params(self);
+    return dhvani_dsp_soft_knee_gain(env_db, DhLimiterParams_ceiling_db(p), DhLimiterParams_knee_db(p), f64_neg(1.0));
+}
+
+# process(buf) -- limit in place with a hard-clamp safety net.
+fn dhvani_lim_process(self, buf) {
+    if (DhEnvelopeLimiter_bypassed(self) == 1) { return 0; }
+    var p = DhEnvelopeLimiter_params(self);
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var release_coeff = time_constant(DhLimiterParams_release_ms(p), DhEnvelopeLimiter_sample_rate(self));
+    var ceiling_lin = db_to_amplitude(DhLimiterParams_ceiling_db(p));
+    var neg_ceiling = f64_neg(ceiling_lin);
+    var mix = f64_clamp(DhLimiterParams_mix(p), 0, 1.0);
+    var dry = f64_sub(1.0, mix);
+    var env_db = DhEnvelopeLimiter_envelope_db(self);
+    var frame = 0;
+    while (frame < frames) {
+        var peak = 0;
+        var c = 0;
+        while (c < ch) {
+            peak = f64_max(peak, f64_abs(vec_get(samples, frame * ch + c)));
+            c = c + 1;
+        }
+        var input_db = f64_max(amplitude_to_db(peak), f64_neg(120.0));
+        if (f64_gt(input_db, env_db) == 1) {
+            env_db = input_db;
+        } else {
+            env_db = f64_add(f64_mul(release_coeff, env_db), f64_mul(f64_sub(1.0, release_coeff), input_db));
+        }
+        var gain_db = dhvani_lim_compute_gain(self, env_db);
+        if (f64_lt(gain_db, 0) == 1) {
+            if (dhvani_is_finite(gain_db) == 1) {
+                var gain_lin = db_to_amplitude(gain_db);
+                var c2 = 0;
+                while (c2 < ch) {
+                    var idx = frame * ch + c2;
+                    var dry_sample = vec_get(samples, idx);
+                    vec_set(samples, idx, f64_add(f64_mul(dry_sample, dry), f64_mul(f64_mul(dry_sample, gain_lin), mix)));
+                    c2 = c2 + 1;
+                }
+            }
+        }
+        # hard-clamp safety net on every channel
+        var c3 = 0;
+        while (c3 < ch) {
+            var idx3 = frame * ch + c3;
+            vec_set(samples, idx3, f64_clamp(vec_get(samples, idx3), neg_ceiling, ceiling_lin));
+            c3 = c3 + 1;
+        }
+        frame = frame + 1;
+    }
+    DhEnvelopeLimiter_set_envelope_db(self, env_db);
+    return 0;
+}
+
+#must_use
+fn dhvani_lim_gain_reduction_db(self) { return dhvani_lim_compute_gain(self, DhEnvelopeLimiter_envelope_db(self)); }
+#inline
+#must_use
+fn dhvani_lim_envelope_db(self) { return DhEnvelopeLimiter_envelope_db(self); }
+fn dhvani_lim_set_bypass(self, bypassed) { DhEnvelopeLimiter_set_bypassed(self, bypassed); return 0; }
+#must_use
+fn dhvani_lim_is_bypassed(self) { if (DhEnvelopeLimiter_bypassed(self) == 1) { return 1; } return 0; }
+fn dhvani_lim_set_sample_rate(self, sample_rate) { DhEnvelopeLimiter_set_sample_rate(self, sample_rate); return 0; }
+fn dhvani_lim_reset(self) { DhEnvelopeLimiter_set_envelope_db(self, f64_neg(120.0)); return 0; }
+
+fn dhvani_lim_set_params(self, params) {
+    var rc = dhvani_limparams_validate(params);
+    if (dhvani_is_err(rc) == 1) { return rc; }
+    DhEnvelopeLimiter_set_params(self, params);
+    return DHVANI_ERR_NONE;
+}

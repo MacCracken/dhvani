@@ -274,9 +274,13 @@ their upstream deps (svara for voice) are already ported.
 - ✅ `routing` → `src/routing.cyr` — N×M matrix; `Vec<Vec>`→flat arena
   (`out*inputs+inp`); apply Result→null-handle. **19 green**.
 
-**L1 layer complete.** Next: **Wave C** (DSP dependents) — `compressor`,
-`limiter`, `delay`, `reverb` (L1, use dsp/soft_knee + abaco), `eq`/`deesser`
-(L2, use biquad), `graphic_eq` (L3, uses eq).
+**L1 layer complete.** Wave C (DSP dependents) — in flight:
+- ✅ `compressor` → `src/compressor.cyr` — envelope follower; `dsp::soft_knee_gain`
+  (slope=1/ratio−1); abaco `time_constant`/dB math. **8 green**.
+- ✅ `limiter` → `src/limiter.cyr` — inf:1 (slope=−1), instant attack + hard-clamp
+  safety net. **10 green**.
+- ⬜ Next: `delay`, `reverb` (L1), `eq`/`deesser` (L2, wrap biquad), `graphic_eq`
+  (L3, wraps eq). Then re-enable the 7 deferred `dsp.tcyr` integration tests.
 
 ### Cyrius idioms confirmed (this port)
 

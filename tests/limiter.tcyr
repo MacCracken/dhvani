@@ -1,0 +1,101 @@
+# limiter.tcyr -- parity tests for src/limiter.cyr
+# Ported one-for-one from the 8 #[test] blocks in rust-old/src/dsp/limiter.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/dsp.cyr"
+include "src/limiter.cyr"
+
+alloc_init();
+
+fn make_sine(amplitude, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(i)), f64_from(44100));
+        vec_push(v, f64_mul(amplitude, f64_sin(ph)));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, 44100);
+}
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s); var i = 0;
+    while (i < n) { if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# ---- below_ceiling_unchanged ----
+test_group("below_ceiling_unchanged");
+var l1 = dhvani_lim_new(dhvani_limparams_new(0, 50.0, 0, 1.0), 44100);
+var b1 = make_sine(0.5, 4096);
+var r1 = dhvani_buffer_rms(b1);
+dhvani_lim_process(l1, b1);
+assert(f64_lt(f64_abs(f64_sub(dhvani_buffer_rms(b1), r1)), f64_mul(r1, 0.05)), "below ceiling ~unchanged");
+
+# ---- above_ceiling_limited ----
+test_group("above_ceiling_limited");
+var l2 = dhvani_lim_new(dhvani_limparams_new(f64_neg(6.0), 10.0, 0, 1.0), 44100);
+var b2 = make_sine(1.0, 4096);
+dhvani_lim_process(l2, b2);
+var cl2 = db_to_amplitude(f64_neg(6.0));
+assert(f64_le(dhvani_buffer_peak(b2), f64_add(cl2, 0.01)), "peak at/below ceiling");
+
+# ---- output_finite ----
+test_group("output_finite");
+var l3 = dhvani_lim_new(dhvani_limparams_default(), 44100);
+var b3 = make_sine(2.0, 4096);
+dhvani_lim_process(l3, b3);
+assert_eq(all_finite(b3), 1, "output finite");
+
+# ---- reset_clears_state ----
+test_group("reset_clears_state");
+var l4 = dhvani_lim_new(dhvani_limparams_default(), 44100);
+var b4 = make_sine(1.0, 1024);
+dhvani_lim_process(l4, b4);
+dhvani_lim_reset(l4);
+assert(f64_lt(f64_abs(f64_add(dhvani_lim_envelope_db(l4), 120.0)), 0.0000001), "envelope reset to -120");
+
+# ---- soft_knee_limits ----
+test_group("soft_knee_limits");
+var l5 = dhvani_lim_new(dhvani_limparams_new(f64_neg(6.0), 10.0, 6.0, 1.0), 44100);
+var b5 = make_sine(1.0, 4096);
+dhvani_lim_process(l5, b5);
+var cl5 = db_to_amplitude(f64_neg(6.0));
+assert(f64_le(dhvani_buffer_peak(b5), f64_add(cl5, 0.02)), "soft-knee peak <= ceiling");
+assert_eq(all_finite(b5), 1, "soft-knee output finite");
+
+# ---- gain_reduction_reports ----
+test_group("gain_reduction_reports");
+var l6 = dhvani_lim_new(dhvani_limparams_new(f64_neg(12.0), 10.0, 0, 1.0), 44100);
+var b6 = make_sine(1.0, 4096);
+dhvani_lim_process(l6, b6);
+assert(f64_lt(dhvani_lim_gain_reduction_db(l6), 0), "gain reduction applied");
+
+# ---- set_params_updates ----
+test_group("set_params_updates");
+var l7 = dhvani_lim_new(dhvani_limparams_default(), 44100);
+assert_eq(dhvani_lim_set_params(l7, dhvani_limparams_new(f64_neg(3.0), 100.0, 3.0, 1.0)), DHVANI_ERR_NONE, "set_params ok");
+var b7 = make_sine(1.0, 2048);
+dhvani_lim_process(l7, b7);
+assert_eq(all_finite(b7), 1, "finite after set_params");
+
+# ---- stereo_limiting ----
+test_group("stereo_limiting");
+var l8 = dhvani_lim_new(dhvani_limparams_new(f64_neg(6.0), 10.0, 0, 1.0), 44100);
+var sv8 = vec_new();
+var si8 = 0;
+while (si8 < 8192) {
+    var ph8 = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(si8 / 2)), f64_from(44100));
+    vec_push(sv8, f64_sin(ph8));
+    si8 = si8 + 1;
+}
+var b8 = dhvani_buffer_from_interleaved(sv8, 2, 44100);
+dhvani_lim_process(l8, b8);
+var cl8 = db_to_amplitude(f64_neg(6.0));
+assert(f64_le(dhvani_buffer_peak(b8), f64_add(cl8, 0.02)), "stereo peak <= ceiling");
+
+var rc = assert_summary();
+syscall(60, rc);

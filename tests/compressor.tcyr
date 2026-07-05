@@ -1,0 +1,87 @@
+# compressor.tcyr -- parity tests for src/compressor.cyr
+# Ported one-for-one from the 6 #[test] blocks in rust-old/src/dsp/compressor.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/dsp.cyr"
+include "src/compressor.cyr"
+
+alloc_init();
+
+# amplitude * sin(2*pi*440*i/44100) mono @44100.
+fn make_sine(amplitude, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(i)), f64_from(44100));
+        vec_push(v, f64_mul(amplitude, f64_sin(ph)));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, 44100);
+}
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    while (i < n) { if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# ---- ratio_one_no_compression ----
+test_group("ratio_one_no_compression");
+var c1 = dhvani_comp_new(dhvani_compparams_new(f64_neg(20.0), 1.0, 10.0, 100.0, 0, 0, 1.0), 44100);
+var b1 = make_sine(1.0, 4096);
+var o1 = dhvani_buffer_samples(b1);
+var orig1 = vec_new();
+var k1 = 0;
+while (k1 < 4096) { vec_push(orig1, vec_get(o1, k1)); k1 = k1 + 1; }
+dhvani_comp_process(c1, b1);
+var i1 = 0; var ok1 = 1;
+while (i1 < 4096) { if (vec_get(o1, i1) != vec_get(orig1, i1)) { ok1 = 0; } i1 = i1 + 1; }
+assert_eq(ok1, 1, "ratio 1 leaves signal unchanged");
+
+# ---- below_threshold_unchanged ----
+test_group("below_threshold_unchanged");
+var c2 = dhvani_comp_new(dhvani_compparams_new(0, 10.0, 0.01, 0.01, 0, 0, 1.0), 44100);
+var b2 = make_sine(0.1, 4096);
+var r2 = dhvani_buffer_rms(b2);
+dhvani_comp_process(c2, b2);
+assert(f64_lt(f64_abs(f64_sub(dhvani_buffer_rms(b2), r2)), f64_mul(r2, 0.1)), "below threshold ~unchanged");
+
+# ---- above_threshold_compressed ----
+test_group("above_threshold_compressed");
+var c3 = dhvani_comp_new(dhvani_compparams_new(f64_neg(20.0), 10.0, 0.01, 0.01, 0, 0, 1.0), 44100);
+var b3 = make_sine(1.0, 4096);
+var r3 = dhvani_buffer_rms(b3);
+dhvani_comp_process(c3, b3);
+assert(f64_lt(dhvani_buffer_rms(b3), f64_mul(r3, 0.95)), "above threshold compressed");
+
+# ---- makeup_gain_boosts ----
+test_group("makeup_gain_boosts");
+var c4 = dhvani_comp_new(dhvani_compparams_new(0, 4.0, 0.01, 0.01, 12.0, 0, 1.0), 44100);
+var b4 = make_sine(0.1, 4096);
+var r4 = dhvani_buffer_rms(b4);
+dhvani_comp_process(c4, b4);
+assert(f64_gt(dhvani_buffer_rms(b4), f64_mul(r4, 2.0)), "makeup gain boosts");
+
+# ---- soft_knee_smoother_than_hard ----
+test_group("soft_knee_smoother_than_hard");
+var c5 = dhvani_comp_new(dhvani_compparams_new(f64_neg(12.0), 4.0, 5.0, 50.0, 0, 12.0, 1.0), 44100);
+var b5 = make_sine(1.0, 4096);
+dhvani_comp_process(c5, b5);
+assert_eq(all_finite(b5), 1, "soft knee output finite");
+assert(f64_gt(dhvani_buffer_rms(b5), 0), "soft knee output nonzero");
+
+# ---- reset_clears_state ----
+test_group("reset_clears_state");
+var c6 = dhvani_comp_new(dhvani_compparams_default(), 44100);
+var b6 = make_sine(1.0, 1024);
+dhvani_comp_process(c6, b6);
+dhvani_comp_reset(c6);
+assert(f64_lt(f64_abs(f64_sub(dhvani_comp_envelope_db(c6), f64_neg(120.0))), 0.0000001), "envelope reset to -120");
+assert(f64_lt(f64_abs(dhvani_comp_gain_reduction_db(c6)), 0.0000001), "gain reduction reset to 0");
+
+var rc = assert_summary();
+syscall(60, rc);
