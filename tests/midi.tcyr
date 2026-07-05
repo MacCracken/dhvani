@@ -1,0 +1,175 @@
+# midi.tcyr -- parity tests for src/midi.cyr
+# Ported one-for-one from the 16 #[test] blocks in rust-old/src/midi/mod.rs.
+
+include "src/error.cyr"
+include "src/midi.cyr"
+
+alloc_init();
+
+# ---- clip_creation ----
+test_group("clip_creation");
+var c1 = dhvani_midi_clip_new("test", 0, 44100);
+assert_eq(streq(dhvani_midi_clip_name(c1), "test"), 1, "name = test");
+assert_eq(dhvani_midi_clip_timeline_pos(c1), 0, "timeline 0");
+assert_eq(dhvani_midi_clip_duration(c1), 44100, "duration 44100");
+assert_eq(vec_len(dhvani_midi_clip_notes(c1)), 0, "no notes");
+
+# ---- add_note_sorted ----
+test_group("add_note_sorted");
+var c2 = dhvani_midi_clip_new("test", 0, 44100);
+dhvani_midi_clip_add_note(c2, 1000, 500, 60, 100, 0);
+dhvani_midi_clip_add_note(c2, 500, 500, 62, 90, 0);
+dhvani_midi_clip_add_note(c2, 2000, 500, 64, 80, 0);
+var n2 = dhvani_midi_clip_notes(c2);
+assert_eq(dhvani_note_event_position(vec_get(n2, 0)), 500, "sorted[0]=500");
+assert_eq(dhvani_note_event_position(vec_get(n2, 1)), 1000, "sorted[1]=1000");
+assert_eq(dhvani_note_event_position(vec_get(n2, 2)), 2000, "sorted[2]=2000");
+
+# ---- notes_at_frame ----
+test_group("notes_at_frame");
+var c3 = dhvani_midi_clip_new("test", 0, 44100);
+dhvani_midi_clip_add_note(c3, 100, 200, 60, 100, 0);
+dhvani_midi_clip_add_note(c3, 250, 100, 62, 90, 0);
+var at150 = dhvani_midi_clip_notes_at(c3, 150);
+assert_eq(vec_len(at150), 1, "1 note at 150");
+assert_eq(dhvani_note_event_note(vec_get(at150, 0)), 60, "note 60 at 150");
+assert_eq(vec_len(dhvani_midi_clip_notes_at(c3, 275)), 2, "2 notes at 275");
+assert_eq(vec_len(dhvani_midi_clip_notes_at(c3, 400)), 0, "0 notes at 400");
+
+# ---- note_ons_and_offs ----
+test_group("note_ons_and_offs");
+var c4 = dhvani_midi_clip_new("test", 0, 44100);
+dhvani_midi_clip_add_note(c4, 100, 200, 60, 100, 0);
+dhvani_midi_clip_add_note(c4, 100, 300, 62, 90, 0);
+assert_eq(vec_len(dhvani_midi_clip_note_ons_at(c4, 100)), 2, "2 note-ons @100");
+assert_eq(vec_len(dhvani_midi_clip_note_ons_at(c4, 101)), 0, "0 note-ons @101");
+assert_eq(vec_len(dhvani_midi_clip_note_offs_at(c4, 300)), 1, "1 note-off @300");
+assert_eq(vec_len(dhvani_midi_clip_note_offs_at(c4, 400)), 1, "1 note-off @400");
+
+# ---- events_in_range_binary_search ----
+test_group("events_in_range_binary_search");
+var c5 = dhvani_midi_clip_new("test", 0, 100000);
+var i5 = 0;
+while (i5 < 100) { dhvani_midi_clip_add_note(c5, i5 * 1000, 500, 60, 100, 0); i5 = i5 + 1; }
+var r5 = dhvani_midi_clip_events_in_range(c5, 10000, 15000);
+assert_eq(vec_len(r5), 5, "5 notes in [10000,15000)");
+assert_eq(dhvani_note_event_position(vec_get(r5, 0)), 10000, "first @10000");
+
+# ---- merge_clips ----
+test_group("merge_clips");
+var ca = dhvani_midi_clip_new("a", 0, 2000);
+dhvani_midi_clip_add_note(ca, 0, 100, 60, 100, 0);
+dhvani_midi_clip_add_note(ca, 500, 100, 62, 90, 0);
+var cb = dhvani_midi_clip_new("b", 0, 2000);
+dhvani_midi_clip_add_note(cb, 250, 100, 64, 80, 0);
+dhvani_midi_clip_merge(ca, cb);
+var na = dhvani_midi_clip_notes(ca);
+assert_eq(vec_len(na), 3, "3 notes after merge");
+assert_eq(dhvani_note_event_position(vec_get(na, 0)), 0, "merged[0]=0");
+assert_eq(dhvani_note_event_position(vec_get(na, 1)), 250, "merged[1]=250");
+assert_eq(dhvani_note_event_position(vec_get(na, 2)), 500, "merged[2]=500");
+
+# ---- transpose ----
+test_group("transpose");
+var c7 = dhvani_midi_clip_new("test", 0, 1000);
+dhvani_midi_clip_add_note(c7, 0, 100, 60, 100, 0);
+dhvani_midi_clip_add_note(c7, 100, 100, 3, 100, 0);
+dhvani_midi_clip_add_note(c7, 200, 100, 125, 100, 0);
+dhvani_midi_clip_transpose(c7, 5);
+var n7 = dhvani_midi_clip_notes(c7);
+assert_eq(dhvani_note_event_note(vec_get(n7, 0)), 65, "60+5");
+assert_eq(dhvani_note_event_note(vec_get(n7, 1)), 8, "3+5");
+assert_eq(dhvani_note_event_note(vec_get(n7, 2)), 127, "125+5 clamped");
+dhvani_midi_clip_transpose(c7, -20);
+assert_eq(dhvani_note_event_note(vec_get(n7, 0)), 45, "65-20");
+assert_eq(dhvani_note_event_note(vec_get(n7, 1)), 0, "8-20 clamped");
+assert_eq(dhvani_note_event_note(vec_get(n7, 2)), 107, "127-20");
+
+# ---- quantize_basic ----
+test_group("quantize_basic");
+var c8 = dhvani_midi_clip_new("test", 0, 44100);
+dhvani_midi_clip_add_note(c8, 90, 100, 60, 100, 0);
+dhvani_midi_clip_add_note(c8, 110, 100, 62, 90, 0);
+dhvani_midi_clip_add_note(c8, 400, 100, 64, 80, 0);
+dhvani_midi_clip_quantize(c8, 200);
+var n8 = dhvani_midi_clip_notes(c8);
+assert_eq(dhvani_note_event_position(vec_get(n8, 0)), 0, "90 -> 0");
+assert_eq(dhvani_note_event_position(vec_get(n8, 1)), 200, "110 -> 200");
+assert_eq(dhvani_note_event_position(vec_get(n8, 2)), 400, "400 -> 400");
+
+# ---- quantize_zero_grid_noop ----
+test_group("quantize_zero_grid_noop");
+var c9 = dhvani_midi_clip_new("test", 0, 44100);
+dhvani_midi_clip_add_note(c9, 105, 100, 60, 100, 0);
+dhvani_midi_clip_quantize(c9, 0);
+assert_eq(dhvani_note_event_position(vec_get(dhvani_midi_clip_notes(c9), 0)), 105, "grid 0 no-op");
+
+# ---- add_cc_sorted ----
+test_group("add_cc_sorted");
+var c10 = dhvani_midi_clip_new("test", 0, 44100);
+dhvani_midi_clip_add_cc(c10, 1000, 1, 64, 0);
+dhvani_midi_clip_add_cc(c10, 500, 7, 100, 0);
+var cc10 = dhvani_midi_clip_control_changes(c10);
+assert_eq(dhvani_cc_position(vec_get(cc10, 0)), 500, "cc sorted[0]=500");
+assert_eq(dhvani_cc_position(vec_get(cc10, 1)), 1000, "cc sorted[1]=1000");
+
+# ---- midi_event_position_and_channel ----
+test_group("midi_event_position_and_channel");
+var ev = dhvani_midi_note_on(1000, 60, 100, 5);
+assert_eq(dhvani_midi_event_position(ev), 1000, "position 1000");
+assert_eq(dhvani_midi_event_channel(ev), 5, "channel 5");
+
+# ---- end_pos ----
+test_group("end_pos");
+assert_eq(dhvani_midi_clip_end_pos(dhvani_midi_clip_new("test", 1000, 5000)), 6000, "end 6000");
+
+# ---- note_event_accessors ----
+test_group("note_event_accessors");
+var ne = dhvani_note_event_new(100, 200, 60, 127, 3);
+assert_eq(dhvani_note_event_position(ne), 100, "pos 100");
+assert_eq(dhvani_note_event_duration(ne), 200, "dur 200");
+assert_eq(dhvani_note_event_note(ne), 60, "note 60");
+assert_eq(dhvani_note_event_velocity(ne), 127, "vel 127");
+assert_eq(dhvani_note_event_channel(ne), 3, "ch 3");
+
+# ---- control_change_accessors ----
+test_group("control_change_accessors");
+var cce = dhvani_cc_new(500, 7, 100, 0);
+assert_eq(dhvani_cc_position(cce), 500, "pos 500");
+assert_eq(dhvani_cc_controller(cce), 7, "ctrl 7");
+assert_eq(dhvani_cc_value(cce), 100, "val 100");
+assert_eq(dhvani_cc_channel(cce), 0, "ch 0");
+
+# ---- midi_clip_accessors ----
+test_group("midi_clip_accessors");
+var c15 = dhvani_midi_clip_new("lead", 1000, 5000);
+dhvani_midi_clip_add_note(c15, 1000, 500, 60, 100, 0);
+dhvani_midi_clip_add_cc(c15, 2000, 1, 64, 0);
+assert_eq(streq(dhvani_midi_clip_name(c15), "lead"), 1, "name lead");
+assert_eq(vec_len(dhvani_midi_clip_notes(c15)), 1, "1 note");
+assert_eq(vec_len(dhvani_midi_clip_control_changes(c15)), 1, "1 cc");
+assert_eq(dhvani_midi_clip_timeline_pos(c15), 1000, "timeline 1000");
+assert_eq(dhvani_midi_clip_duration(c15), 5000, "duration 5000");
+
+# ---- midi_event_all_variants_position_channel ----
+test_group("midi_event_all_variants_position_channel");
+var evs = vec_new();
+vec_push(evs, dhvani_midi_note_on(1, 60, 100, 0));
+vec_push(evs, dhvani_midi_note_off(2, 60, 0, 1));
+vec_push(evs, dhvani_midi_control_change(3, 7, 64, 2));
+vec_push(evs, dhvani_midi_pitch_bend(4, 8192, 3));
+vec_push(evs, dhvani_midi_aftertouch(5, 64, 4));
+vec_push(evs, dhvani_midi_poly_aftertouch(6, 60, 32, 5));
+vec_push(evs, dhvani_midi_program_change(7, 0, 6));
+var vi = 0;
+var vok = 1;
+while (vi < 7) {
+    var e = vec_get(evs, vi);
+    if (dhvani_midi_event_position(e) != vi + 1) { vok = 0; }
+    if (dhvani_midi_event_channel(e) != vi) { vok = 0; }
+    vi = vi + 1;
+}
+assert_eq(vok, 1, "all variants position=i+1, channel=i");
+
+var rc = assert_summary();
+syscall(60, rc);

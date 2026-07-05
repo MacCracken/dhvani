@@ -48,8 +48,9 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**38 / 64 modules ported** — **Waves A+B+C+D COMPLETE** (DSP + analysis). **547 parity
-assertions.** Portable now: ~55 across A–G. Deferred: 9.
+**47 / 64 modules ported** — **Waves A+B+C+D+E COMPLETE** (foundation → DSP →
+analysis → MIDI/meter/capture/graph). **1067 parity assertions** across 47 suites
+(+ 1 scaffold smoke). Portable now: ~55 across A–G. Deferred: 9.
 
 | Layer / Wave | Modules | Status |
 |--------------|---------|--------|
@@ -57,9 +58,7 @@ assertions.** Portable now: ~55 across A–G. Deferred: 9.
 | B — DSP L0/L1 (dsp) | ✅ oscillator, pan, gain_smoother, lfo, envelope, automation, svf, biquad, dsp(facade), routing | ✅ |
 | C — DSP dependents (dsp) | ✅ compressor, limiter, delay, reverb, eq, deesser, graphic_eq | ✅ |
 | D — Analysis (analysis) | ✅ waveform, zcr, analysis, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ✅ |
-| E — MIDI/graph/meter/capture | ⬜ midi/{mod,voice,routing,v2,translate}, meter, graph, capture/{mod,record} | ⬜ (next) |
-| D — Analysis (analysis) | waveform, zcr, mod, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ⬜ |
-| E — MIDI/graph/meter/capture | midi/{mod,voice,routing,v2,translate}, meter, graph, capture/{mod,record} | ⬜ |
+| E — MIDI/meter/capture/graph | ✅ midi, voice, midi_routing, midi_v2, translate, meter, capture, record, graph | ✅ |
 | F — Synthesis stack | synthesis, sampler, creature, environment, mechanical, voice_synth/mod, acoustics | ⬜ |
 | G — Assembly | lib facade, dist/dhvani.cyr bundle, tests/{mod,proptest}, benches | ⬜ |
 | ⛔ Blocked (dep) | g2p (shabda), voice_synth/bhava_bridge (bhava) | deferred |
@@ -77,6 +76,11 @@ the serde_tests suite and the blocked/platform modules).
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). Next up: **M1 — Foundation (Wave A)** — port
-`error`/`clock`/`simd`(scalar)/`buffer`, land `BufferPool`, and decide the
-abaco-vs-hisab math dependency (ADR).
+See [`roadmap.md`](roadmap.md). Next up: **Wave F — synthesis stack** (synthesis,
+sampler, creature, environment, mechanical, voice_synth/mod, acoustics). These
+wrap already-ported siblings (naad/svara/prani/nidhi/garjan/ghurni/goonj), so the
+first step is wiring those deps into `cyrius.cyml` (mirroring the abaco path-dep
+pattern). `voice_synth/bhava_bridge` + `g2p` stay dep-blocked (bhava/shabda). Then
+**Wave G** — lib facade + `dist/dhvani.cyr` bundle + integration tests, and
+re-enable the deferred `ops::normalize_to_lufs` + `resample` sine tests (now
+unblocked by fft/loudness).

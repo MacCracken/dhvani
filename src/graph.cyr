@@ -1,0 +1,611 @@
+# graph.cyr -- audio graph: node-based processing with topological execution.
+# Ported one-for-one from rust-old/src/graph/mod.rs. Depends on buffer.cyr
+# (dhvani_buffer_silence / dhvani_buffer_samples) + the fnptr stdlib (fncall3).
+#
+# Design notes (Rust -> Cyrius):
+#   * AudioNode trait  -> fn-ptr dispatch. A node is a DhGraphNode struct holding
+#     a `process_fp` fn-ptr + opaque `state` pointer + the metadata the trait's
+#     default methods carried (finished/bypassed/supports-bypass/latency). The
+#     process() call dispatches via fncall3(process_fp, state, inputs, output).
+#     Concrete node types (Generator/Gain/...) live in the test unit, exactly as
+#     they lived in `mod tests` in Rust.
+#   * NodeId(u32) atomic counter -> module-level `var DH_GRAPH_NEXT_ID`.
+#   * HashMap<NodeId, _> -> parallel vecs (id-vec + value-vec) + linear scan.
+#   * Result<_, &str>    -> plan pointer, or 0 (null) on the "cycle detected" Err.
+#   * Option<AudioBuffer> slots -> buffer pointer, or 0 for None.
+#   * Arc<Mutex<Option<plan>>> pending-plan cell -> a shared length-1 vec.
+#   * process_parallel (#[cfg(feature="parallel")], rayon) -> dropped (no threads).
+
+# ---- NodeId (atomic unique id generator) ----
+
+var DH_GRAPH_NEXT_ID = 1;
+
+# NodeId::next() -- next unique node id (u32 counter, starts at 1).
+#must_use
+fn dhvani_node_id_next() {
+    var id = DH_GRAPH_NEXT_ID;
+    DH_GRAPH_NEXT_ID = DH_GRAPH_NEXT_ID + 1;
+    return id;
+}
+
+# ---- linear-scan helper for HashMap<NodeId,_> ports ----
+
+# index of `id` in the id-vec, or -1 if absent.
+fn dh_graph_find(ids, id) {
+    var n = vec_len(ids);
+    var i = 0;
+    while (i < n) {
+        if (vec_get(ids, i) == id) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+# ---- AudioNode (trait object -> fn-ptr node) ----
+
+#derive(accessors)
+struct DhGraphNode { process_fp; state; ninputs; noutputs; finished; bypassed; supports_byp; latency; name; }
+
+# Construct a node: process fn-ptr, opaque state, port counts, and the flags the
+# trait's default methods encode (finished / initial bypass / supports-bypass /
+# latency frames) plus a name.
+fn dhvani_graph_node_new(process_fp, state, ninputs, noutputs, finished, bypassed, supports_byp, latency, name) {
+    var self = alloc(sizeof(DhGraphNode));
+    DhGraphNode_set_process_fp(self, process_fp);
+    DhGraphNode_set_state(self, state);
+    DhGraphNode_set_ninputs(self, ninputs);
+    DhGraphNode_set_noutputs(self, noutputs);
+    DhGraphNode_set_finished(self, finished);
+    DhGraphNode_set_bypassed(self, bypassed);
+    DhGraphNode_set_supports_byp(self, supports_byp);
+    DhGraphNode_set_latency(self, latency);
+    DhGraphNode_set_name(self, name);
+    return self;
+}
+
+fn dhvani_graph_node_name(node) { return DhGraphNode_name(node); }
+fn dhvani_graph_node_num_inputs(node) { return DhGraphNode_ninputs(node); }
+fn dhvani_graph_node_num_outputs(node) { return DhGraphNode_noutputs(node); }
+fn dhvani_graph_node_is_finished(node) { return DhGraphNode_finished(node); }
+fn dhvani_graph_node_is_bypassed(node) { return DhGraphNode_bypassed(node); }
+fn dhvani_graph_node_latency(node) { return DhGraphNode_latency(node); }
+
+# process(): dispatch through the stored fn-ptr. inputs = vec of buffer ptrs,
+# output = a buffer ptr. The concrete fn reads its own `state`.
+fn dhvani_graph_node_process(node, inputs, output) {
+    return fncall3(DhGraphNode_process_fp(node), DhGraphNode_state(node), inputs, output);
+}
+
+# set_bypass(): only nodes that support it change state; returns 1 on success, 0
+# if unsupported (matches the trait default returning false).
+fn dhvani_graph_node_set_bypass(node, bypassed) {
+    if (DhGraphNode_supports_byp(node) == 1) {
+        DhGraphNode_set_bypassed(node, bypassed);
+        return 1;
+    }
+    return 0;
+}
+
+# ---- Connection ----
+
+#derive(accessors)
+struct DhConnection { cfrom; cto; }
+
+fn dhvani_connection_from(self) { return DhConnection_cfrom(self); }
+fn dhvani_connection_to(self) { return DhConnection_cto(self); }
+
+# ---- Graph (non-RT builder) ----
+
+# nodes HashMap -> parallel node_ids / node_ptrs; connections -> conns vec.
+#derive(accessors)
+struct DhGraph { node_ids; node_ptrs; conns; }
+
+fn dhvani_graph_new() {
+    var self = alloc(sizeof(DhGraph));
+    DhGraph_set_node_ids(self, vec_new());
+    DhGraph_set_node_ptrs(self, vec_new());
+    DhGraph_set_conns(self, vec_new());
+    return self;
+}
+
+# add_node: HashMap insert semantics -- replace an existing id, else append.
+fn dhvani_graph_add_node(self, id, node) {
+    var ids = DhGraph_node_ids(self);
+    var ptrs = DhGraph_node_ptrs(self);
+    var idx = dh_graph_find(ids, id);
+    if (idx >= 0) {
+        vec_set(ptrs, idx, node);
+    } else {
+        vec_push(ids, id);
+        vec_push(ptrs, node);
+    }
+    return 0;
+}
+
+fn dhvani_graph_connect(self, from, to) {
+    var c = alloc(sizeof(DhConnection));
+    DhConnection_set_cfrom(c, from);
+    DhConnection_set_cto(c, to);
+    vec_push(DhGraph_conns(self), c);
+    return 0;
+}
+
+fn dhvani_graph_node_count(self) { return vec_len(DhGraph_node_ids(self)); }
+fn dhvani_graph_connection_count(self) { return vec_len(DhGraph_conns(self)); }
+
+# ---- Topological sort (Kahn's algorithm) ----
+
+# Fill out_order with a deterministic topological order of node_ids given conns.
+# Returns 0 on success, -1 if a cycle is detected (order shorter than node set).
+# Determinism: matches the Rust queue (ascending sort, pop the largest ready id)
+# by always taking the max-id node whose in-degree has reached 0.
+fn dh_topological_sort(node_ids, conns, out_order) {
+    var n = vec_len(node_ids);
+    # in-degree parallel to node_ids
+    var in_deg = vec_new();
+    var a = 0;
+    while (a < n) { vec_push(in_deg, 0); a = a + 1; }
+    # successors: a vec-of-vecs parallel to node_ids (each holds successor ids)
+    var succ = vec_new();
+    var b = 0;
+    while (b < n) { vec_push(succ, vec_new()); b = b + 1; }
+    # tally connections
+    var m = vec_len(conns);
+    var c = 0;
+    while (c < m) {
+        var conn = vec_get(conns, c);
+        var fi = dh_graph_find(node_ids, DhConnection_cfrom(conn));
+        var ti = dh_graph_find(node_ids, DhConnection_cto(conn));
+        if (ti >= 0) { vec_set(in_deg, ti, vec_get(in_deg, ti) + 1); }
+        if (fi >= 0) { vec_push(vec_get(succ, fi), DhConnection_cto(conn)); }
+        c = c + 1;
+    }
+    # process: repeatedly take the largest-id node with in-degree 0.
+    var processed = 0;
+    while (processed < n) {
+        # scan for the max-id ready (in_deg == 0) node
+        var best = -1;
+        var besti = -1;
+        var i = 0;
+        while (i < n) {
+            if (vec_get(in_deg, i) == 0) {
+                var id = vec_get(node_ids, i);
+                if (besti < 0) { best = id; besti = i; }
+                elif (id > best) { best = id; besti = i; }
+            }
+            i = i + 1;
+        }
+        if (besti < 0) { return -1; }   # nothing ready but nodes remain -> cycle
+        vec_set(in_deg, besti, -1);     # mark processed (never ready again)
+        vec_push(out_order, best);
+        processed = processed + 1;
+        # decrement successors' in-degrees
+        var sl = vec_get(succ, besti);
+        var k = 0;
+        var kn = vec_len(sl);
+        while (k < kn) {
+            var si = dh_graph_find(node_ids, vec_get(sl, k));
+            if (si >= 0) {
+                if (vec_get(in_deg, si) >= 0) { vec_set(in_deg, si, vec_get(in_deg, si) - 1); }
+            }
+            k = k + 1;
+        }
+    }
+    return 0;
+}
+
+# ---- Level computation (dependency-depth grouping) ----
+
+# Group `order` into levels by max input depth. im_ids/im_lists = input_map
+# (node -> its predecessor ids). Returns a vec of levels (each a vec of ids),
+# empty levels removed.
+fn dh_compute_levels(order, im_ids, im_lists) {
+    var d_ids = vec_new();
+    var d_vals = vec_new();
+    var n = vec_len(order);
+    var maxdepth = 0;
+    var i = 0;
+    while (i < n) {
+        var id = vec_get(order, i);
+        var dep = 0;
+        var imi = dh_graph_find(im_ids, id);
+        if (imi >= 0) {
+            var preds = vec_get(im_lists, imi);
+            var kn = vec_len(preds);
+            var found = 0;
+            var maxin = 0;
+            var k = 0;
+            while (k < kn) {
+                var pi = dh_graph_find(d_ids, vec_get(preds, k));
+                if (pi >= 0) {
+                    var pv = vec_get(d_vals, pi);
+                    if (found == 0) { maxin = pv; found = 1; }
+                    elif (pv > maxin) { maxin = pv; }
+                }
+                k = k + 1;
+            }
+            if (found == 1) { dep = maxin + 1; }
+        }
+        vec_push(d_ids, id);
+        vec_push(d_vals, dep);
+        if (dep > maxdepth) { maxdepth = dep; }
+        i = i + 1;
+    }
+    # bucket ids into (maxdepth + 1) levels
+    var buckets = vec_new();
+    var b = 0;
+    while (b <= maxdepth) { vec_push(buckets, vec_new()); b = b + 1; }
+    var j = 0;
+    while (j < n) {
+        var id2 = vec_get(order, j);
+        var di = dh_graph_find(d_ids, id2);
+        vec_push(vec_get(buckets, vec_get(d_vals, di)), id2);
+        j = j + 1;
+    }
+    # retain non-empty levels
+    var out = vec_new();
+    var l = 0;
+    var ln = vec_len(buckets);
+    while (l < ln) {
+        var lv = vec_get(buckets, l);
+        if (vec_len(lv) > 0) { vec_push(out, lv); }
+        l = l + 1;
+    }
+    return out;
+}
+
+# ---- ExecutionPlan (compiled, topologically sorted) ----
+
+#derive(accessors)
+struct DhExecPlan { order; levels; node_ids; node_ptrs; im_ids; im_lists; lc_ids; lc_vals; }
+
+# node lookup by id inside a plan -> node ptr, or 0 if absent.
+fn dh_plan_node(plan, id) {
+    var idx = dh_graph_find(DhExecPlan_node_ids(plan), id);
+    if (idx < 0) { return 0; }
+    return vec_get(DhExecPlan_node_ptrs(plan), idx);
+}
+
+# Graph::compile -> ExecutionPlan pointer, or 0 on cycle (the Err case).
+fn dhvani_graph_compile(self) {
+    var node_ids = DhGraph_node_ids(self);
+    var node_ptrs = DhGraph_node_ptrs(self);
+    var conns = DhGraph_conns(self);
+
+    var order = vec_new();
+    if (dh_topological_sort(node_ids, conns, order) != 0) { return 0; }
+
+    # input_map: for each connection in order, im[to].push(from)
+    var im_ids = vec_new();
+    var im_lists = vec_new();
+    var m = vec_len(conns);
+    var c = 0;
+    while (c < m) {
+        var conn = vec_get(conns, c);
+        var to = DhConnection_cto(conn);
+        var ii = dh_graph_find(im_ids, to);
+        if (ii < 0) {
+            vec_push(im_ids, to);
+            var fresh = vec_new();
+            vec_push(fresh, DhConnection_cfrom(conn));
+            vec_push(im_lists, fresh);
+        } else {
+            vec_push(vec_get(im_lists, ii), DhConnection_cfrom(conn));
+        }
+        c = c + 1;
+    }
+
+    # path_latency: accumulated latency along the longest input path + own.
+    var pl_ids = vec_new();
+    var pl_vals = vec_new();
+    var no = vec_len(order);
+    var oi = 0;
+    while (oi < no) {
+        var id = vec_get(order, oi);
+        var node = dh_plan_node2(node_ids, node_ptrs, id);
+        var own = 0;
+        if (node != 0) { own = dhvani_graph_node_latency(node); }
+        var input_max = 0;
+        var imi = dh_graph_find(im_ids, id);
+        if (imi >= 0) {
+            var preds = vec_get(im_lists, imi);
+            var pk = 0;
+            var pkn = vec_len(preds);
+            while (pk < pkn) {
+                var ppi = dh_graph_find(pl_ids, vec_get(preds, pk));
+                if (ppi >= 0) {
+                    var pv = vec_get(pl_vals, ppi);
+                    if (pv > input_max) { input_max = pv; }
+                }
+                pk = pk + 1;
+            }
+        }
+        vec_push(pl_ids, id);
+        vec_push(pl_vals, input_max + own);
+        oi = oi + 1;
+    }
+
+    # latency_comp: for multi-input nodes, delay shorter input paths to align.
+    var lc_ids = vec_new();
+    var lc_vals = vec_new();
+    var oj = 0;
+    while (oj < no) {
+        var id3 = vec_get(order, oj);
+        var imj = dh_graph_find(im_ids, id3);
+        if (imj >= 0) {
+            var inp = vec_get(im_lists, imj);
+            var inn = vec_len(inp);
+            if (inn > 1) {
+                # max input path latency
+                var mil = 0;
+                var q = 0;
+                while (q < inn) {
+                    var qi = dh_graph_find(pl_ids, vec_get(inp, q));
+                    if (qi >= 0) {
+                        var qv = vec_get(pl_vals, qi);
+                        if (qv > mil) { mil = qv; }
+                    }
+                    q = q + 1;
+                }
+                # per-input compensation delay
+                var r = 0;
+                while (r < inn) {
+                    var inpid = vec_get(inp, r);
+                    var ri = dh_graph_find(pl_ids, inpid);
+                    var il = 0;
+                    if (ri >= 0) { il = vec_get(pl_vals, ri); }
+                    var comp = mil - il;
+                    if (comp > 0) {
+                        var ei = dh_graph_find(lc_ids, inpid);
+                        if (ei >= 0) { vec_set(lc_vals, ei, comp); }
+                        else { vec_push(lc_ids, inpid); vec_push(lc_vals, comp); }
+                    }
+                    r = r + 1;
+                }
+            }
+        }
+        oj = oj + 1;
+    }
+
+    var levels = dh_compute_levels(order, im_ids, im_lists);
+
+    var plan = alloc(sizeof(DhExecPlan));
+    DhExecPlan_set_order(plan, order);
+    DhExecPlan_set_levels(plan, levels);
+    DhExecPlan_set_node_ids(plan, node_ids);
+    DhExecPlan_set_node_ptrs(plan, node_ptrs);
+    DhExecPlan_set_im_ids(plan, im_ids);
+    DhExecPlan_set_im_lists(plan, im_lists);
+    DhExecPlan_set_lc_ids(plan, lc_ids);
+    DhExecPlan_set_lc_vals(plan, lc_vals);
+    return plan;
+}
+
+# node lookup against raw parallel vecs (used during compile before the plan exists).
+fn dh_plan_node2(node_ids, node_ptrs, id) {
+    var idx = dh_graph_find(node_ids, id);
+    if (idx < 0) { return 0; }
+    return vec_get(node_ptrs, idx);
+}
+
+fn dhvani_plan_order(plan) { return DhExecPlan_order(plan); }
+fn dhvani_plan_levels(plan) { return DhExecPlan_levels(plan); }
+
+# is the last node in topo order finished?
+fn dhvani_plan_is_finished(plan) {
+    var order = DhExecPlan_order(plan);
+    var n = vec_len(order);
+    if (n == 0) { return 0; }
+    var node = dh_plan_node(plan, vec_get(order, n - 1));
+    if (node == 0) { return 0; }
+    return dhvani_graph_node_is_finished(node);
+}
+
+# set bypass for a node; 0 if absent or unsupported.
+fn dhvani_plan_set_bypass(plan, id, bypassed) {
+    var node = dh_plan_node(plan, id);
+    if (node == 0) { return 0; }
+    return dhvani_graph_node_set_bypass(node, bypassed);
+}
+
+fn dhvani_plan_is_bypassed(plan, id) {
+    var node = dh_plan_node(plan, id);
+    if (node == 0) { return 0; }
+    return dhvani_graph_node_is_bypassed(node);
+}
+
+fn dhvani_plan_latency_frames(plan, id) {
+    var node = dh_plan_node(plan, id);
+    if (node == 0) { return 0; }
+    return dhvani_graph_node_latency(node);
+}
+
+# compensation delay for a node's output (0 if none).
+fn dhvani_plan_compensation_delay(plan, id) {
+    var idx = dh_graph_find(DhExecPlan_lc_ids(plan), id);
+    if (idx < 0) { return 0; }
+    return vec_get(DhExecPlan_lc_vals(plan), idx);
+}
+
+# total pipeline latency = max accumulated path latency from source to sink.
+#must_use
+fn dhvani_plan_total_latency(plan) {
+    var order = DhExecPlan_order(plan);
+    var im_ids = DhExecPlan_im_ids(plan);
+    var im_lists = DhExecPlan_im_lists(plan);
+    var nl_ids = vec_new();
+    var nl_vals = vec_new();
+    var n = vec_len(order);
+    var maxlat = 0;
+    var i = 0;
+    while (i < n) {
+        var id = vec_get(order, i);
+        var node = dh_plan_node(plan, id);
+        var own = 0;
+        if (node != 0) { own = dhvani_graph_node_latency(node); }
+        var input_max = 0;
+        var imi = dh_graph_find(im_ids, id);
+        if (imi >= 0) {
+            var preds = vec_get(im_lists, imi);
+            var k = 0;
+            var kn = vec_len(preds);
+            while (k < kn) {
+                var pi = dh_graph_find(nl_ids, vec_get(preds, k));
+                if (pi >= 0) {
+                    var pv = vec_get(nl_vals, pi);
+                    if (pv > input_max) { input_max = pv; }
+                }
+                k = k + 1;
+            }
+        }
+        var total = input_max + own;
+        vec_push(nl_ids, id);
+        vec_push(nl_vals, total);
+        if (total > maxlat) { maxlat = total; }
+        i = i + 1;
+    }
+    return maxlat;
+}
+
+# ---- GraphProcessor (RT-thread, double-buffered plan swap) ----
+
+# pending = a shared length-1 vec cell (Arc<Mutex<Option<plan>>>); node_outputs
+# indexed by NodeId value; 0 = None.
+#derive(accessors)
+struct DhGraphProc { current_plan; pending; node_outputs; channels; sample_rate; buffer_frames; }
+
+fn dhvani_graph_proc_new(channels, sample_rate, buffer_frames) {
+    var self = alloc(sizeof(DhGraphProc));
+    DhGraphProc_set_current_plan(self, 0);
+    var cell = vec_new();
+    vec_push(cell, 0);
+    DhGraphProc_set_pending(self, cell);
+    DhGraphProc_set_node_outputs(self, vec_new());
+    DhGraphProc_set_channels(self, channels);
+    DhGraphProc_set_sample_rate(self, sample_rate);
+    DhGraphProc_set_buffer_frames(self, buffer_frames);
+    return self;
+}
+
+# ---- GraphSwapHandle (non-RT thread hands new plans over the pending cell) ----
+
+#derive(accessors)
+struct DhSwapHandle { pending; }
+
+fn dhvani_graph_proc_swap_handle(self) {
+    var h = alloc(sizeof(DhSwapHandle));
+    DhSwapHandle_set_pending(h, DhGraphProc_pending(self));
+    return h;
+}
+
+fn dhvani_swap_handle_swap(self, plan) {
+    vec_set(DhSwapHandle_pending(self), 0, plan);
+    return 0;
+}
+
+# Arc clone -> another handle over the same pending cell.
+fn dhvani_swap_handle_clone(self) {
+    var h = alloc(sizeof(DhSwapHandle));
+    DhSwapHandle_set_pending(h, DhSwapHandle_pending(self));
+    return h;
+}
+
+# Process one buffer cycle. Returns the last node's output buffer ptr, or 0 if
+# no plan is active.
+fn dhvani_graph_proc_process(self) {
+    # pick up a pending plan (take() the cell)
+    var cell = DhGraphProc_pending(self);
+    var newplan = vec_get(cell, 0);
+    if (newplan != 0) {
+        vec_set(cell, 0, 0);
+        # size node_outputs to (max node id + 1), all None
+        var norder = DhExecPlan_order(newplan);
+        var maxid = 0;
+        var mi = 0;
+        var mn = vec_len(norder);
+        while (mi < mn) {
+            var mv = vec_get(norder, mi);
+            if (mv > maxid) { maxid = mv; }
+            mi = mi + 1;
+        }
+        var no = vec_new();
+        var z = 0;
+        while (z <= maxid) { vec_push(no, 0); z = z + 1; }
+        DhGraphProc_set_node_outputs(self, no);
+        DhGraphProc_set_current_plan(self, newplan);
+    }
+
+    var plan = DhGraphProc_current_plan(self);
+    if (plan == 0) { return 0; }
+
+    var outputs = DhGraphProc_node_outputs(self);
+    var order = DhExecPlan_order(plan);
+    var im_ids = DhExecPlan_im_ids(plan);
+    var im_lists = DhExecPlan_im_lists(plan);
+    var ch = DhGraphProc_channels(self);
+    var sr = DhGraphProc_sample_rate(self);
+    var bf = DhGraphProc_buffer_frames(self);
+    var olen = vec_len(outputs);
+
+    var np = vec_len(order);
+    var p = 0;
+    while (p < np) {
+        var node_id = vec_get(order, p);
+        var idx = node_id;
+
+        # gather input buffers from predecessor output slots
+        var scratch = vec_new();
+        var imi = dh_graph_find(im_ids, node_id);
+        if (imi >= 0) {
+            var preds = vec_get(im_lists, imi);
+            var k = 0;
+            var kn = vec_len(preds);
+            while (k < kn) {
+                var pid = vec_get(preds, k);
+                if (pid < olen) {
+                    var pbuf = vec_get(outputs, pid);
+                    if (pbuf != 0) { vec_push(scratch, pbuf); }
+                }
+                k = k + 1;
+            }
+        }
+
+        # take (or create) this node's output buffer, then zero it
+        var output = 0;
+        if (idx < olen) { output = vec_get(outputs, idx); }
+        if (output == 0) { output = dhvani_buffer_silence(ch, bf, sr); }
+        var osamp = dhvani_buffer_samples(output);
+        var zn = vec_len(osamp);
+        var zi = 0;
+        while (zi < zn) { vec_set(osamp, zi, 0); zi = zi + 1; }
+
+        # process (or bypass: copy the first input straight through)
+        var node = dh_plan_node(plan, node_id);
+        if (node != 0) {
+            if (dhvani_graph_node_is_bypassed(node) == 1) {
+                if (vec_len(scratch) > 0) {
+                    var fs = dhvani_buffer_samples(vec_get(scratch, 0));
+                    var ci = 0;
+                    while (ci < zn) { vec_set(osamp, ci, vec_get(fs, ci)); ci = ci + 1; }
+                }
+            } else {
+                dhvani_graph_node_process(node, scratch, output);
+            }
+        }
+
+        vec_set(outputs, idx, output);
+        p = p + 1;
+    }
+
+    # return the last node's output slot (0 if None)
+    if (np == 0) { return 0; }
+    var lastid = vec_get(order, np - 1);
+    if (lastid < vec_len(outputs)) { return vec_get(outputs, lastid); }
+    return 0;
+}
+
+fn dhvani_graph_proc_is_finished(self) {
+    var plan = DhGraphProc_current_plan(self);
+    if (plan == 0) { return 0; }
+    return dhvani_plan_is_finished(plan);
+}

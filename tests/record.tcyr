@@ -1,0 +1,138 @@
+# record.tcyr -- parity tests for src/record.cyr
+# Ported one-for-one from the 13 #[test] blocks in rust-old/src/capture/record.rs.
+# No serde/Display tests exist in the oracle, so none were dropped. The two
+# "drop_without_finish" tests (which in Rust prove the threaded Drop impl does
+# not hang/panic) are kept as no-crash parity: in the single-threaded port they
+# just exercise push + implicit drop and confirm the accumulated state is intact.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/record.cyr"
+
+alloc_init();
+
+# build a vec of f64 from a fixed list is done inline per test.
+
+# ---- record_and_finish ----
+test_group("record_and_finish");
+var rec1 = dhvani_record_new(64);
+var d1a = vec_new();
+vec_push(d1a, 0.1); vec_push(d1a, 0.2); vec_push(d1a, 0.3); vec_push(d1a, 0.4);
+dhvani_record_push_samples(rec1, d1a);
+var d1b = vec_new();
+vec_push(d1b, 0.5); vec_push(d1b, 0.6);
+dhvani_record_push_samples(rec1, d1b);
+var res1 = dhvani_record_finish(rec1);
+assert_eq(vec_len(res1), 6, "6 samples accumulated");
+assert(f64_lt(f64_abs(f64_sub(vec_get(res1, 0), 0.1)), DH_EPSILON), "result[0] ~ 0.1");
+assert(f64_lt(f64_abs(f64_sub(vec_get(res1, 5), 0.6)), DH_EPSILON), "result[5] ~ 0.6");
+
+# ---- record_empty ----
+test_group("record_empty");
+var rec2 = dhvani_record_new(16);
+var res2 = dhvani_record_finish(rec2);
+assert_eq(vec_len(res2), 0, "empty recording is empty");
+
+# ---- loop_record_single_take ----
+test_group("loop_record_single_take");
+var rec3 = dhvani_record_loop_new(64, DH_RECORDING_MODE_NORMAL);
+var d3 = vec_new();
+vec_push(d3, 1.0); vec_push(d3, 2.0); vec_push(d3, 3.0);
+dhvani_record_loop_push_samples(rec3, d3);
+var takes3 = dhvani_record_loop_finish(rec3);
+assert_eq(vec_len(takes3), 1, "1 take");
+assert_eq(vec_len(vec_get(takes3, 0)), 3, "take[0] has 3 samples");
+
+# ---- loop_record_multiple_takes ----
+test_group("loop_record_multiple_takes");
+var rec4 = dhvani_record_loop_new(64, DH_RECORDING_MODE_NORMAL);
+var d4a = vec_new();
+vec_push(d4a, 1.0); vec_push(d4a, 2.0);
+dhvani_record_loop_push_samples(rec4, d4a);
+dhvani_record_loop_push_marker(rec4);
+var d4b = vec_new();
+vec_push(d4b, 3.0); vec_push(d4b, 4.0); vec_push(d4b, 5.0);
+dhvani_record_loop_push_samples(rec4, d4b);
+dhvani_record_loop_push_marker(rec4);
+var d4c = vec_new();
+vec_push(d4c, 6.0);
+dhvani_record_loop_push_samples(rec4, d4c);
+var takes4 = dhvani_record_loop_finish(rec4);
+assert_eq(vec_len(takes4), 3, "3 takes");
+assert_eq(vec_len(vec_get(takes4, 0)), 2, "take[0] has 2");
+assert_eq(vec_len(vec_get(takes4, 1)), 3, "take[1] has 3");
+assert_eq(vec_len(vec_get(takes4, 2)), 1, "take[2] has 1");
+
+# ---- loop_record_mode ----
+test_group("loop_record_mode");
+var rec5 = dhvani_record_loop_new(16, DH_RECORDING_MODE_OVERDUB);
+assert_eq(dhvani_record_loop_mode(rec5), DH_RECORDING_MODE_OVERDUB, "mode is overdub");
+
+# ---- dropped_samples_initially_zero ----
+test_group("dropped_samples_initially_zero");
+var rec6 = dhvani_record_new(16);
+assert_eq(dhvani_record_dropped_samples(rec6), 0, "dropped samples initially 0");
+
+# ---- record_drop_without_finish ----
+# Rust: dropping without finish() must not hang/panic. Single-threaded parity:
+# push then simply do not call finish -- accumulated state stays intact.
+test_group("record_drop_without_finish");
+var rec7 = dhvani_record_new(16);
+var d7 = vec_new();
+vec_push(d7, 1.0); vec_push(d7, 2.0); vec_push(d7, 3.0);
+dhvani_record_push_samples(rec7, d7);
+assert_eq(vec_len(DhRecordManager_accumulated(rec7)), 3, "push before drop ok");
+
+# ---- loop_record_drop_without_finish ----
+test_group("loop_record_drop_without_finish");
+var rec8 = dhvani_record_loop_new(16, DH_RECORDING_MODE_NORMAL);
+var d8a = vec_new();
+vec_push(d8a, 1.0); vec_push(d8a, 2.0);
+dhvani_record_loop_push_samples(rec8, d8a);
+dhvani_record_loop_push_marker(rec8);
+var d8b = vec_new();
+vec_push(d8b, 3.0);
+dhvani_record_loop_push_samples(rec8, d8b);
+assert_eq(vec_len(DhLoopRecordManager_takes(rec8)), 2, "2 takes before drop ok");
+
+# ---- loop_record_empty_takes ----
+test_group("loop_record_empty_takes");
+var rec9 = dhvani_record_loop_new(64, DH_RECORDING_MODE_NORMAL);
+dhvani_record_loop_push_marker(rec9); # empty first take
+dhvani_record_loop_push_marker(rec9); # empty second take
+var d9 = vec_new();
+vec_push(d9, 1.0);
+dhvani_record_loop_push_samples(rec9, d9);
+var takes9 = dhvani_record_loop_finish(rec9);
+assert_eq(vec_len(takes9), 3, "3 takes: empty, empty, [1.0]");
+assert_eq(vec_len(vec_get(takes9, 0)), 0, "take[0] empty");
+assert_eq(vec_len(vec_get(takes9, 1)), 0, "take[1] empty");
+assert_eq(vec_len(vec_get(takes9, 2)), 1, "take[2] has 1");
+
+# ---- loop_record_replace_mode ----
+test_group("loop_record_replace_mode");
+var rec10 = dhvani_record_loop_new(16, DH_RECORDING_MODE_REPLACE);
+assert_eq(dhvani_record_loop_mode(rec10), DH_RECORDING_MODE_REPLACE, "mode is replace");
+
+# ---- loop_record_dropped_samples ----
+test_group("loop_record_dropped_samples");
+var rec11 = dhvani_record_loop_new(16, DH_RECORDING_MODE_NORMAL);
+assert_eq(dhvani_record_loop_dropped_samples(rec11), 0, "loop dropped samples 0");
+
+# ---- large_recording ----
+test_group("large_recording");
+var rec12 = dhvani_record_new(128);
+var iter12 = 0;
+while (iter12 < 100) {
+    var chunk12 = vec_new();
+    var j12 = 0;
+    while (j12 < 1024) { vec_push(chunk12, 0.5); j12 = j12 + 1; }
+    dhvani_record_push_samples(rec12, chunk12);
+    iter12 = iter12 + 1;
+}
+var res12 = dhvani_record_finish(rec12);
+assert_eq(vec_len(res12), 100 * 1024, "100*1024 samples accumulated");
+
+var rc = assert_summary();
+syscall(60, rc);

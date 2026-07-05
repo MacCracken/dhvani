@@ -313,13 +313,29 @@ independently reviewed (hex constants, dry/wet blend, reduction formula) — par
 
 **Waves A+B+C+D COMPLETE — DSP + analysis ported (38/64, 547 assertions).**
 
+**Wave E (MIDI / meter / capture / graph) — COMPLETE (47/64, 1067 assertions):**
+- ✅ `midi/mod` → `src/midi.cyr` — NoteEvent/CC/MidiEvent(kind-code + fat struct)/
+  MidiClip; bubble-insert sorted add; binary-search range. **51 green** (hand-ported).
+- ✅ `midi/voice`(25), `midi/routing`(28→`midi_routing.cyr`), `midi/v2`(4→`midi_v2.cyr`),
+  `midi/translate`(273 — full 0..127 roundtrips→`translate.cyr`), `meter`(53,
+  atomics→plain fields), `capture/mod`(26→`capture.cyr`), `capture/record`(21→
+  `record.cyr`) — ported via a 7-agent workflow + independent review (voice A4
+  const `0x407B800000000000`=440.0 defined locally per the abaco gap).
+- ✅ `graph` → `src/graph.cyr` — RT-safe node graph, the largest module (1174 LOC).
+  AudioNode trait → **fn-ptr dispatch** (`DhGraphNode{process_fp;state;flags}` +
+  `fncall3`); NodeId atomic → module-level `var DH_GRAPH_NEXT_ID`; HashMap → parallel
+  vecs + linear scan; Kahn topo sort (max-ready-first = Rust's ascending-pop);
+  double-buffered plan swap → shared length-1 pending cell. Dropped
+  `process_parallel` (`#[cfg(feature="parallel")]`, rayon). **37 green (20/21 tests)**.
+
 Now-unblocked (fft/loudness available), to re-enable during Wave G assembly:
 `buffer/ops::normalize_to_lufs` (needs loudness `measure_r128`) + `resample`
 `sine_frequency_preserved` (needs `spectrum_dft`).
 
-Next: **Wave E** — MIDI (`midi/{mod,voice,routing,v2,translate}`), `meter`
-(lock-free peak metering), `graph` (RT-safe node graph, 1174 LOC — largest
-module), and `capture/{mod,record}` (portable; `capture/pw` stays platform-blocked).
+Next: **Wave F** — synthesis stack (`synthesis`, `sampler`, `creature`,
+`environment`, `mechanical`, `voice_synth/mod`, `acoustics`) wrapping the already-
+ported siblings (naad/svara/prani/nidhi/garjan/ghurni/goonj); wire those deps into
+`cyrius.cyml` first. `voice_synth/bhava_bridge` + `g2p` stay dep-blocked.
 
 ### Cyrius idioms confirmed (this port)
 
@@ -337,3 +353,9 @@ module), and `capture/{mod,record}` (portable; `capture/pw` stays platform-block
 - test suite `.tcyr`: `include` deps in order → `alloc_init()` → `test_group()` +
   `assert`/`assert_eq`/`assert_streq` → `var rc = assert_summary(); syscall(60, rc);`.
   Run: `flock <scratch>/dhvani-build.lock cyrius test tests/<mod>.tcyr`.
+- **trait objects → fn-ptr dispatch** (graph's `AudioNode`): a "node" = a struct
+  holding a `process_fp` (`&fn_name` — address-of the NAME) + opaque `state` ptr +
+  the flags the trait's default methods carried; call via `fncall3(fp, state, …)`
+  (integer/pointer args only). Concrete impls live in the test unit; `.tcyr` files
+  can define top-level `fn`/`struct`. **Atomic counter → module-level `var`** (mutate
+  across calls). `var` is per-name-once-per-function but **may sit inside a loop**.

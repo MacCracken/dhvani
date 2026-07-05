@@ -1,0 +1,348 @@
+# voice.cyr -- polyphonic voice pool: allocation + stealing. Ports
+# rust-old/src/midi/voice.rs. L0: dep error only (dhvani_is_finite unused here;
+# all logic is integer note/velocity/channel/age + one float for frequency).
+#
+# The oracle re-exports abaco::dsp::{A4_FREQUENCY, A4_MIDI_NOTE,
+# SEMITONES_PER_OCTAVE} (NOT public in abaco) -- redefined locally below as f64
+# bit patterns so this module needs no abaco include. frequency() =
+# 440 * 2^((note - 69) / 12) via f64_pow.
+#
+# Enums -> int codes: VoiceState {Idle=0, Active=1, Releasing=2};
+# VoiceStealMode {Oldest=0, Quietest=1, Lowest=2, None=3}. note_on returns a
+# slot index or DH_VOICE_NONE (-1) when full + stealing disabled. serde +
+# Debug/Display dropped.
+
+# ---- MIDI constants (locally defined; abaco does not export these) ----
+var DH_A4_FREQUENCY        = 0x407B800000000000;    # 440.0 Hz   (abaco DSP_A4_FREQ)
+var DH_A4_MIDI_NOTE        = 0x4051400000000000;    # 69.0       (abaco DSP_A4_MIDI)
+var DH_SEMITONES_PER_OCTAVE = 0x4028000000000000;   # 12.0       (abaco DSP_SEMITONES)
+
+# ---- VoiceState codes ----
+var DH_VOICE_STATE_IDLE      = 0;
+var DH_VOICE_STATE_ACTIVE    = 1;
+var DH_VOICE_STATE_RELEASING = 2;
+
+# ---- VoiceStealMode codes ----
+var DH_STEAL_OLDEST   = 0;
+var DH_STEAL_QUIETEST = 1;
+var DH_STEAL_LOWEST   = 2;
+var DH_STEAL_NONE     = 3;
+
+# ---- note_on "None" sentinel (Rust Option<usize>::None) ----
+var DH_VOICE_NONE = (0 - 1);
+
+# ================================================================
+# Voice -- a single synthesizer voice.
+# state/note/velocity/channel/age are integer slots; envelope_level/pitch_bend/
+# pressure/brightness are f64 bit patterns (Rust f32, widened).
+# ================================================================
+#derive(accessors)
+struct DhVoice { state; note; velocity; channel; envelope_level; age; pitch_bend; pressure; brightness; }
+
+# new() -- an idle voice, all fields zeroed.
+#must_use
+fn dhvani_voice_new() {
+    var v = alloc(sizeof(DhVoice));
+    DhVoice_set_state(v, DH_VOICE_STATE_IDLE);
+    DhVoice_set_note(v, 0);
+    DhVoice_set_velocity(v, 0);
+    DhVoice_set_channel(v, 0);
+    DhVoice_set_envelope_level(v, 0);
+    DhVoice_set_age(v, 0);
+    DhVoice_set_pitch_bend(v, 0);
+    DhVoice_set_pressure(v, 0);
+    DhVoice_set_brightness(v, 0);
+    return v;
+}
+
+#inline
+#must_use
+fn dhvani_voice_state(v) { return DhVoice_state(v); }
+#inline
+#must_use
+fn dhvani_voice_note(v) { return DhVoice_note(v); }
+#inline
+#must_use
+fn dhvani_voice_velocity(v) { return DhVoice_velocity(v); }
+#inline
+#must_use
+fn dhvani_voice_channel(v) { return DhVoice_channel(v); }
+#inline
+#must_use
+fn dhvani_voice_envelope_level(v) { return DhVoice_envelope_level(v); }
+#inline
+#must_use
+fn dhvani_voice_age(v) { return DhVoice_age(v); }
+#inline
+#must_use
+fn dhvani_voice_pitch_bend(v) { return DhVoice_pitch_bend(v); }
+#inline
+#must_use
+fn dhvani_voice_pressure(v) { return DhVoice_pressure(v); }
+#inline
+#must_use
+fn dhvani_voice_brightness(v) { return DhVoice_brightness(v); }
+
+# is_idle -- 1 iff state == Idle.
+#inline
+#must_use
+fn dhvani_voice_is_idle(v) {
+    if (DhVoice_state(v) == DH_VOICE_STATE_IDLE) { return 1; }
+    return 0;
+}
+
+# is_active -- 1 iff producing sound (Active or Releasing).
+#inline
+#must_use
+fn dhvani_voice_is_active(v) {
+    var st = DhVoice_state(v);
+    if (st == DH_VOICE_STATE_ACTIVE) { return 1; }
+    if (st == DH_VOICE_STATE_RELEASING) { return 1; }
+    return 0;
+}
+
+# frequency -- Hz for this voice's note (12-TET, A4=440):
+# 440 * 2^((note - 69) / 12).
+#inline
+#must_use
+fn dhvani_voice_frequency(v) {
+    var note_f = f64_from(DhVoice_note(v));
+    var exponent = f64_div(f64_sub(note_f, DH_A4_MIDI_NOTE), DH_SEMITONES_PER_OCTAVE);
+    return f64_mul(DH_A4_FREQUENCY, f64_pow(2.0, exponent));
+}
+
+# apply_per_note_cc -- only CC#74 (brightness) is handled; others ignored.
+# value clamped to [0, 1].
+fn dhvani_voice_apply_per_note_cc(v, controller, value_normalized) {
+    if (controller == 74) {
+        DhVoice_set_brightness(v, f64_clamp(value_normalized, 0, 1.0));
+    }
+    return 0;
+}
+
+# ---- test-only field setters (Rust tests poke pub(crate) fields directly) ----
+fn dhvani_voice_set_note(v, note) { DhVoice_set_note(v, note); return 0; }
+fn dhvani_voice_set_envelope_level(v, level) { DhVoice_set_envelope_level(v, level); return 0; }
+
+# ================================================================
+# VoiceManager -- polyphonic pool with configurable stealing.
+# voices is a vec of DhVoice handles.
+# ================================================================
+#derive(accessors)
+struct DhVoiceManager { voices; max_voices; steal_mode; }
+
+# new(max_voices, steal_mode) -- pool of `max_voices` idle voices.
+#must_use
+fn dhvani_voice_manager_new(max_voices, steal_mode) {
+    var self = alloc(sizeof(DhVoiceManager));
+    var voices = vec_new();
+    var i = 0;
+    while (i < max_voices) {
+        vec_push(voices, dhvani_voice_new());
+        i = i + 1;
+    }
+    DhVoiceManager_set_voices(self, voices);
+    DhVoiceManager_set_max_voices(self, max_voices);
+    DhVoiceManager_set_steal_mode(self, steal_mode);
+    return self;
+}
+
+# activate_voice -- reset slot idx into an Active note (private helper).
+fn dh_voice_activate(self, idx, note, velocity, channel) {
+    var voice = vec_get(DhVoiceManager_voices(self), idx);
+    DhVoice_set_state(voice, DH_VOICE_STATE_ACTIVE);
+    DhVoice_set_note(voice, note);
+    DhVoice_set_velocity(voice, velocity);
+    DhVoice_set_channel(voice, channel);
+    DhVoice_set_envelope_level(voice, 0);
+    DhVoice_set_age(voice, 0);
+    DhVoice_set_pitch_bend(voice, 0);
+    DhVoice_set_pressure(voice, 0);
+    DhVoice_set_brightness(voice, 0);
+    return 0;
+}
+
+# note_on -- allocate a voice for a new note. Returns the slot index, or
+# DH_VOICE_NONE (-1) if the pool is full and stealing is disabled.
+fn dhvani_voice_manager_note_on(self, note, velocity, channel) {
+    var voices = DhVoiceManager_voices(self);
+    var n = vec_len(voices);
+
+    # First: find an idle voice (lowest index).
+    var idle_idx = DH_VOICE_NONE;
+    var i = 0;
+    while (i < n) {
+        if (idle_idx == DH_VOICE_NONE) {
+            if (dhvani_voice_is_idle(vec_get(voices, i)) == 1) { idle_idx = i; }
+        }
+        i = i + 1;
+    }
+    if (idle_idx != DH_VOICE_NONE) {
+        dh_voice_activate(self, idle_idx, note, velocity, channel);
+        return idle_idx;
+    }
+
+    # No idle voice -- try stealing per the configured policy.
+    var mode = DhVoiceManager_steal_mode(self);
+    var steal_idx = DH_VOICE_NONE;
+
+    if (mode == DH_STEAL_OLDEST) {
+        # max_by_key(v.age): ties -> LAST element (Rust semantics). >= keeps last.
+        if (n > 0) {
+            steal_idx = 0;
+            var best_age = DhVoice_age(vec_get(voices, 0));
+            var j = 1;
+            while (j < n) {
+                var aj = DhVoice_age(vec_get(voices, j));
+                if (aj >= best_age) { steal_idx = j; best_age = aj; }
+                j = j + 1;
+            }
+        }
+    } elif (mode == DH_STEAL_QUIETEST) {
+        # min_by(envelope_level): ties -> FIRST element (Rust semantics). Strict
+        # < keeps first. partial_cmp NaN -> Equal (treated as not-less, keep first).
+        if (n > 0) {
+            steal_idx = 0;
+            var best_env = DhVoice_envelope_level(vec_get(voices, 0));
+            var k = 1;
+            while (k < n) {
+                var ek = DhVoice_envelope_level(vec_get(voices, k));
+                if (f64_lt(ek, best_env) == 1) { steal_idx = k; best_env = ek; }
+                k = k + 1;
+            }
+        }
+    } elif (mode == DH_STEAL_LOWEST) {
+        # min_by_key(v.note): ties -> FIRST element (Rust semantics). Strict <.
+        if (n > 0) {
+            steal_idx = 0;
+            var best_note = DhVoice_note(vec_get(voices, 0));
+            var m = 1;
+            while (m < n) {
+                var nm = DhVoice_note(vec_get(voices, m));
+                if (nm < best_note) { steal_idx = m; best_note = nm; }
+                m = m + 1;
+            }
+        }
+    } else {
+        # DH_STEAL_NONE -- do not steal.
+        steal_idx = DH_VOICE_NONE;
+    }
+
+    if (steal_idx != DH_VOICE_NONE) {
+        dh_voice_activate(self, steal_idx, note, velocity, channel);
+        return steal_idx;
+    }
+    return DH_VOICE_NONE;
+}
+
+# note_off -- release the first Active voice matching note+channel.
+fn dhvani_voice_manager_note_off(self, note, channel) {
+    var voices = DhVoiceManager_voices(self);
+    var n = vec_len(voices);
+    var i = 0;
+    var done = 0;
+    while (i < n) {
+        if (done == 0) {
+            var voice = vec_get(voices, i);
+            if (DhVoice_state(voice) == DH_VOICE_STATE_ACTIVE) {
+                if (DhVoice_note(voice) == note) {
+                    if (DhVoice_channel(voice) == channel) {
+                        DhVoice_set_state(voice, DH_VOICE_STATE_RELEASING);
+                        done = 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# free_voice -- mark a slot idle (age reset). Out-of-range index is a no-op.
+fn dhvani_voice_manager_free_voice(self, index) {
+    var voices = DhVoiceManager_voices(self);
+    if (index >= 0) {
+        if (index < vec_len(voices)) {
+            var voice = vec_get(voices, index);
+            DhVoice_set_state(voice, DH_VOICE_STATE_IDLE);
+            DhVoice_set_age(voice, 0);
+        }
+    }
+    return 0;
+}
+
+# active_count -- number of non-idle voices.
+#must_use
+fn dhvani_voice_manager_active_count(self) {
+    var voices = DhVoiceManager_voices(self);
+    var n = vec_len(voices);
+    var count = 0;
+    var i = 0;
+    while (i < n) {
+        if (dhvani_voice_is_idle(vec_get(voices, i)) == 0) { count = count + 1; }
+        i = i + 1;
+    }
+    return count;
+}
+
+# tick_age -- increment age of every active voice. Call once per process block.
+fn dhvani_voice_manager_tick_age(self) {
+    var voices = DhVoiceManager_voices(self);
+    var n = vec_len(voices);
+    var i = 0;
+    while (i < n) {
+        var voice = vec_get(voices, i);
+        if (dhvani_voice_is_active(voice) == 1) {
+            DhVoice_set_age(voice, DhVoice_age(voice) + 1);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# reset -- return every slot to a fresh idle voice.
+fn dhvani_voice_manager_reset(self) {
+    var voices = DhVoiceManager_voices(self);
+    var n = vec_len(voices);
+    var i = 0;
+    while (i < n) {
+        var voice = vec_get(voices, i);
+        DhVoice_set_state(voice, DH_VOICE_STATE_IDLE);
+        DhVoice_set_note(voice, 0);
+        DhVoice_set_velocity(voice, 0);
+        DhVoice_set_channel(voice, 0);
+        DhVoice_set_envelope_level(voice, 0);
+        DhVoice_set_age(voice, 0);
+        DhVoice_set_pitch_bend(voice, 0);
+        DhVoice_set_pressure(voice, 0);
+        DhVoice_set_brightness(voice, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# voice -- borrow slot `index`, or 0 (null) if out of range.
+#must_use
+fn dhvani_voice_manager_voice(self, index) {
+    var voices = DhVoiceManager_voices(self);
+    if (index >= 0) {
+        if (index < vec_len(voices)) { return vec_get(voices, index); }
+    }
+    return 0;
+}
+
+# voice_mut -- same as voice() (Cyrius handles are shared/mutable).
+#must_use
+fn dhvani_voice_manager_voice_mut(self, index) {
+    return dhvani_voice_manager_voice(self, index);
+}
+
+# capacity -- number of voice slots.
+#inline
+#must_use
+fn dhvani_voice_manager_capacity(self) { return DhVoiceManager_max_voices(self); }
+
+# steal_mode -- current steal mode code.
+#inline
+#must_use
+fn dhvani_voice_manager_steal_mode(self) { return DhVoiceManager_steal_mode(self); }

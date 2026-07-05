@@ -18,7 +18,7 @@ sequencing in [`docs/development/roadmap.md`](docs/development/roadmap.md).
 ### Changed
 
 - **Language**: Rust → Cyrius (`.cyr`). Toolchain pinned via
-  `cyrius.cyml [package].cyrius` (6.4.2). Build with
+  `cyrius.cyml [package].cyrius` (6.4.3). Build with
   `cyrius build src/main.cyr build/dhvani`; test a suite with
   `cyrius test tests/<mod>.tcyr`.
 - **Scaffold landed** (`cyrius port`, 2026-07-04): Rust frozen at `rust-old/`,

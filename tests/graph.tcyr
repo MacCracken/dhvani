@@ -1,0 +1,309 @@
+# graph.tcyr -- parity tests for src/graph.cyr.
+# Ported one-for-one from the 21 #[test] blocks in rust-old/src/graph/mod.rs.
+# Dropped: parallel_process_matches_sequential (#[cfg(feature="parallel")], rayon)
+# -> 20 tests. The concrete node types that lived in `mod tests` (Passthrough /
+# Generator / Gain / Finished / BypassableGain / Latency) become fn-ptr process
+# functions here; bypass/latency/finished are carried as node flags, so
+# BypassableGain reuses gain_process and Latency reuses passthrough_process.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/graph.cyr"
+
+# state helper: an f64-holding slot (Generator value / Gain gain factor).
+fn mkf(v) { var s = alloc(8); store64(s, v); return s; }
+
+# GeneratorNode: fill the whole output buffer with state's value.
+fn gen_process(state, inputs, output) {
+    var v = load64(state);
+    var s = dhvani_buffer_samples(output);
+    var n = vec_len(s);
+    var i = 0;
+    while (i < n) { vec_set(s, i, v); i = i + 1; }
+    return 0;
+}
+
+# PassthroughNode (also LatencyNode): copy the first input into the output.
+fn passthrough_process(state, inputs, output) {
+    if (vec_len(inputs) > 0) {
+        var is = dhvani_buffer_samples(vec_get(inputs, 0));
+        var os = dhvani_buffer_samples(output);
+        var n = vec_len(os);
+        var i = 0;
+        while (i < n) { vec_set(os, i, vec_get(is, i)); i = i + 1; }
+    }
+    return 0;
+}
+
+# GainNode (also BypassableGainNode): output[i] = input.get(i).unwrap_or(0) * gain.
+fn gain_process(state, inputs, output) {
+    var g = load64(state);
+    var os = dhvani_buffer_samples(output);
+    var n = vec_len(os);
+    var i = 0;
+    if (vec_len(inputs) > 0) {
+        var is = dhvani_buffer_samples(vec_get(inputs, 0));
+        var il = vec_len(is);
+        while (i < n) {
+            var x = 0;
+            if (i < il) { x = vec_get(is, i); }
+            vec_set(os, i, f64_mul(x, g));
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# FinishedNode: no-op process (is_finished carried as a node flag).
+fn finished_process(state, inputs, output) { return 0; }
+
+alloc_init();
+
+# ---- node_id_unique ----
+test_group("node_id_unique");
+var nu_a = dhvani_node_id_next();
+var nu_b = dhvani_node_id_next();
+assert(nu_a != nu_b, "ids unique");
+
+# ---- empty_graph_compiles ----
+test_group("empty_graph_compiles");
+var eg = dhvani_graph_new();
+var ep = dhvani_graph_compile(eg);
+assert(ep != 0, "empty compiles ok");
+assert_eq(vec_len(dhvani_plan_order(ep)), 0, "order empty");
+
+# ---- single_node_graph ----
+test_group("single_node_graph");
+var sg = dhvani_graph_new();
+var sid = dhvani_node_id_next();
+dhvani_graph_add_node(sg, sid, dhvani_graph_node_new(&gen_process, mkf(0.5), 0, 1, 0, 0, 0, 0, "generator"));
+var sp = dhvani_graph_compile(sg);
+assert_eq(vec_len(dhvani_plan_order(sp)), 1, "order len 1");
+
+# ---- linear_chain ----
+test_group("linear_chain");
+var lg = dhvani_graph_new();
+var l_src = dhvani_node_id_next();
+var l_gain = dhvani_node_id_next();
+var l_out = dhvani_node_id_next();
+dhvani_graph_add_node(lg, l_src, dhvani_graph_node_new(&gen_process, mkf(1.0), 0, 1, 0, 0, 0, 0, "generator"));
+dhvani_graph_add_node(lg, l_gain, dhvani_graph_node_new(&gain_process, mkf(0.5), 1, 1, 0, 0, 0, 0, "gain"));
+dhvani_graph_add_node(lg, l_out, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 0, "passthrough"));
+dhvani_graph_connect(lg, l_src, l_gain);
+dhvani_graph_connect(lg, l_gain, l_out);
+var lp = dhvani_graph_compile(lg);
+assert_eq(vec_len(dhvani_plan_order(lp)), 3, "order len 3");
+assert_eq(vec_get(dhvani_plan_order(lp), 0), l_src, "order[0]=src");
+
+# ---- cycle_detected ----
+test_group("cycle_detected");
+var cg = dhvani_graph_new();
+var c_a = dhvani_node_id_next();
+var c_b = dhvani_node_id_next();
+dhvani_graph_add_node(cg, c_a, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 0, "passthrough"));
+dhvani_graph_add_node(cg, c_b, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 0, "passthrough"));
+dhvani_graph_connect(cg, c_a, c_b);
+dhvani_graph_connect(cg, c_b, c_a);
+assert_eq(dhvani_graph_compile(cg), 0, "cycle -> err");
+
+# ---- graph_processor_no_plan_returns_none ----
+test_group("graph_processor_no_plan_returns_none");
+var pnp = dhvani_graph_proc_new(2, 44100, 1024);
+assert_eq(dhvani_graph_proc_process(pnp), 0, "no plan -> none");
+
+# ---- graph_processor_with_plan ----
+test_group("graph_processor_with_plan");
+var wg = dhvani_graph_new();
+var w_src = dhvani_node_id_next();
+dhvani_graph_add_node(wg, w_src, dhvani_graph_node_new(&gen_process, mkf(0.75), 0, 1, 0, 0, 0, 0, "generator"));
+var wp = dhvani_graph_compile(wg);
+var wproc = dhvani_graph_proc_new(2, 44100, 256);
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(wproc), wp);
+var wout = dhvani_graph_proc_process(wproc);
+assert(wout != 0, "output present");
+var ws = dhvani_buffer_samples(wout);
+var wok = 1;
+var wi = 0;
+var wn = vec_len(ws);
+while (wi < wn) {
+    if (f64_ge(f64_abs(f64_sub(vec_get(ws, wi), 0.75)), 0.0001) == 1) { wok = 0; }
+    wi = wi + 1;
+}
+assert_eq(wok, 1, "all samples 0.75");
+
+# ---- graph_processor_swap_plan ----
+test_group("graph_processor_swap_plan");
+var spproc = dhvani_graph_proc_new(1, 44100, 128);
+var sphandle = dhvani_graph_proc_swap_handle(spproc);
+var spg1 = dhvani_graph_new();
+var sp_id1 = dhvani_node_id_next();
+dhvani_graph_add_node(spg1, sp_id1, dhvani_graph_node_new(&gen_process, mkf(0.5), 0, 1, 0, 0, 0, 0, "generator"));
+dhvani_swap_handle_swap(sphandle, dhvani_graph_compile(spg1));
+var spout1 = vec_get(dhvani_buffer_samples(dhvani_graph_proc_process(spproc)), 0);
+assert(f64_lt(f64_abs(f64_sub(spout1, 0.5)), 0.0001), "out1 0.5");
+var spg2 = dhvani_graph_new();
+var sp_id2 = dhvani_node_id_next();
+dhvani_graph_add_node(spg2, sp_id2, dhvani_graph_node_new(&gen_process, mkf(0.9), 0, 1, 0, 0, 0, 0, "generator"));
+dhvani_swap_handle_swap(sphandle, dhvani_graph_compile(spg2));
+var spout2 = vec_get(dhvani_buffer_samples(dhvani_graph_proc_process(spproc)), 0);
+assert(f64_lt(f64_abs(f64_sub(spout2, 0.9)), 0.0001), "out2 0.9");
+
+# ---- graph_node_count ----
+test_group("graph_node_count");
+var ncg = dhvani_graph_new();
+assert_eq(dhvani_graph_node_count(ncg), 0, "0 nodes");
+assert_eq(dhvani_graph_connection_count(ncg), 0, "0 conns");
+var nc_a = dhvani_node_id_next();
+var nc_b = dhvani_node_id_next();
+dhvani_graph_add_node(ncg, nc_a, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 0, "passthrough"));
+dhvani_graph_add_node(ncg, nc_b, dhvani_graph_node_new(&gain_process, mkf(1.0), 1, 1, 0, 0, 0, 0, "gain"));
+dhvani_graph_connect(ncg, nc_a, nc_b);
+assert_eq(dhvani_graph_node_count(ncg), 2, "2 nodes");
+assert_eq(dhvani_graph_connection_count(ncg), 1, "1 conn");
+
+# ---- execution_plan_is_finished ----
+test_group("execution_plan_is_finished");
+var fg = dhvani_graph_new();
+var f_id = dhvani_node_id_next();
+dhvani_graph_add_node(fg, f_id, dhvani_graph_node_new(&finished_process, 0, 0, 1, 1, 0, 0, 0, "finished"));
+var fp = dhvani_graph_compile(fg);
+assert_eq(dhvani_plan_is_finished(fp), 1, "plan finished");
+
+# ---- graph_processor_is_finished ----
+test_group("graph_processor_is_finished");
+var pfg = dhvani_graph_new();
+var pf_id = dhvani_node_id_next();
+dhvani_graph_add_node(pfg, pf_id, dhvani_graph_node_new(&finished_process, 0, 0, 1, 1, 0, 0, 0, "finished"));
+var pfp = dhvani_graph_compile(pfg);
+var pfproc = dhvani_graph_proc_new(1, 44100, 128);
+assert_eq(dhvani_graph_proc_is_finished(pfproc), 0, "not finished (no plan)");
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(pfproc), pfp);
+dhvani_graph_proc_process(pfproc);
+assert_eq(dhvani_graph_proc_is_finished(pfproc), 1, "finished after process");
+
+# ---- linear_chain_processes_correctly ----
+test_group("linear_chain_processes_correctly");
+var lcg = dhvani_graph_new();
+var lc_src = dhvani_node_id_next();
+var lc_gain = dhvani_node_id_next();
+dhvani_graph_add_node(lcg, lc_src, dhvani_graph_node_new(&gen_process, mkf(1.0), 0, 1, 0, 0, 0, 0, "generator"));
+dhvani_graph_add_node(lcg, lc_gain, dhvani_graph_node_new(&gain_process, mkf(0.5), 1, 1, 0, 0, 0, 0, "gain"));
+dhvani_graph_connect(lcg, lc_src, lc_gain);
+var lcp = dhvani_graph_compile(lcg);
+var lcproc = dhvani_graph_proc_new(1, 44100, 64);
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(lcproc), lcp);
+var lcout = dhvani_graph_proc_process(lcproc);
+var lcs = dhvani_buffer_samples(lcout);
+var lcok = 1;
+var lci = 0;
+var lcn = vec_len(lcs);
+while (lci < lcn) {
+    if (f64_ge(f64_abs(f64_sub(vec_get(lcs, lci), 0.5)), 0.0001) == 1) { lcok = 0; }
+    lci = lci + 1;
+}
+assert_eq(lcok, 1, "all 0.5");
+
+# ---- default_graph ----
+test_group("default_graph");
+assert_eq(dhvani_graph_node_count(dhvani_graph_new()), 0, "default 0 nodes");
+
+# ---- swap_handle_clone ----
+test_group("swap_handle_clone");
+var shproc = dhvani_graph_proc_new(1, 44100, 128);
+var sh1 = dhvani_graph_proc_swap_handle(shproc);
+var sh2 = dhvani_swap_handle_clone(sh1);
+assert(sh2 != 0, "cloned handle");
+
+# ---- node_bypass_passes_input ----
+test_group("node_bypass_passes_input");
+var bg = dhvani_graph_new();
+var b_src = dhvani_node_id_next();
+var b_gain = dhvani_node_id_next();
+dhvani_graph_add_node(bg, b_src, dhvani_graph_node_new(&gen_process, mkf(1.0), 0, 1, 0, 0, 0, 0, "generator"));
+dhvani_graph_add_node(bg, b_gain, dhvani_graph_node_new(&gain_process, mkf(0.5), 1, 1, 0, 1, 1, 0, "bypassable_gain"));
+dhvani_graph_connect(bg, b_src, b_gain);
+var bp = dhvani_graph_compile(bg);
+var bproc = dhvani_graph_proc_new(1, 44100, 64);
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(bproc), bp);
+var bout = dhvani_buffer_samples(dhvani_graph_proc_process(bproc));
+var bok = 1;
+var bi = 0;
+var bn = vec_len(bout);
+while (bi < bn) {
+    if (f64_ge(f64_abs(f64_sub(vec_get(bout, bi), 1.0)), 0.0001) == 1) { bok = 0; }
+    bi = bi + 1;
+}
+assert_eq(bok, 1, "bypass passes 1.0");
+
+# ---- node_bypass_toggle ----
+test_group("node_bypass_toggle");
+var btg = dhvani_graph_new();
+var bt_src = dhvani_node_id_next();
+var bt_gain = dhvani_node_id_next();
+dhvani_graph_add_node(btg, bt_src, dhvani_graph_node_new(&gen_process, mkf(1.0), 0, 1, 0, 0, 0, 0, "generator"));
+dhvani_graph_add_node(btg, bt_gain, dhvani_graph_node_new(&gain_process, mkf(0.5), 1, 1, 0, 0, 1, 0, "bypassable_gain"));
+dhvani_graph_connect(btg, bt_src, bt_gain);
+var btp = dhvani_graph_compile(btg);
+assert_eq(dhvani_plan_is_bypassed(btp, bt_gain), 0, "not bypassed init");
+assert_eq(dhvani_plan_set_bypass(btp, bt_gain, 1), 1, "set bypass ok");
+assert_eq(dhvani_plan_is_bypassed(btp, bt_gain), 1, "bypassed");
+assert_eq(dhvani_plan_set_bypass(btp, bt_gain, 0), 1, "unset bypass ok");
+assert_eq(dhvani_plan_is_bypassed(btp, bt_gain), 0, "not bypassed");
+
+# ---- latency_single_node ----
+test_group("latency_single_node");
+var lsg = dhvani_graph_new();
+var ls_id = dhvani_node_id_next();
+dhvani_graph_add_node(lsg, ls_id, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 256, "latency"));
+var lsp = dhvani_graph_compile(lsg);
+assert_eq(dhvani_plan_total_latency(lsp), 256, "total 256");
+assert_eq(dhvani_plan_latency_frames(lsp, ls_id), 256, "latency 256");
+
+# ---- latency_chain_accumulates ----
+test_group("latency_chain_accumulates");
+var lag = dhvani_graph_new();
+var la_a = dhvani_node_id_next();
+var la_b = dhvani_node_id_next();
+var la_c = dhvani_node_id_next();
+dhvani_graph_add_node(lag, la_a, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 100, "latency"));
+dhvani_graph_add_node(lag, la_b, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 200, "latency"));
+dhvani_graph_add_node(lag, la_c, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 50, "latency"));
+dhvani_graph_connect(lag, la_a, la_b);
+dhvani_graph_connect(lag, la_b, la_c);
+var lap = dhvani_graph_compile(lag);
+assert_eq(dhvani_plan_total_latency(lap), 350, "total 350");
+
+# ---- levels_computed_correctly ----
+test_group("levels_computed_correctly");
+var lvg = dhvani_graph_new();
+var lv_src = dhvani_node_id_next();
+var lv_a = dhvani_node_id_next();
+var lv_b = dhvani_node_id_next();
+var lv_out = dhvani_node_id_next();
+dhvani_graph_add_node(lvg, lv_src, dhvani_graph_node_new(&gen_process, mkf(1.0), 0, 1, 0, 0, 0, 0, "generator"));
+dhvani_graph_add_node(lvg, lv_a, dhvani_graph_node_new(&gain_process, mkf(0.5), 1, 1, 0, 0, 0, 0, "gain"));
+dhvani_graph_add_node(lvg, lv_b, dhvani_graph_node_new(&gain_process, mkf(0.3), 1, 1, 0, 0, 0, 0, "gain"));
+dhvani_graph_add_node(lvg, lv_out, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 0, "passthrough"));
+dhvani_graph_connect(lvg, lv_src, lv_a);
+dhvani_graph_connect(lvg, lv_src, lv_b);
+dhvani_graph_connect(lvg, lv_a, lv_out);
+dhvani_graph_connect(lvg, lv_b, lv_out);
+var lvp = dhvani_graph_compile(lvg);
+var lvl = dhvani_plan_levels(lvp);
+assert_eq(vec_len(lvl), 3, "3 levels");
+assert_eq(vec_len(vec_get(lvl, 0)), 1, "level0 has 1");
+assert_eq(vec_len(vec_get(lvl, 1)), 2, "level1 has 2");
+assert_eq(vec_len(vec_get(lvl, 2)), 1, "level2 has 1");
+
+# ---- latency_zero_by_default ----
+test_group("latency_zero_by_default");
+var lzg = dhvani_graph_new();
+var lz_id = dhvani_node_id_next();
+dhvani_graph_add_node(lzg, lz_id, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 0, "passthrough"));
+var lzp = dhvani_graph_compile(lzg);
+assert_eq(dhvani_plan_total_latency(lzp), 0, "total 0");
+assert_eq(dhvani_plan_latency_frames(lzp, lz_id), 0, "latency 0");
+
+var rc = assert_summary();
+syscall(60, rc);

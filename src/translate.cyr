@@ -1,0 +1,104 @@
+# translate.cyr -- MIDI 1.0 <-> 2.0 translation: velocity/CC/pitch-bend scaling
+# + NoteEvent/ControlChange <-> V2 struct conversion.
+# Ports rust-old/src/midi/translate.rs. L1: deps error + midi (DhNoteEvent /
+# DhControlChange consumed) + midi_v2 (DhNoteOnV2 / DhControlChangeV2 target
+# types + dhvani_midi2_* constructors/accessors -- reused, not redefined here).
+# Pure INTEGER bit logic -- no floats. Rust's u8/u16/u32 shifts truncate to the
+# type width; the Cyrius port uses i64 slots, so every widening shift result is
+# masked (& 0xFFFF / & 0xFFFFFFFF) to reproduce the Rust wrapping exactly.
+# serde + Display tests dropped (none in this oracle).
+
+# Pitch bend center value in MIDI 2.0 (32-bit).
+var DH_MIDITX_PITCH_BEND_CENTER = 0x80000000;
+
+# ---- scalar scaling (pure integer bit logic) ----
+
+# Scale 7-bit MIDI 1.0 velocity to 16-bit MIDI 2.0.
+# MIDI 2.0 spec scaling: v << 9 | v << 2 | v >> 5.
+#inline
+#must_use
+fn dhvani_miditx_velocity_7_to_16(v) {
+    if (v == 0) { return 0; }
+    return ((v << 9) | (v << 2) | (v >> 5)) & 0xFFFF;
+}
+
+# Scale 16-bit MIDI 2.0 velocity to 7-bit MIDI 1.0 (lossy).
+#inline
+#must_use
+fn dhvani_miditx_velocity_16_to_7(v) {
+    return (v >> 9) & 0xFF;
+}
+
+# Scale 7-bit CC value to 32-bit MIDI 2.0.
+#inline
+#must_use
+fn dhvani_miditx_cc_7_to_32(v) {
+    return ((v << 25) | (v << 18) | (v << 11) | (v << 4) | (v >> 3)) & 0xFFFFFFFF;
+}
+
+# Scale 32-bit CC value to 7-bit MIDI 1.0 (lossy).
+#inline
+#must_use
+fn dhvani_miditx_cc_32_to_7(v) {
+    return (v >> 25) & 0xFF;
+}
+
+# Convert 14-bit MIDI 1.0 pitch bend to 32-bit MIDI 2.0.
+#inline
+#must_use
+fn dhvani_miditx_pitch_bend_14_to_32(v) {
+    return ((v << 18) | (v << 4) | (v >> 10)) & 0xFFFFFFFF;
+}
+
+# Convert 32-bit MIDI 2.0 pitch bend to 14-bit MIDI 1.0 (lossy).
+#inline
+#must_use
+fn dhvani_miditx_pitch_bend_32_to_14(v) {
+    return (v >> 18) & 0xFFFF;
+}
+
+# ---- struct conversions (V2 types from midi_v2.cyr) ----
+
+# Convert a MIDI 1.0 NoteEvent to a MIDI 2.0 NoteOnV2.
+#must_use
+fn dhvani_miditx_note_event_to_v2(event) {
+    return dhvani_midi2_note_on_new(
+        dhvani_note_event_position(event),
+        dhvani_note_event_note(event),
+        dhvani_miditx_velocity_7_to_16(dhvani_note_event_velocity(event)),
+        dhvani_note_event_channel(event),
+        0,
+        0);
+}
+
+# Convert a MIDI 2.0 NoteOnV2 back to a MIDI 1.0 NoteEvent (lossy).
+# Requires a duration since NoteOnV2 doesn't carry duration.
+#must_use
+fn dhvani_miditx_note_on_v2_to_event(event, duration) {
+    return dhvani_note_event_new(
+        dhvani_midi2_note_on_position(event),
+        duration,
+        dhvani_midi2_note_on_note(event),
+        dhvani_miditx_velocity_16_to_7(dhvani_midi2_note_on_velocity(event)),
+        dhvani_midi2_note_on_channel(event));
+}
+
+# Convert a MIDI 1.0 ControlChange to MIDI 2.0 ControlChangeV2.
+#must_use
+fn dhvani_miditx_cc_to_v2(cc) {
+    return dhvani_midi2_cc_new(
+        dhvani_cc_position(cc),
+        dhvani_cc_controller(cc),
+        dhvani_miditx_cc_7_to_32(dhvani_cc_value(cc)),
+        dhvani_cc_channel(cc));
+}
+
+# Convert a MIDI 2.0 ControlChangeV2 to MIDI 1.0 ControlChange (lossy).
+#must_use
+fn dhvani_miditx_cc_v2_to_cc(cc) {
+    return dhvani_cc_new(
+        dhvani_midi2_cc_position(cc),
+        dhvani_midi2_cc_controller(cc),
+        dhvani_miditx_cc_32_to_7(dhvani_midi2_cc_value(cc)),
+        dhvani_midi2_cc_channel(cc));
+}

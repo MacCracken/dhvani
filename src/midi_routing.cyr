@@ -1,0 +1,182 @@
+# midi_routing.cyr -- MIDI channel/note filtering, velocity curves, CC mapping.
+# Ports rust-old/src/midi/routing.rs. Pure integer logic for routing/filtering;
+# f64 arithmetic only in the velocity curves (sqrt/square) and CC value mapping.
+# L1: deps error + midi (consumes DhNoteEvent + dhvani_note_event_*). serde
+# dropped.
+#
+# VelocityCurve (data-carrying enum) -> a `kind` code + a separate fixed-value
+# payload threaded through apply(). Option<u8> channel_filter -> -1 sentinel for
+# None (channels are 0..15). Prefix dhvani_midiroute_ (dsp routing owns
+# dhvani_routing_).
+
+# ================================================================
+# VelocityCurve -- kind codes. The Fixed(u8) payload rides as a separate arg.
+# ================================================================
+var DH_MIDIROUTE_CURVE_LINEAR = 0;
+var DH_MIDIROUTE_CURVE_SOFT   = 1;
+var DH_MIDIROUTE_CURVE_HARD   = 2;
+var DH_MIDIROUTE_CURVE_FIXED  = 3;
+
+# Apply a velocity curve to a raw 0..127 velocity. `kind` is one of the curve
+# codes; `fixed_value` is only read when kind == FIXED. Rust `as u8` truncates
+# toward zero -> f64_to. Non-Fixed curves ignore `fixed_value`.
+#must_use
+fn dhvani_midiroute_curve_apply(kind, fixed_value, velocity) {
+    if (kind == DH_MIDIROUTE_CURVE_LINEAR) { return velocity; }
+    if (kind == DH_MIDIROUTE_CURVE_SOFT) {
+        var ns = f64_div(f64_from(velocity), 127.0);
+        return f64_to(f64_mul(f64_sqrt(ns), 127.0));
+    }
+    if (kind == DH_MIDIROUTE_CURVE_HARD) {
+        var nh = f64_div(f64_from(velocity), 127.0);
+        return f64_to(f64_mul(f64_mul(nh, nh), 127.0));
+    }
+    return fixed_value;
+}
+
+# ================================================================
+# MidiRoute -- filter + transform rule.
+# channel_filter: -1 = None (all channels), else 0..15.
+# velocity_curve: a curve kind code; velocity_fixed holds the Fixed payload.
+# note_min/note_max: inclusive note range (0..127, min <= max).
+# ================================================================
+#derive(accessors)
+struct DhMidiRoute { channel_filter; velocity_curve; velocity_fixed; note_min; note_max; }
+
+# Clamp a channel-filter Option to 0..15. `ch` == -1 means None (kept as -1).
+#must_use
+fn dh_midiroute_clamp_channel(ch) {
+    if (ch < 0) { return (0 - 1); }
+    if (ch > 15) { return 15; }
+    return ch;
+}
+
+# new(channel_filter, velocity_curve, velocity_fixed, note_min, note_max).
+# channel_filter -1 = None. note_range clamped so min <= max and both 0..127.
+#must_use
+fn dhvani_midiroute_new(channel_filter, velocity_curve, velocity_fixed, note_min, note_max) {
+    var self = alloc(sizeof(DhMidiRoute));
+    DhMidiRoute_set_channel_filter(self, dh_midiroute_clamp_channel(channel_filter));
+    DhMidiRoute_set_velocity_curve(self, velocity_curve);
+    DhMidiRoute_set_velocity_fixed(self, velocity_fixed);
+    var lo = note_min;
+    if (lo > 127) { lo = 127; }
+    var hi = note_max;
+    if (hi > 127) { hi = 127; }
+    if (hi < lo) { hi = lo; }
+    DhMidiRoute_set_note_min(self, lo);
+    DhMidiRoute_set_note_max(self, hi);
+    return self;
+}
+
+# passthrough -- all events unmodified: no channel filter, Linear, full range.
+#must_use
+fn dhvani_midiroute_passthrough() {
+    return dhvani_midiroute_new((0 - 1), DH_MIDIROUTE_CURVE_LINEAR, 0, 0, 127);
+}
+
+# default == passthrough.
+#must_use
+fn dhvani_midiroute_default() { return dhvani_midiroute_passthrough(); }
+
+#inline
+#must_use
+fn dhvani_midiroute_channel_filter(self) { return DhMidiRoute_channel_filter(self); }
+#inline
+#must_use
+fn dhvani_midiroute_velocity_curve(self) { return DhMidiRoute_velocity_curve(self); }
+#inline
+#must_use
+fn dhvani_midiroute_velocity_fixed(self) { return DhMidiRoute_velocity_fixed(self); }
+#inline
+#must_use
+fn dhvani_midiroute_note_min(self) { return DhMidiRoute_note_min(self); }
+#inline
+#must_use
+fn dhvani_midiroute_note_max(self) { return DhMidiRoute_note_max(self); }
+
+# set_channel_filter -- -1 = None; otherwise clamped to 0..15.
+fn dhvani_midiroute_set_channel_filter(self, channel) {
+    DhMidiRoute_set_channel_filter(self, dh_midiroute_clamp_channel(channel));
+    return 0;
+}
+
+# set_velocity_curve -- kind + Fixed payload (ignored for non-Fixed).
+fn dhvani_midiroute_set_velocity_curve(self, velocity_curve, velocity_fixed) {
+    DhMidiRoute_set_velocity_curve(self, velocity_curve);
+    DhMidiRoute_set_velocity_fixed(self, velocity_fixed);
+    return 0;
+}
+
+# set_note_range -- clamp to 0..127 with min <= max.
+fn dhvani_midiroute_set_note_range(self, min, max) {
+    var lo = min;
+    if (lo > 127) { lo = 127; }
+    var hi = max;
+    if (hi > 127) { hi = 127; }
+    if (hi < lo) { hi = lo; }
+    DhMidiRoute_set_note_min(self, lo);
+    DhMidiRoute_set_note_max(self, hi);
+    return 0;
+}
+
+# filter_event -- filter + transform a DhNoteEvent. Returns a NEW DhNoteEvent
+# handle (velocity-transformed clone) if the event passes, or 0 (None) if the
+# channel filter or note range rejects it.
+#must_use
+fn dhvani_midiroute_filter_event(self, event) {
+    var cf = DhMidiRoute_channel_filter(self);
+    if (cf >= 0) {
+        if (dhvani_note_event_channel(event) != cf) { return 0; }
+    }
+    var note = dhvani_note_event_note(event);
+    if (note < DhMidiRoute_note_min(self)) { return 0; }
+    if (note > DhMidiRoute_note_max(self)) { return 0; }
+    var vel = dhvani_midiroute_curve_apply(DhMidiRoute_velocity_curve(self), DhMidiRoute_velocity_fixed(self), dhvani_note_event_velocity(event));
+    return dhvani_note_event_new(dhvani_note_event_position(event), dhvani_note_event_duration(event), note, vel, dhvani_note_event_channel(event));
+}
+
+# ================================================================
+# CcMapping -- maps a MIDI CC number to a parameter value range.
+# cc: 0..127; param_index: usize; min_value/max_value: f64 param bounds.
+# ================================================================
+#derive(accessors)
+struct DhCcMapping { cc; param_index; min_value; max_value; }
+
+#must_use
+fn dhvani_midiroute_cc_new(cc, param_index, min_value, max_value) {
+    var m = alloc(sizeof(DhCcMapping));
+    DhCcMapping_set_cc(m, cc);
+    DhCcMapping_set_param_index(m, param_index);
+    DhCcMapping_set_min_value(m, min_value);
+    DhCcMapping_set_max_value(m, max_value);
+    return m;
+}
+
+#inline
+#must_use
+fn dhvani_midiroute_cc_number(m) { return DhCcMapping_cc(m); }
+#inline
+#must_use
+fn dhvani_midiroute_cc_param_index(m) { return DhCcMapping_param_index(m); }
+#inline
+#must_use
+fn dhvani_midiroute_cc_min_value(m) { return DhCcMapping_min_value(m); }
+#inline
+#must_use
+fn dhvani_midiroute_cc_max_value(m) { return DhCcMapping_max_value(m); }
+
+# map_value -- 7-bit CC (0..127) -> param range: min + (cc/127)*(max-min).
+#must_use
+fn dhvani_midiroute_cc_map_value(m, cc_value) {
+    var norm = f64_div(f64_from(cc_value), 127.0);
+    return f64_add(DhCcMapping_min_value(m), f64_mul(norm, f64_sub(DhCcMapping_max_value(m), DhCcMapping_min_value(m))));
+}
+
+# map_value_32 -- 32-bit CC (MIDI 2.0) -> param range. u32::MAX = 4294967295
+# exceeds 2^24 so build the f64 via f64_from(int), not a decimal literal.
+#must_use
+fn dhvani_midiroute_cc_map_value_32(m, cc_value) {
+    var norm = f64_div(f64_from(cc_value), f64_from(4294967295));
+    return f64_add(DhCcMapping_min_value(m), f64_mul(norm, f64_sub(DhCcMapping_max_value(m), DhCcMapping_min_value(m))));
+}

@@ -1,0 +1,91 @@
+# midi_routing.tcyr -- parity tests for src/midi_routing.cyr
+# Ported one-for-one from the 11 #[test] blocks in rust-old/src/midi/routing.rs.
+# No serde round-trip or Display-string tests exist in the oracle, so none dropped.
+
+include "src/error.cyr"
+include "src/midi.cyr"
+include "src/midi_routing.cyr"
+
+alloc_init();
+
+# ---- velocity_curve_linear ----
+test_group("velocity_curve_linear");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_LINEAR, 0, 0), 0, "linear 0 -> 0");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_LINEAR, 0, 64), 64, "linear 64 -> 64");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_LINEAR, 0, 127), 127, "linear 127 -> 127");
+
+# ---- velocity_curve_soft ----
+test_group("velocity_curve_soft");
+var soft_64 = dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_SOFT, 0, 64);
+assert(soft_64 > 64, "soft curve at 64 should be > 64");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_SOFT, 0, 0), 0, "soft 0 -> 0");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_SOFT, 0, 127), 127, "soft 127 -> 127");
+
+# ---- velocity_curve_hard ----
+test_group("velocity_curve_hard");
+var hard_64 = dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_HARD, 0, 64);
+assert(hard_64 < 64, "hard curve at 64 should be < 64");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_HARD, 0, 0), 0, "hard 0 -> 0");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_HARD, 0, 127), 127, "hard 127 -> 127");
+
+# ---- velocity_curve_fixed ----
+test_group("velocity_curve_fixed");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_FIXED, 100, 0), 100, "fixed(100) at 0 -> 100");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_FIXED, 100, 127), 100, "fixed(100) at 127 -> 100");
+
+# ---- route_passthrough ----
+test_group("route_passthrough");
+var rp = dhvani_midiroute_passthrough();
+var ep = dhvani_note_event_new(0, 100, 60, 100, 0);
+var resp = dhvani_midiroute_filter_event(rp, ep);
+assert(resp != 0, "passthrough event accepted");
+assert_eq(dhvani_note_event_velocity(resp), 100, "passthrough velocity 100");
+assert_eq(dhvani_note_event_note(resp), 60, "passthrough note 60");
+
+# ---- route_channel_filter ----
+test_group("route_channel_filter");
+var rc5 = dhvani_midiroute_new(5, DH_MIDIROUTE_CURVE_LINEAR, 0, 0, 127);
+var ech5 = dhvani_note_event_new(0, 100, 60, 100, 5);
+var ech0 = dhvani_note_event_new(0, 100, 60, 100, 0);
+assert(dhvani_midiroute_filter_event(rc5, ech5) != 0, "channel 5 passes");
+assert(dhvani_midiroute_filter_event(rc5, ech0) == 0, "channel 0 rejected");
+
+# ---- route_note_range ----
+test_group("route_note_range");
+var rnr = dhvani_midiroute_new((0 - 1), DH_MIDIROUTE_CURVE_LINEAR, 0, 36, 96);
+var einr = dhvani_note_event_new(0, 100, 60, 100, 0);
+var ebelow = dhvani_note_event_new(0, 100, 20, 100, 0);
+var eabove = dhvani_note_event_new(0, 100, 120, 100, 0);
+assert(dhvani_midiroute_filter_event(rnr, einr) != 0, "note 60 in range");
+assert(dhvani_midiroute_filter_event(rnr, ebelow) == 0, "note 20 below range");
+assert(dhvani_midiroute_filter_event(rnr, eabove) == 0, "note 120 above range");
+
+# ---- route_velocity_curve_applied ----
+test_group("route_velocity_curve_applied");
+var rvc = dhvani_midiroute_new((0 - 1), DH_MIDIROUTE_CURVE_FIXED, 80, 0, 127);
+var evc = dhvani_note_event_new(0, 100, 60, 127, 0);
+var rvcres = dhvani_midiroute_filter_event(rvc, evc);
+assert(rvcres != 0, "velocity curve event accepted");
+assert_eq(dhvani_note_event_velocity(rvcres), 80, "fixed velocity 80 applied");
+
+# ---- cc_mapping_7bit ----
+test_group("cc_mapping_7bit");
+var m7 = dhvani_midiroute_cc_new(1, 0, 0, 1.0);
+assert(f64_lt(f64_abs(f64_sub(dhvani_midiroute_cc_map_value(m7, 0), 0)), DH_EPSILON), "cc 0 -> 0.0");
+assert(f64_lt(f64_abs(f64_sub(dhvani_midiroute_cc_map_value(m7, 127), 1.0)), 0.01), "cc 127 -> 1.0");
+assert(f64_lt(f64_abs(f64_sub(dhvani_midiroute_cc_map_value(m7, 64), 0.504)), 0.01), "cc 64 -> ~0.504");
+
+# ---- cc_mapping_32bit ----
+test_group("cc_mapping_32bit");
+var m32 = dhvani_midiroute_cc_new(1, 0, f64_neg(1.0), 1.0);
+assert(f64_lt(f64_abs(f64_sub(dhvani_midiroute_cc_map_value_32(m32, 0), f64_neg(1.0))), 0.01), "cc32 0 -> -1.0");
+assert(f64_lt(f64_abs(f64_sub(dhvani_midiroute_cc_map_value_32(m32, 4294967295), 1.0)), 0.01), "cc32 MAX -> 1.0");
+
+# ---- cc_mapping_custom_range ----
+test_group("cc_mapping_custom_range");
+var mcr = dhvani_midiroute_cc_new(7, 0, 20.0, 20000.0);
+assert(f64_lt(f64_abs(f64_sub(dhvani_midiroute_cc_map_value(mcr, 0), 20.0)), 0.01), "cc 0 -> 20.0");
+assert(f64_lt(f64_abs(f64_sub(dhvani_midiroute_cc_map_value(mcr, 127), 20000.0)), 1.0), "cc 127 -> 20000.0");
+
+var rc = assert_summary();
+syscall(60, rc);

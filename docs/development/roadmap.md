@@ -40,7 +40,7 @@
   itself is the first task of Wave B (where it's actually consumed).
 - Deferred: `AudioBufferRef`, `normalize_to_lufs` (→ Wave D).
 
-### M2 — DSP core (Waves B–C) — `dsp`
+### M2 — DSP core (Waves B–C) — `dsp` — ✅ COMPLETE
 
 - **Wave B**: `oscillator`, `gain_smoother`, `envelope`, `lfo`, `automation`,
   `pan`, `svf`, `biquad`, `dsp/mod`, `routing`, `buffer/ops`.
@@ -50,19 +50,23 @@
   before porting their render loops.
 - Gate: `dsp`. Each module green before its dependents start.
 
-### M3 — Analysis (Wave D) — `analysis`
+### M3 — Analysis (Wave D) — `analysis` — ✅ COMPLETE
 
 - `waveform`, `zcr`, `analysis/mod`, `fft`, `dynamics`, `loudness` (needs
   biquad from M2), `stft`, `chroma`, `convolution` + `noise_reduction` (need
   fft), `key`, `onset`, `beat`.
 - Gate: `analysis`. Unlocks the analysis-gated buffer fns (`normalize_to_lufs`).
 
-### M4 — MIDI · graph · meter · capture (Wave E) — `midi` / `graph` / `pipewire`
+### M4 — MIDI · graph · meter · capture (Wave E) — `midi` / `graph` / `pipewire` — ✅ COMPLETE
 
-- `midi/{mod,voice,routing,v2,translate}` (define the 3 missing abaco note
-  constants locally), `meter`, `graph` (largest module, RT-safe — preallocate
-  all node scratch), `capture/{mod,record}` (portable; **not** `capture/pw`).
-- Gate: `midi`, `graph`. Acceptance: graph render alloc-free per block.
+- `midi/{mod,voice,routing,v2,translate}` (3 missing abaco note constants defined
+  locally), `meter` (atomics → plain fields), `graph` (largest module, 1174 LOC;
+  `AudioNode` trait → fn-ptr node dispatch, NodeId atomic → module-level `var`,
+  `process_parallel`/rayon dropped), `capture/{mod,record}` (portable; **not**
+  `capture/pw`). **9 modules, 480 assertions.**
+- Gate: `midi`, `graph`. Note: graph's per-block scratch (input gather + output
+  slots) currently allocates a fresh scratch vec per node cycle — revisit the
+  alloc-free-per-block acceptance target in Wave G hardening (parity first).
 
 ### M5 — Synthesis stack (Wave F) — feature-gated sibling wrappers
 

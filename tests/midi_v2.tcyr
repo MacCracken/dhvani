@@ -1,0 +1,35 @@
+# midi_v2.tcyr -- parity tests for src/midi_v2.cyr
+# Ported one-for-one from the 5 #[test] blocks in rust-old/src/midi/v2.rs.
+# DROPPED: serde_roundtrip (Cyrius has no derive-serde; serialization untestable).
+
+include "src/error.cyr"
+include "src/midi.cyr"
+include "src/midi_v2.cyr"
+
+alloc_init();
+
+# u32::MAX = 4294967295 (plain integer, fits an i64 slot -- no float trap).
+var U32_MAX = 4294967295;
+
+# ---- note_on_v2_creation ----
+test_group("note_on_v2_creation");
+var note1 = dhvani_midi2_note_on_new(0, 60, 32768, 0, 0, 0);
+assert_eq(dhvani_midi2_note_on_velocity(note1), 32768, "velocity = 32768");
+
+# ---- control_change_v2_full_range ----
+test_group("control_change_v2_full_range");
+var cc1 = dhvani_midi2_cc_new(0, 1, U32_MAX, 0);
+assert_eq(dhvani_midi2_cc_value(cc1), U32_MAX, "value = u32::MAX");
+
+# ---- per_note_pitch_bend_center ----
+test_group("per_note_pitch_bend_center");
+var pb1 = dhvani_midi2_per_note_pitch_bend_new(0, 60, 0, 0x80000000);
+assert_eq(dhvani_midi2_per_note_pitch_bend_value(pb1), 0x80000000, "value = center");
+
+# ---- ump_message_types ----
+test_group("ump_message_types");
+var mt1 = DH_UMP_MIDI2_CHANNEL_VOICE;
+assert_eq(mt1, DH_UMP_MIDI2_CHANNEL_VOICE, "mt == Midi2ChannelVoice");
+
+var rc = assert_summary();
+syscall(60, rc);

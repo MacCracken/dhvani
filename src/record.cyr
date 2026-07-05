@@ -1,0 +1,138 @@
+# record.cyr -- ring-buffer / accumulator recording.
+# Ports rust-old/src/capture/record.rs. L1: dep error only (+ stdlib vec).
+#
+# The Rust original is a lock-free RT->accumulator pipeline: the RT thread
+# push()es interleaved f32 chunks into a bounded mpsc channel, a background
+# thread drains them into a Vec (or a Vec<Vec> of takes for loop recording),
+# and finish() joins and returns. The Cyrius port is SINGLE-THREADED, so the
+# channel + accumulator thread collapse into direct in-place accumulation:
+# push_samples() appends straight into the owned vec, finish() returns it.
+#
+# `channel_bound` (backpressure knob) is retained for fidelity but never drops
+# in a single-threaded model -- there is no queue to overflow -- so
+# dropped_samples stays 0 (matching every Rust test). f32 samples -> f64 slots.
+# serde + Display dropped. mode/RecordingMode enum -> integer codes.
+
+# ---- RecordingMode (was enum) ----
+var DH_RECORDING_MODE_NORMAL  = 0;   # linear recording
+var DH_RECORDING_MODE_OVERDUB = 1;   # layer on top of existing takes
+var DH_RECORDING_MODE_REPLACE = 2;   # overwrite per loop iteration
+
+# Maximum accumulator size (~500 MB of f32 samples in the Rust original).
+var DH_MAX_ACCUMULATOR_SAMPLES = 125000000;
+
+# ================================================================
+# RecordManager -- flat accumulator: every pushed chunk is appended into one
+# growing vec, capped at DH_MAX_ACCUMULATOR_SAMPLES.
+# ================================================================
+#derive(accessors)
+struct DhRecordManager { accumulated; channel_bound; dropped_samples; }
+
+# new(channel_bound) -- channel_bound.max(1) preserved for fidelity.
+#must_use
+fn dhvani_record_new(channel_bound) {
+    var bound = channel_bound;
+    if (bound < 1) { bound = 1; }
+    var self = alloc(sizeof(DhRecordManager));
+    DhRecordManager_set_accumulated(self, vec_new());
+    DhRecordManager_set_channel_bound(self, bound);
+    DhRecordManager_set_dropped_samples(self, 0);
+    return self;
+}
+
+# push_samples(data) -- append the chunk unless it would exceed the cap.
+# Single-threaded: no backpressure, so nothing is dropped here.
+fn dhvani_record_push_samples(self, data) {
+    var acc = DhRecordManager_accumulated(self);
+    var acc_len = vec_len(acc);
+    var chunk_len = vec_len(data);
+    if ((acc_len + chunk_len) <= DH_MAX_ACCUMULATOR_SAMPLES) {
+        var i = 0;
+        while (i < chunk_len) {
+            vec_push(acc, vec_get(data, i));
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# dropped_samples -- count dropped due to backpressure (always 0 here).
+#inline
+#must_use
+fn dhvani_record_dropped_samples(self) {
+    return DhRecordManager_dropped_samples(self);
+}
+
+# finish -- return all accumulated samples.
+#must_use
+fn dhvani_record_finish(self) {
+    return DhRecordManager_accumulated(self);
+}
+
+# ================================================================
+# LoopRecordManager -- loop-aware: takes is a vec of vecs (one per loop
+# iteration), seeded with a single empty take. Samples append to the last
+# take; a loop marker starts a fresh empty take.
+# ================================================================
+#derive(accessors)
+struct DhLoopRecordManager { takes; channel_bound; mode; dropped_samples; }
+
+# new(channel_bound, mode) -- starts with one empty take.
+#must_use
+fn dhvani_record_loop_new(channel_bound, mode) {
+    var bound = channel_bound;
+    if (bound < 1) { bound = 1; }
+    var takes = vec_new();
+    vec_push(takes, vec_new());
+    var self = alloc(sizeof(DhLoopRecordManager));
+    DhLoopRecordManager_set_takes(self, takes);
+    DhLoopRecordManager_set_channel_bound(self, bound);
+    DhLoopRecordManager_set_mode(self, mode);
+    DhLoopRecordManager_set_dropped_samples(self, 0);
+    return self;
+}
+
+# mode -- current recording mode code.
+#inline
+#must_use
+fn dhvani_record_loop_mode(self) {
+    return DhLoopRecordManager_mode(self);
+}
+
+# push_samples(data) -- append into the current (last) take unless capped.
+fn dhvani_record_loop_push_samples(self, data) {
+    var takes = DhLoopRecordManager_takes(self);
+    var n = vec_len(takes);
+    if (n > 0) {
+        var current = vec_get(takes, n - 1);
+        var cur_len = vec_len(current);
+        var chunk_len = vec_len(data);
+        if ((cur_len + chunk_len) <= DH_MAX_ACCUMULATOR_SAMPLES) {
+            var i = 0;
+            while (i < chunk_len) {
+                vec_push(current, vec_get(data, i));
+                i = i + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+# push_loop_marker -- start a new empty take.
+fn dhvani_record_loop_push_marker(self) {
+    vec_push(DhLoopRecordManager_takes(self), vec_new());
+    return 0;
+}
+
+# dropped_samples -- always 0 in the single-threaded port.
+#inline
+#must_use
+fn dhvani_record_loop_dropped_samples(self) {
+    return DhLoopRecordManager_dropped_samples(self);
+}
+
+# finish -- return all takes (each inner vec is one loop iteration; empties kept).
+#must_use
+fn dhvani_record_loop_finish(self) {
+    return DhLoopRecordManager_takes(self);
+}

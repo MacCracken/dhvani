@@ -1,0 +1,220 @@
+# capture.cyr -- capture/output configuration + device description + event enum.
+# Ports rust-old/src/capture/mod.rs (the pure config surface). L1: dep error +
+# buffer (DH_MAX_SAMPLE_RATE). The PipeWire backend (capture/pw) is
+# platform-blocked and NOT ported; the lock-free record threads (capture/record,
+# mpsc + thread::spawn) are single-threaded concerns dropped from this port.
+#
+# DeviceType (enum)      -> DH_DEVICE_* int codes.
+# CaptureEvent (enum)    -> DH_CEVENT_* kind code + a fat struct (device / id).
+# Option<u32> device_id  -> i64 sentinel: DH_CAPTURE_NO_DEVICE (-1) == None.
+# validate()             -> shared DHVANI_ERR_* code (Rust had none; added per
+#                           the port spec; 0 = "use device default" stays valid).
+# serde + Display string tests dropped (no runtime representation to port).
+
+# ---- DeviceType (was `enum DeviceType`) -> int codes ----
+var DH_DEVICE_SOURCE = 0;   # audio input  (microphone, line-in, desktop capture)
+var DH_DEVICE_SINK   = 1;   # audio output (speakers, headphones)
+
+# Static name for a DeviceType code (diagnostics; Rust derived Debug only).
+#must_use
+fn dhvani_capture_device_type_name(kind) {
+    if (kind == DH_DEVICE_SOURCE) { return "source"; }
+    if (kind == DH_DEVICE_SINK)   { return "sink"; }
+    return "unknown";
+}
+
+# ---- device_id sentinel (Option<u32>::None) ----
+var DH_CAPTURE_NO_DEVICE = (0 - 1);   # None; any value >= 0 is Some(id)
+
+# ---- AudioDevice (was `struct AudioDevice`) ----
+# name is a string handle; device_type is a DH_DEVICE_* code.
+#derive(accessors)
+struct DhAudioDevice { id; name; device_type; channels; sample_rate; }
+
+#must_use
+fn dhvani_capture_device_new(id, name, device_type, channels, sample_rate) {
+    var d = alloc(sizeof(DhAudioDevice));
+    DhAudioDevice_set_id(d, id);
+    DhAudioDevice_set_name(d, name);
+    DhAudioDevice_set_device_type(d, device_type);
+    DhAudioDevice_set_channels(d, channels);
+    DhAudioDevice_set_sample_rate(d, sample_rate);
+    return d;
+}
+#inline
+#must_use
+fn dhvani_capture_device_id(d) { return DhAudioDevice_id(d); }
+#inline
+#must_use
+fn dhvani_capture_device_name(d) { return DhAudioDevice_name(d); }
+#inline
+#must_use
+fn dhvani_capture_device_type(d) { return DhAudioDevice_device_type(d); }
+#inline
+#must_use
+fn dhvani_capture_device_channels(d) { return DhAudioDevice_channels(d); }
+#inline
+#must_use
+fn dhvani_capture_device_sample_rate(d) { return DhAudioDevice_sample_rate(d); }
+
+# ---- CaptureConfig (was `struct CaptureConfig`) ----
+# sample_rate 0 = device default; channels 0 = device default; device_id
+# DH_CAPTURE_NO_DEVICE = None.
+#derive(accessors)
+struct DhCaptureConfig { sample_rate; channels; buffer_frames; device_id; }
+
+#must_use
+fn dhvani_capture_config_new(sample_rate, channels, buffer_frames, device_id) {
+    var c = alloc(sizeof(DhCaptureConfig));
+    DhCaptureConfig_set_sample_rate(c, sample_rate);
+    DhCaptureConfig_set_channels(c, channels);
+    DhCaptureConfig_set_buffer_frames(c, buffer_frames);
+    DhCaptureConfig_set_device_id(c, device_id);
+    return c;
+}
+
+# Default (impl Default): 48000 Hz, 2 ch, 1024 frames, no device.
+#must_use
+fn dhvani_capture_config_default() {
+    return dhvani_capture_config_new(48000, 2, 1024, DH_CAPTURE_NO_DEVICE);
+}
+
+#inline
+#must_use
+fn dhvani_capture_config_sample_rate(c) { return DhCaptureConfig_sample_rate(c); }
+#inline
+#must_use
+fn dhvani_capture_config_channels(c) { return DhCaptureConfig_channels(c); }
+#inline
+#must_use
+fn dhvani_capture_config_buffer_frames(c) { return DhCaptureConfig_buffer_frames(c); }
+#inline
+#must_use
+fn dhvani_capture_config_device_id(c) { return DhCaptureConfig_device_id(c); }
+
+# 1 iff device_id is Some (>= 0), 0 iff None. Mirrors Option::is_some.
+#must_use
+fn dhvani_capture_config_has_device(c) {
+    if (DhCaptureConfig_device_id(c) < 0) { return 0; }
+    return 1;
+}
+
+# ---- OutputConfig (was `struct OutputConfig`) ----
+# Same field set + defaults as CaptureConfig, kept a distinct type as in Rust.
+#derive(accessors)
+struct DhOutputConfig { sample_rate; channels; buffer_frames; device_id; }
+
+#must_use
+fn dhvani_capture_output_config_new(sample_rate, channels, buffer_frames, device_id) {
+    var o = alloc(sizeof(DhOutputConfig));
+    DhOutputConfig_set_sample_rate(o, sample_rate);
+    DhOutputConfig_set_channels(o, channels);
+    DhOutputConfig_set_buffer_frames(o, buffer_frames);
+    DhOutputConfig_set_device_id(o, device_id);
+    return o;
+}
+
+# Default (impl Default): 48000 Hz, 2 ch, 1024 frames, no device.
+#must_use
+fn dhvani_capture_output_config_default() {
+    return dhvani_capture_output_config_new(48000, 2, 1024, DH_CAPTURE_NO_DEVICE);
+}
+
+#inline
+#must_use
+fn dhvani_capture_output_config_sample_rate(o) { return DhOutputConfig_sample_rate(o); }
+#inline
+#must_use
+fn dhvani_capture_output_config_channels(o) { return DhOutputConfig_channels(o); }
+#inline
+#must_use
+fn dhvani_capture_output_config_buffer_frames(o) { return DhOutputConfig_buffer_frames(o); }
+#inline
+#must_use
+fn dhvani_capture_output_config_device_id(o) { return DhOutputConfig_device_id(o); }
+
+#must_use
+fn dhvani_capture_output_config_has_device(o) {
+    if (DhOutputConfig_device_id(o) < 0) { return 0; }
+    return 1;
+}
+
+# ---- validate (added per port spec; Rust had no validate) ----
+# 0 = "use device default" stays valid; a nonzero sample rate must be in-range
+# (<= DH_MAX_SAMPLE_RATE) and a nonzero buffer_frames must be nonzero. Returns a
+# shared DHVANI_ERR_* code, DHVANI_ERR_NONE on success.
+#must_use
+fn dhvani_capture_config_validate(c) {
+    var sr = DhCaptureConfig_sample_rate(c);
+    if (sr > DH_MAX_SAMPLE_RATE) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
+    return DHVANI_ERR_NONE;
+}
+
+#must_use
+fn dhvani_capture_output_config_validate(o) {
+    var osr = DhOutputConfig_sample_rate(o);
+    if (osr > DH_MAX_SAMPLE_RATE) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
+    return DHVANI_ERR_NONE;
+}
+
+# ---- CaptureEvent (was data-carrying `enum CaptureEvent`) ----
+# kind code + a fat struct: DeviceAdded carries a DhAudioDevice handle (in
+# `device`); DeviceRemoved carries a PipeWire id (in `id`); Overflow / Underrun
+# carry nothing.
+var DH_CEVENT_DEVICE_ADDED   = 0;
+var DH_CEVENT_DEVICE_REMOVED = 1;
+var DH_CEVENT_OVERFLOW       = 2;
+var DH_CEVENT_UNDERRUN       = 3;
+
+#derive(accessors)
+struct DhCaptureEvent { kind; device; id; }
+
+# DeviceAdded(device) -- carries the AudioDevice handle.
+#must_use
+fn dhvani_capture_event_device_added(device) {
+    var e = alloc(sizeof(DhCaptureEvent));
+    DhCaptureEvent_set_kind(e, DH_CEVENT_DEVICE_ADDED);
+    DhCaptureEvent_set_device(e, device);
+    DhCaptureEvent_set_id(e, 0);
+    return e;
+}
+
+# DeviceRemoved { id } -- carries the removed PipeWire id.
+#must_use
+fn dhvani_capture_event_device_removed(id) {
+    var e = alloc(sizeof(DhCaptureEvent));
+    DhCaptureEvent_set_kind(e, DH_CEVENT_DEVICE_REMOVED);
+    DhCaptureEvent_set_device(e, 0);
+    DhCaptureEvent_set_id(e, id);
+    return e;
+}
+
+# Overflow -- capture buffer overflow (data lost).
+#must_use
+fn dhvani_capture_event_overflow() {
+    var e = alloc(sizeof(DhCaptureEvent));
+    DhCaptureEvent_set_kind(e, DH_CEVENT_OVERFLOW);
+    DhCaptureEvent_set_device(e, 0);
+    DhCaptureEvent_set_id(e, 0);
+    return e;
+}
+
+# Underrun -- output buffer underrun (silence inserted).
+#must_use
+fn dhvani_capture_event_underrun() {
+    var e = alloc(sizeof(DhCaptureEvent));
+    DhCaptureEvent_set_kind(e, DH_CEVENT_UNDERRUN);
+    DhCaptureEvent_set_device(e, 0);
+    DhCaptureEvent_set_id(e, 0);
+    return e;
+}
+
+#inline
+#must_use
+fn dhvani_capture_event_kind(e) { return DhCaptureEvent_kind(e); }
+#inline
+#must_use
+fn dhvani_capture_event_device(e) { return DhCaptureEvent_device(e); }
+#inline
+#must_use
+fn dhvani_capture_event_id(e) { return DhCaptureEvent_id(e); }

@@ -1,0 +1,119 @@
+# voice.tcyr -- parity tests for src/voice.cyr
+# Ported one-for-one from the 12 #[test] blocks in rust-old/src/midi/voice.rs.
+# No serde/Display tests exist in the oracle -- none dropped.
+
+include "src/error.cyr"
+include "src/midi.cyr"
+include "src/voice.cyr"
+
+alloc_init();
+
+# ---- voice_frequency ----
+test_group("voice_frequency");
+var vf = dhvani_voice_new();
+dhvani_voice_set_note(vf, 69);   # A4
+assert(f64_lt(f64_abs(f64_sub(dhvani_voice_frequency(vf), 440.0)), 0x3F847AE147AE147B), "A4 ~= 440");   # tol 0.01
+dhvani_voice_set_note(vf, 60);   # C4
+assert(f64_lt(f64_abs(f64_sub(dhvani_voice_frequency(vf), 0x40705A147AE147AE)), 0x3FB999999999999A), "C4 ~= 261.63");   # 261.63, tol 0.1
+dhvani_voice_set_note(vf, 0);
+assert(f64_gt(dhvani_voice_frequency(vf), 0), "freq(0) > 0");
+assert(f64_lt(dhvani_voice_frequency(vf), 10.0), "freq(0) < 10 (~8.18 Hz)");
+
+# ---- voice_state ----
+test_group("voice_state");
+var vs = dhvani_voice_new();
+assert_eq(dhvani_voice_is_idle(vs), 1, "new voice idle");
+assert_eq(dhvani_voice_is_active(vs), 0, "new voice not active");
+
+# ---- voice_per_note_cc ----
+test_group("voice_per_note_cc");
+var vc = dhvani_voice_new();
+dhvani_voice_apply_per_note_cc(vc, 74, 0x3FE999999999999A);   # 0.8
+assert(f64_lt(f64_abs(f64_sub(dhvani_voice_brightness(vc), 0x3FE999999999999A)), DH_EPSILON), "brightness = 0.8");
+# Non-74 CC should not affect brightness.
+dhvani_voice_apply_per_note_cc(vc, 1, 0.5);
+assert(f64_lt(f64_abs(f64_sub(dhvani_voice_brightness(vc), 0x3FE999999999999A)), DH_EPSILON), "brightness still 0.8");
+
+# ---- voice_manager_basic ----
+test_group("voice_manager_basic");
+var mgr1 = dhvani_voice_manager_new(4, DH_STEAL_OLDEST);
+assert_eq(dhvani_voice_manager_active_count(mgr1), 0, "start 0 active");
+var idx1 = dhvani_voice_manager_note_on(mgr1, 60, 100, 0);
+assert_eq(idx1, 0, "first note -> slot 0");
+assert_eq(dhvani_voice_manager_active_count(mgr1), 1, "1 active after note_on");
+dhvani_voice_manager_note_off(mgr1, 60, 0);
+assert_eq(dhvani_voice_state(dhvani_voice_manager_voice(mgr1, 0)), DH_VOICE_STATE_RELEASING, "note_off -> Releasing");
+dhvani_voice_manager_free_voice(mgr1, 0);
+assert_eq(dhvani_voice_manager_active_count(mgr1), 0, "0 active after free");
+
+# ---- voice_stealing_oldest ----
+test_group("voice_stealing_oldest");
+var mgr2 = dhvani_voice_manager_new(2, DH_STEAL_OLDEST);
+dhvani_voice_manager_note_on(mgr2, 60, 100, 0);   # slot 0, age 0
+dhvani_voice_manager_tick_age(mgr2);              # slot 0 age = 1
+dhvani_voice_manager_note_on(mgr2, 62, 100, 0);   # slot 1, age 0
+dhvani_voice_manager_tick_age(mgr2);              # slot 0 age = 2, slot 1 age = 1
+# All voices full -> steal oldest (slot 0).
+var idx2 = dhvani_voice_manager_note_on(mgr2, 64, 100, 0);
+assert_eq(idx2, 0, "steal oldest -> slot 0");
+assert_eq(dhvani_voice_note(dhvani_voice_manager_voice(mgr2, 0)), 64, "slot 0 now note 64");
+
+# ---- voice_stealing_quietest ----
+test_group("voice_stealing_quietest");
+var mgr3 = dhvani_voice_manager_new(2, DH_STEAL_QUIETEST);
+dhvani_voice_manager_note_on(mgr3, 60, 100, 0);
+dhvani_voice_set_envelope_level(dhvani_voice_manager_voice_mut(mgr3, 0), 0x3FE999999999999A);   # 0.8
+dhvani_voice_manager_note_on(mgr3, 62, 100, 0);
+dhvani_voice_set_envelope_level(dhvani_voice_manager_voice_mut(mgr3, 1), 0x3FC999999999999A);   # 0.2
+# Should steal quietest (slot 1).
+var idx3 = dhvani_voice_manager_note_on(mgr3, 64, 100, 0);
+assert_eq(idx3, 1, "steal quietest -> slot 1");
+
+# ---- voice_stealing_lowest ----
+test_group("voice_stealing_lowest");
+var mgr4 = dhvani_voice_manager_new(2, DH_STEAL_LOWEST);
+dhvani_voice_manager_note_on(mgr4, 72, 100, 0);   # high note
+dhvani_voice_manager_note_on(mgr4, 48, 100, 0);   # low note
+# Should steal lowest (48) -> slot 1.
+var idx4 = dhvani_voice_manager_note_on(mgr4, 60, 100, 0);
+assert_eq(idx4, 1, "steal lowest -> slot 1");
+assert_eq(dhvani_voice_note(dhvani_voice_manager_voice(mgr4, 1)), 60, "slot 1 now note 60");
+
+# ---- voice_stealing_none ----
+test_group("voice_stealing_none");
+var mgr5 = dhvani_voice_manager_new(2, DH_STEAL_NONE);
+dhvani_voice_manager_note_on(mgr5, 60, 100, 0);
+dhvani_voice_manager_note_on(mgr5, 62, 100, 0);
+var idx5 = dhvani_voice_manager_note_on(mgr5, 64, 100, 0);
+assert_eq(idx5, DH_VOICE_NONE, "steal none -> None (-1)");
+
+# ---- voice_manager_reset ----
+test_group("voice_manager_reset");
+var mgr6 = dhvani_voice_manager_new(4, DH_STEAL_OLDEST);
+dhvani_voice_manager_note_on(mgr6, 60, 100, 0);
+dhvani_voice_manager_note_on(mgr6, 62, 90, 0);
+assert_eq(dhvani_voice_manager_active_count(mgr6), 2, "2 active before reset");
+dhvani_voice_manager_reset(mgr6);
+assert_eq(dhvani_voice_manager_active_count(mgr6), 0, "0 active after reset");
+
+# ---- voice_reuse_after_free ----
+test_group("voice_reuse_after_free");
+var mgr7 = dhvani_voice_manager_new(2, DH_STEAL_NONE);
+var r7a = dhvani_voice_manager_note_on(mgr7, 60, 100, 0);
+var idx7b = dhvani_voice_manager_note_on(mgr7, 62, 100, 0);
+assert_eq(dhvani_voice_manager_note_on(mgr7, 64, 100, 0), DH_VOICE_NONE, "full -> None");
+dhvani_voice_manager_free_voice(mgr7, idx7b);
+var idx7c = dhvani_voice_manager_note_on(mgr7, 64, 100, 0);
+assert_eq(idx7c, idx7b, "reuses freed slot");
+
+# ---- tick_age_only_active ----
+test_group("tick_age_only_active");
+var mgr8 = dhvani_voice_manager_new(2, DH_STEAL_OLDEST);
+dhvani_voice_manager_note_on(mgr8, 60, 100, 0);
+dhvani_voice_manager_tick_age(mgr8);
+dhvani_voice_manager_tick_age(mgr8);
+assert_eq(dhvani_voice_age(dhvani_voice_manager_voice(mgr8, 0)), 2, "active slot age 2");
+assert_eq(dhvani_voice_age(dhvani_voice_manager_voice(mgr8, 1)), 0, "idle slot not ticked");
+
+var rc = assert_summary();
+syscall(60, rc);

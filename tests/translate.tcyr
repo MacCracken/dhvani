@@ -1,0 +1,94 @@
+# translate.tcyr -- parity tests for src/translate.cyr
+# Ported one-for-one from the 12 #[test] blocks in rust-old/src/midi/translate.rs.
+# No serde round-trip or Display-string tests exist in the oracle -> none dropped.
+
+include "src/error.cyr"
+include "src/midi.cyr"
+include "src/midi_v2.cyr"
+include "src/translate.cyr"
+
+alloc_init();
+
+# ---- velocity_7_to_16_zero ----
+test_group("velocity_7_to_16_zero");
+assert_eq(dhvani_miditx_velocity_7_to_16(0), 0, "v7->16(0) = 0");
+
+# ---- velocity_7_to_16_max ----
+test_group("velocity_7_to_16_max");
+var vmax = dhvani_miditx_velocity_7_to_16(127);
+assert_eq(vmax > 65000, 1, "max velocity near 65535");
+
+# ---- velocity_roundtrip ----
+test_group("velocity_roundtrip");
+var vr = 0;
+while (vr <= 127) {
+    var v16r = dhvani_miditx_velocity_7_to_16(vr);
+    var backr = dhvani_miditx_velocity_16_to_7(v16r);
+    assert_eq(backr, vr, "velocity roundtrip");
+    vr = vr + 1;
+}
+
+# ---- cc_roundtrip ----
+test_group("cc_roundtrip");
+var cr = 0;
+while (cr <= 127) {
+    var v32c = dhvani_miditx_cc_7_to_32(cr);
+    var backc = dhvani_miditx_cc_32_to_7(v32c);
+    assert_eq(backc, cr, "cc roundtrip");
+    cr = cr + 1;
+}
+
+# ---- pitch_bend_roundtrip ----
+test_group("pitch_bend_roundtrip");
+var pbv = vec_new();
+vec_push(pbv, 0);
+vec_push(pbv, 1);
+vec_push(pbv, 8192);
+vec_push(pbv, 16383);
+var pi = 0;
+while (pi < vec_len(pbv)) {
+    var pv = vec_get(pbv, pi);
+    var v32p = dhvani_miditx_pitch_bend_14_to_32(pv);
+    var backp = dhvani_miditx_pitch_bend_32_to_14(v32p);
+    assert_eq(backp, pv, "pitch bend roundtrip");
+    pi = pi + 1;
+}
+
+# ---- pitch_bend_center ----
+test_group("pitch_bend_center");
+var center14 = 8192;
+var v32center = dhvani_miditx_pitch_bend_14_to_32(center14);
+var backcenter = dhvani_miditx_pitch_bend_32_to_14(v32center);
+assert_eq(backcenter, center14, "pitch bend center roundtrip");
+
+# ---- note_event_to_v2_and_back ----
+test_group("note_event_to_v2_and_back");
+var ev = dhvani_note_event_new(1000, 500, 60, 100, 0);
+var v2 = dhvani_miditx_note_event_to_v2(ev);
+assert_eq(dhvani_midi2_note_on_note(v2), 60, "v2 note = 60");
+assert_eq(dhvani_midi2_note_on_channel(v2), 0, "v2 channel = 0");
+var back = dhvani_miditx_note_on_v2_to_event(v2, 500);
+assert_eq(dhvani_note_event_note(back), 60, "back note = 60");
+assert_eq(dhvani_note_event_velocity(back), 100, "back velocity = 100");
+assert_eq(dhvani_note_event_duration(back), 500, "back duration = 500");
+
+# ---- cc_to_v2_and_back ----
+test_group("cc_to_v2_and_back");
+var cc = dhvani_cc_new(0, 7, 100, 0);
+var ccv2 = dhvani_miditx_cc_to_v2(cc);
+assert_eq(dhvani_midi2_cc_controller(ccv2), 7, "ccv2 controller = 7");
+var ccback = dhvani_miditx_cc_v2_to_cc(ccv2);
+assert_eq(dhvani_cc_controller(ccback), 7, "ccback controller = 7");
+assert_eq(dhvani_cc_value(ccback), 100, "ccback value = 100");
+
+# ---- cc_7_to_32_max ----
+test_group("cc_7_to_32_max");
+var v32max = dhvani_miditx_cc_7_to_32(127);
+assert_eq(v32max > 4000000000, 1, "max CC near u32::MAX");
+
+# ---- pitch_bend_center_constant ----
+test_group("pitch_bend_center_constant");
+assert_eq(DH_MIDITX_PITCH_BEND_CENTER, 0x80000000, "PITCH_BEND_CENTER = 0x80000000");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,336 @@
+# midi.cyr -- MIDI 1.0 core types: NoteEvent, ControlChange, MidiEvent, MidiClip.
+# Ports rust-old/src/midi/mod.rs. L0: dep error only (+ stdlib string streq).
+# The data-carrying MidiEvent enum -> a `kind` code + a fat struct holding every
+# variant's fields (only position/channel are read across variants). FramePos
+# (u64) and the u8 fields -> i64 slots. serde dropped. Names are string handles.
+
+# ---- NoteEvent ----
+#derive(accessors)
+struct DhNoteEvent { position; duration; note; velocity; channel; }
+#must_use
+fn dhvani_note_event_new(position, duration, note, velocity, channel) {
+    var e = alloc(sizeof(DhNoteEvent));
+    DhNoteEvent_set_position(e, position);
+    DhNoteEvent_set_duration(e, duration);
+    DhNoteEvent_set_note(e, note);
+    DhNoteEvent_set_velocity(e, velocity);
+    DhNoteEvent_set_channel(e, channel);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_note_event_position(e) { return DhNoteEvent_position(e); }
+#inline
+#must_use
+fn dhvani_note_event_duration(e) { return DhNoteEvent_duration(e); }
+#inline
+#must_use
+fn dhvani_note_event_note(e) { return DhNoteEvent_note(e); }
+#inline
+#must_use
+fn dhvani_note_event_velocity(e) { return DhNoteEvent_velocity(e); }
+#inline
+#must_use
+fn dhvani_note_event_channel(e) { return DhNoteEvent_channel(e); }
+
+# ---- ControlChange ----
+#derive(accessors)
+struct DhControlChange { position; controller; value; channel; }
+#must_use
+fn dhvani_cc_new(position, controller, value, channel) {
+    var e = alloc(sizeof(DhControlChange));
+    DhControlChange_set_position(e, position);
+    DhControlChange_set_controller(e, controller);
+    DhControlChange_set_value(e, value);
+    DhControlChange_set_channel(e, channel);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_cc_position(e) { return DhControlChange_position(e); }
+#inline
+#must_use
+fn dhvani_cc_controller(e) { return DhControlChange_controller(e); }
+#inline
+#must_use
+fn dhvani_cc_value(e) { return DhControlChange_value(e); }
+#inline
+#must_use
+fn dhvani_cc_channel(e) { return DhControlChange_channel(e); }
+
+# ---- MidiEvent (data-carrying enum -> kind code + fat struct) ----
+var DH_MIDI_NOTE_ON         = 0;
+var DH_MIDI_NOTE_OFF        = 1;
+var DH_MIDI_CONTROL_CHANGE  = 2;
+var DH_MIDI_PITCH_BEND      = 3;
+var DH_MIDI_AFTERTOUCH      = 4;
+var DH_MIDI_POLY_AFTERTOUCH = 5;
+var DH_MIDI_PROGRAM_CHANGE  = 6;
+
+#derive(accessors)
+struct DhMidiEvent { kind; position; note; velocity; controller; value; pressure; program; channel; }
+
+# alloc a fully-zeroed event with kind/position/channel set.
+#must_use
+fn dh_midi_event_alloc(kind, position, channel) {
+    var e = alloc(sizeof(DhMidiEvent));
+    DhMidiEvent_set_kind(e, kind);
+    DhMidiEvent_set_position(e, position);
+    DhMidiEvent_set_note(e, 0);
+    DhMidiEvent_set_velocity(e, 0);
+    DhMidiEvent_set_controller(e, 0);
+    DhMidiEvent_set_value(e, 0);
+    DhMidiEvent_set_pressure(e, 0);
+    DhMidiEvent_set_program(e, 0);
+    DhMidiEvent_set_channel(e, channel);
+    return e;
+}
+#must_use
+fn dhvani_midi_note_on(position, note, velocity, channel) {
+    var e = dh_midi_event_alloc(DH_MIDI_NOTE_ON, position, channel);
+    DhMidiEvent_set_note(e, note); DhMidiEvent_set_velocity(e, velocity);
+    return e;
+}
+#must_use
+fn dhvani_midi_note_off(position, note, velocity, channel) {
+    var e = dh_midi_event_alloc(DH_MIDI_NOTE_OFF, position, channel);
+    DhMidiEvent_set_note(e, note); DhMidiEvent_set_velocity(e, velocity);
+    return e;
+}
+#must_use
+fn dhvani_midi_control_change(position, controller, value, channel) {
+    var e = dh_midi_event_alloc(DH_MIDI_CONTROL_CHANGE, position, channel);
+    DhMidiEvent_set_controller(e, controller); DhMidiEvent_set_value(e, value);
+    return e;
+}
+#must_use
+fn dhvani_midi_pitch_bend(position, value, channel) {
+    var e = dh_midi_event_alloc(DH_MIDI_PITCH_BEND, position, channel);
+    DhMidiEvent_set_value(e, value);
+    return e;
+}
+#must_use
+fn dhvani_midi_aftertouch(position, pressure, channel) {
+    var e = dh_midi_event_alloc(DH_MIDI_AFTERTOUCH, position, channel);
+    DhMidiEvent_set_pressure(e, pressure);
+    return e;
+}
+#must_use
+fn dhvani_midi_poly_aftertouch(position, note, pressure, channel) {
+    var e = dh_midi_event_alloc(DH_MIDI_POLY_AFTERTOUCH, position, channel);
+    DhMidiEvent_set_note(e, note); DhMidiEvent_set_pressure(e, pressure);
+    return e;
+}
+#must_use
+fn dhvani_midi_program_change(position, program, channel) {
+    var e = dh_midi_event_alloc(DH_MIDI_PROGRAM_CHANGE, position, channel);
+    DhMidiEvent_set_program(e, program);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_midi_event_kind(e) { return DhMidiEvent_kind(e); }
+#inline
+#must_use
+fn dhvani_midi_event_position(e) { return DhMidiEvent_position(e); }
+#inline
+#must_use
+fn dhvani_midi_event_channel(e) { return DhMidiEvent_channel(e); }
+
+# ---- MidiClip ----
+#derive(accessors)
+struct DhMidiClip { name; notes; control_changes; timeline_pos; duration; }
+#must_use
+fn dhvani_midi_clip_new(name, timeline_pos, duration) {
+    var c = alloc(sizeof(DhMidiClip));
+    DhMidiClip_set_name(c, name);
+    DhMidiClip_set_notes(c, vec_new());
+    DhMidiClip_set_control_changes(c, vec_new());
+    DhMidiClip_set_timeline_pos(c, timeline_pos);
+    DhMidiClip_set_duration(c, duration);
+    return c;
+}
+#inline
+#must_use
+fn dhvani_midi_clip_name(c) { return DhMidiClip_name(c); }
+#inline
+#must_use
+fn dhvani_midi_clip_notes(c) { return DhMidiClip_notes(c); }
+#inline
+#must_use
+fn dhvani_midi_clip_control_changes(c) { return DhMidiClip_control_changes(c); }
+#inline
+#must_use
+fn dhvani_midi_clip_timeline_pos(c) { return DhMidiClip_timeline_pos(c); }
+#inline
+#must_use
+fn dhvani_midi_clip_duration(c) { return DhMidiClip_duration(c); }
+#must_use
+fn dhvani_midi_clip_end_pos(c) { return DhMidiClip_timeline_pos(c) + DhMidiClip_duration(c); }
+#must_use
+fn dhvani_midi_clip_event_count(c) { return vec_len(DhMidiClip_notes(c)) + vec_len(DhMidiClip_control_changes(c)); }
+
+# insert a note handle keeping notes sorted by position (partition_point <=:
+# new note goes AFTER equal-position notes).
+fn dh_midi_insert_note(notes, e) {
+    var pos = DhNoteEvent_position(e);
+    vec_push(notes, e);
+    var i = vec_len(notes) - 1;
+    var moving = 1;
+    while (moving == 1) {
+        if (i == 0) { moving = 0; }
+        else {
+            var left = vec_get(notes, i - 1);
+            if (DhNoteEvent_position(left) > pos) {
+                vec_set(notes, i, left); vec_set(notes, i - 1, e); i = i - 1;
+            } else { moving = 0; }
+        }
+    }
+    return 0;
+}
+fn dhvani_midi_clip_add_note(self, position, duration, note, velocity, channel) {
+    dh_midi_insert_note(DhMidiClip_notes(self), dhvani_note_event_new(position, duration, note, velocity, channel));
+    return 0;
+}
+fn dhvani_midi_clip_add_cc(self, position, controller, value, channel) {
+    var ccs = DhMidiClip_control_changes(self);
+    var e = dhvani_cc_new(position, controller, value, channel);
+    vec_push(ccs, e);
+    var i = vec_len(ccs) - 1;
+    var moving = 1;
+    while (moving == 1) {
+        if (i == 0) { moving = 0; }
+        else {
+            var left = vec_get(ccs, i - 1);
+            if (DhControlChange_position(left) > position) {
+                vec_set(ccs, i, left); vec_set(ccs, i - 1, e); i = i - 1;
+            } else { moving = 0; }
+        }
+    }
+    return 0;
+}
+
+# notes active at `frame`: position <= frame < position+duration.
+#must_use
+fn dhvani_midi_clip_notes_at(self, frame) {
+    var notes = DhMidiClip_notes(self);
+    var n = vec_len(notes);
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(notes, i);
+        var p = DhNoteEvent_position(e);
+        if (p <= frame) { if (frame < p + DhNoteEvent_duration(e)) { vec_push(out, e); } }
+        i = i + 1;
+    }
+    return out;
+}
+# note-ons starting exactly at `frame`.
+#must_use
+fn dhvani_midi_clip_note_ons_at(self, frame) {
+    var notes = DhMidiClip_notes(self);
+    var n = vec_len(notes);
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(notes, i);
+        if (DhNoteEvent_position(e) == frame) { vec_push(out, e); }
+        i = i + 1;
+    }
+    return out;
+}
+# note-offs ending exactly at `frame` (position+duration == frame).
+#must_use
+fn dhvani_midi_clip_note_offs_at(self, frame) {
+    var notes = DhMidiClip_notes(self);
+    var n = vec_len(notes);
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(notes, i);
+        if (DhNoteEvent_position(e) + DhNoteEvent_duration(e) == frame) { vec_push(out, e); }
+        i = i + 1;
+    }
+    return out;
+}
+# note events overlapping [start, end): position < end AND position+duration > start.
+#must_use
+fn dhvani_midi_clip_events_in_range(self, start, end) {
+    var notes = DhMidiClip_notes(self);
+    var n = vec_len(notes);
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(notes, i);
+        var p = DhNoteEvent_position(e);
+        if (p < end) { if (p + DhNoteEvent_duration(e) > start) { vec_push(out, e); } }
+        i = i + 1;
+    }
+    return out;
+}
+
+# merge another clip's notes+CCs (kept sorted); extend duration if needed.
+fn dhvani_midi_clip_merge(self, other) {
+    var onotes = DhMidiClip_notes(other);
+    var nn = vec_len(onotes);
+    var i = 0;
+    while (i < nn) {
+        var e = vec_get(onotes, i);
+        dh_midi_insert_note(DhMidiClip_notes(self),
+            dhvani_note_event_new(DhNoteEvent_position(e), DhNoteEvent_duration(e), DhNoteEvent_note(e), DhNoteEvent_velocity(e), DhNoteEvent_channel(e)));
+        i = i + 1;
+    }
+    var occs = DhMidiClip_control_changes(other);
+    var nc = vec_len(occs);
+    var j = 0;
+    while (j < nc) {
+        var c = vec_get(occs, j);
+        dhvani_midi_clip_add_cc(self, DhControlChange_position(c), DhControlChange_controller(c), DhControlChange_value(c), DhControlChange_channel(c));
+        j = j + 1;
+    }
+    if (nn > 0) {
+        var last = vec_get(onotes, nn - 1);
+        var other_end = DhNoteEvent_position(last) + DhNoteEvent_duration(last);
+        if (other_end > DhMidiClip_duration(self)) { DhMidiClip_set_duration(self, other_end); }
+    }
+    return 0;
+}
+
+# transpose all notes by `semitones` (clamped to 0..127).
+fn dhvani_midi_clip_transpose(self, semitones) {
+    var notes = DhMidiClip_notes(self);
+    var n = vec_len(notes);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(notes, i);
+        var nn = DhNoteEvent_note(e) + semitones;
+        if (nn < 0) { nn = 0; }
+        if (nn > 127) { nn = 127; }
+        DhNoteEvent_set_note(e, nn);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# quantize note+CC positions to the nearest grid boundary. No-op for grid 0.
+fn dhvani_midi_clip_quantize(self, grid_frames) {
+    if (grid_frames == 0) { return 0; }
+    var half = grid_frames / 2;
+    var notes = DhMidiClip_notes(self);
+    var n = vec_len(notes);
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(notes, i);
+        DhNoteEvent_set_position(e, ((DhNoteEvent_position(e) + half) / grid_frames) * grid_frames);
+        i = i + 1;
+    }
+    var ccs = DhMidiClip_control_changes(self);
+    var nc = vec_len(ccs);
+    var j = 0;
+    while (j < nc) {
+        var c = vec_get(ccs, j);
+        DhControlChange_set_position(c, ((DhControlChange_position(c) + half) / grid_frames) * grid_frames);
+        j = j + 1;
+    }
+    return 0;
+}

@@ -1,0 +1,72 @@
+# capture.tcyr -- parity tests for src/capture.cyr
+# Ported from the 4 #[test] blocks in rust-old/src/capture/mod.rs.
+# DROPPED: `audio_device_serde` (serde JSON round-trip -- no serde in the port;
+# the AudioDevice field-read logic it also exercised is covered below without
+# the JSON hop). The `record` submodule's thread/channel tests are out of scope
+# (single-threaded port). Added: device_id sentinel + validate parity checks.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/capture.cyr"
+
+alloc_init();
+
+# ---- capture_config_default ----
+test_group("capture_config_default");
+var cfg = dhvani_capture_config_default();
+assert_eq(dhvani_capture_config_sample_rate(cfg), 48000, "sample_rate = 48000");
+assert_eq(dhvani_capture_config_channels(cfg), 2, "channels = 2");
+assert_eq(dhvani_capture_config_buffer_frames(cfg), 1024, "buffer_frames = 1024");
+assert_eq(dhvani_capture_config_has_device(cfg), 0, "device_id is None");
+
+# ---- output_config_default ----
+test_group("output_config_default");
+var ocfg = dhvani_capture_output_config_default();
+assert_eq(dhvani_capture_output_config_sample_rate(ocfg), 48000, "sample_rate = 48000");
+assert_eq(dhvani_capture_output_config_channels(ocfg), 2, "channels = 2");
+
+# ---- device_type_equality ----
+test_group("device_type_equality");
+assert_eq(DH_DEVICE_SOURCE, DH_DEVICE_SOURCE, "Source == Source");
+assert(DH_DEVICE_SOURCE != DH_DEVICE_SINK, "Source != Sink");
+
+# ---- audio_device_fields (from dropped serde test: field reads only) ----
+test_group("audio_device_fields");
+var dev = dhvani_capture_device_new(42, "Built-in Mic", DH_DEVICE_SOURCE, 2, 48000);
+assert_eq(dhvani_capture_device_id(dev), 42, "id = 42");
+assert_eq(streq(dhvani_capture_device_name(dev), "Built-in Mic"), 1, "name = Built-in Mic");
+assert_eq(dhvani_capture_device_type(dev), DH_DEVICE_SOURCE, "type = Source");
+assert_eq(dhvani_capture_device_channels(dev), 2, "channels = 2");
+assert_eq(dhvani_capture_device_sample_rate(dev), 48000, "sample_rate = 48000");
+
+# ---- device_id_sentinel (Option<u32> -> sentinel parity) ----
+test_group("device_id_sentinel");
+var some = dhvani_capture_config_new(0, 0, 1024, 7);
+assert_eq(dhvani_capture_config_has_device(some), 1, "device_id 7 is Some");
+assert_eq(dhvani_capture_config_device_id(some), 7, "device_id = 7");
+var none = dhvani_capture_config_new(0, 0, 1024, DH_CAPTURE_NO_DEVICE);
+assert_eq(dhvani_capture_config_has_device(none), 0, "sentinel is None");
+
+# ---- validate (added; 0 = device default stays valid) ----
+test_group("validate");
+assert_eq(dhvani_capture_config_validate(cfg), DHVANI_ERR_NONE, "default valid");
+var zero_sr = dhvani_capture_config_new(0, 0, 1024, DH_CAPTURE_NO_DEVICE);
+assert_eq(dhvani_capture_config_validate(zero_sr), DHVANI_ERR_NONE, "0 sample rate = device default, valid");
+var bad_sr = dhvani_capture_config_new(1000000, 2, 1024, DH_CAPTURE_NO_DEVICE);
+assert_eq(dhvani_capture_config_validate(bad_sr), DHVANI_ERR_INVALID_SAMPLE_RATE, "sr > max invalid");
+assert_eq(dhvani_capture_output_config_validate(ocfg), DHVANI_ERR_NONE, "output default valid");
+
+# ---- capture_event (data-carrying enum -> kind + payload) ----
+test_group("capture_event");
+var ev_add = dhvani_capture_event_device_added(dev);
+assert_eq(dhvani_capture_event_kind(ev_add), DH_CEVENT_DEVICE_ADDED, "kind = DeviceAdded");
+assert_eq(dhvani_capture_device_id(dhvani_capture_event_device(ev_add)), 42, "carries device 42");
+var ev_rm = dhvani_capture_event_device_removed(99);
+assert_eq(dhvani_capture_event_kind(ev_rm), DH_CEVENT_DEVICE_REMOVED, "kind = DeviceRemoved");
+assert_eq(dhvani_capture_event_id(ev_rm), 99, "carries id 99");
+assert_eq(dhvani_capture_event_kind(dhvani_capture_event_overflow()), DH_CEVENT_OVERFLOW, "kind = Overflow");
+assert_eq(dhvani_capture_event_kind(dhvani_capture_event_underrun()), DH_CEVENT_UNDERRUN, "kind = Underrun");
+
+var rc = assert_summary();
+syscall(60, rc);

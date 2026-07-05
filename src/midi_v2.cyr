@@ -1,0 +1,229 @@
+# midi_v2.cyr -- MIDI 2.0 / UMP types: 16-bit velocity, 32-bit CC, per-note
+# expression. Ports rust-old/src/midi/v2.rs. L0: dep error only (all integer
+# logic -- MIDI note/velocity/channel/CC are ints; no floats here).
+#
+# The data structs (NoteOnV2, NoteOffV2, ControlChangeV2, PerNotePitchBend,
+# PerNoteController, ChannelPressureV2, PolyPressureV2, PitchBendV2) -> Dh<Name>
+# structs with untyped i64 slots (FramePos u64, u8/u16/u32 fields all fit).
+# The UmpMessageType enum (#[non_exhaustive], 6 variants) -> DH_UMP_* int codes.
+# serde dropped (Cyrius has no derive-serde).
+
+# ---- UmpMessageType (enum -> int codes, in Rust variant order) ----
+var DH_UMP_UTILITY            = 0;   # Utility (JR Timestamp, JR Clock)
+var DH_UMP_SYSTEM_COMMON      = 1;   # System Real-Time / System Common (MIDI 1.0)
+var DH_UMP_MIDI1_CHANNEL_VOICE = 2;  # MIDI 1.0 Channel Voice (7-bit)
+var DH_UMP_DATA64             = 3;   # Data messages (SysEx 7-bit)
+var DH_UMP_MIDI2_CHANNEL_VOICE = 4;  # MIDI 2.0 Channel Voice (32-bit)
+var DH_UMP_DATA128            = 5;   # Data messages (SysEx 8-bit)
+
+# ---- NoteOnV2 (16-bit velocity, per-note attributes) ----
+#derive(accessors)
+struct DhNoteOnV2 { position; note; velocity; channel; attribute_type; attribute_data; }
+#must_use
+fn dhvani_midi2_note_on_new(position, note, velocity, channel, attribute_type, attribute_data) {
+    var e = alloc(sizeof(DhNoteOnV2));
+    DhNoteOnV2_set_position(e, position);
+    DhNoteOnV2_set_note(e, note);
+    DhNoteOnV2_set_velocity(e, velocity);
+    DhNoteOnV2_set_channel(e, channel);
+    DhNoteOnV2_set_attribute_type(e, attribute_type);
+    DhNoteOnV2_set_attribute_data(e, attribute_data);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_midi2_note_on_position(e) { return DhNoteOnV2_position(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_on_note(e) { return DhNoteOnV2_note(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_on_velocity(e) { return DhNoteOnV2_velocity(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_on_channel(e) { return DhNoteOnV2_channel(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_on_attribute_type(e) { return DhNoteOnV2_attribute_type(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_on_attribute_data(e) { return DhNoteOnV2_attribute_data(e); }
+
+# ---- NoteOffV2 (16-bit release velocity, per-note attributes) ----
+#derive(accessors)
+struct DhNoteOffV2 { position; note; velocity; channel; attribute_type; attribute_data; }
+#must_use
+fn dhvani_midi2_note_off_new(position, note, velocity, channel, attribute_type, attribute_data) {
+    var e = alloc(sizeof(DhNoteOffV2));
+    DhNoteOffV2_set_position(e, position);
+    DhNoteOffV2_set_note(e, note);
+    DhNoteOffV2_set_velocity(e, velocity);
+    DhNoteOffV2_set_channel(e, channel);
+    DhNoteOffV2_set_attribute_type(e, attribute_type);
+    DhNoteOffV2_set_attribute_data(e, attribute_data);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_midi2_note_off_position(e) { return DhNoteOffV2_position(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_off_note(e) { return DhNoteOffV2_note(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_off_velocity(e) { return DhNoteOffV2_velocity(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_off_channel(e) { return DhNoteOffV2_channel(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_off_attribute_type(e) { return DhNoteOffV2_attribute_type(e); }
+#inline
+#must_use
+fn dhvani_midi2_note_off_attribute_data(e) { return DhNoteOffV2_attribute_data(e); }
+
+# ---- ControlChangeV2 (32-bit value, full resolution) ----
+#derive(accessors)
+struct DhControlChangeV2 { position; controller; value; channel; }
+#must_use
+fn dhvani_midi2_cc_new(position, controller, value, channel) {
+    var e = alloc(sizeof(DhControlChangeV2));
+    DhControlChangeV2_set_position(e, position);
+    DhControlChangeV2_set_controller(e, controller);
+    DhControlChangeV2_set_value(e, value);
+    DhControlChangeV2_set_channel(e, channel);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_midi2_cc_position(e) { return DhControlChangeV2_position(e); }
+#inline
+#must_use
+fn dhvani_midi2_cc_controller(e) { return DhControlChangeV2_controller(e); }
+#inline
+#must_use
+fn dhvani_midi2_cc_value(e) { return DhControlChangeV2_value(e); }
+#inline
+#must_use
+fn dhvani_midi2_cc_channel(e) { return DhControlChangeV2_channel(e); }
+
+# ---- PerNotePitchBend (32-bit; 0x80000000 = center) ----
+#derive(accessors)
+struct DhPerNotePitchBend { position; note; channel; value; }
+#must_use
+fn dhvani_midi2_per_note_pitch_bend_new(position, note, channel, value) {
+    var e = alloc(sizeof(DhPerNotePitchBend));
+    DhPerNotePitchBend_set_position(e, position);
+    DhPerNotePitchBend_set_note(e, note);
+    DhPerNotePitchBend_set_channel(e, channel);
+    DhPerNotePitchBend_set_value(e, value);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_midi2_per_note_pitch_bend_position(e) { return DhPerNotePitchBend_position(e); }
+#inline
+#must_use
+fn dhvani_midi2_per_note_pitch_bend_note(e) { return DhPerNotePitchBend_note(e); }
+#inline
+#must_use
+fn dhvani_midi2_per_note_pitch_bend_channel(e) { return DhPerNotePitchBend_channel(e); }
+#inline
+#must_use
+fn dhvani_midi2_per_note_pitch_bend_value(e) { return DhPerNotePitchBend_value(e); }
+
+# ---- PerNoteController (32-bit; enables MPE) ----
+#derive(accessors)
+struct DhPerNoteController { position; note; channel; controller; value; }
+#must_use
+fn dhvani_midi2_per_note_controller_new(position, note, channel, controller, value) {
+    var e = alloc(sizeof(DhPerNoteController));
+    DhPerNoteController_set_position(e, position);
+    DhPerNoteController_set_note(e, note);
+    DhPerNoteController_set_channel(e, channel);
+    DhPerNoteController_set_controller(e, controller);
+    DhPerNoteController_set_value(e, value);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_midi2_per_note_controller_position(e) { return DhPerNoteController_position(e); }
+#inline
+#must_use
+fn dhvani_midi2_per_note_controller_note(e) { return DhPerNoteController_note(e); }
+#inline
+#must_use
+fn dhvani_midi2_per_note_controller_channel(e) { return DhPerNoteController_channel(e); }
+#inline
+#must_use
+fn dhvani_midi2_per_note_controller_controller(e) { return DhPerNoteController_controller(e); }
+#inline
+#must_use
+fn dhvani_midi2_per_note_controller_value(e) { return DhPerNoteController_value(e); }
+
+# ---- ChannelPressureV2 (32-bit) ----
+#derive(accessors)
+struct DhChannelPressureV2 { position; channel; value; }
+#must_use
+fn dhvani_midi2_channel_pressure_new(position, channel, value) {
+    var e = alloc(sizeof(DhChannelPressureV2));
+    DhChannelPressureV2_set_position(e, position);
+    DhChannelPressureV2_set_channel(e, channel);
+    DhChannelPressureV2_set_value(e, value);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_midi2_channel_pressure_position(e) { return DhChannelPressureV2_position(e); }
+#inline
+#must_use
+fn dhvani_midi2_channel_pressure_channel(e) { return DhChannelPressureV2_channel(e); }
+#inline
+#must_use
+fn dhvani_midi2_channel_pressure_value(e) { return DhChannelPressureV2_value(e); }
+
+# ---- PolyPressureV2 (32-bit polyphonic key pressure) ----
+#derive(accessors)
+struct DhPolyPressureV2 { position; note; channel; value; }
+#must_use
+fn dhvani_midi2_poly_pressure_new(position, note, channel, value) {
+    var e = alloc(sizeof(DhPolyPressureV2));
+    DhPolyPressureV2_set_position(e, position);
+    DhPolyPressureV2_set_note(e, note);
+    DhPolyPressureV2_set_channel(e, channel);
+    DhPolyPressureV2_set_value(e, value);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_midi2_poly_pressure_position(e) { return DhPolyPressureV2_position(e); }
+#inline
+#must_use
+fn dhvani_midi2_poly_pressure_note(e) { return DhPolyPressureV2_note(e); }
+#inline
+#must_use
+fn dhvani_midi2_poly_pressure_channel(e) { return DhPolyPressureV2_channel(e); }
+#inline
+#must_use
+fn dhvani_midi2_poly_pressure_value(e) { return DhPolyPressureV2_value(e); }
+
+# ---- PitchBendV2 (32-bit; 0x80000000 = center) ----
+#derive(accessors)
+struct DhPitchBendV2 { position; channel; value; }
+#must_use
+fn dhvani_midi2_pitch_bend_new(position, channel, value) {
+    var e = alloc(sizeof(DhPitchBendV2));
+    DhPitchBendV2_set_position(e, position);
+    DhPitchBendV2_set_channel(e, channel);
+    DhPitchBendV2_set_value(e, value);
+    return e;
+}
+#inline
+#must_use
+fn dhvani_midi2_pitch_bend_position(e) { return DhPitchBendV2_position(e); }
+#inline
+#must_use
+fn dhvani_midi2_pitch_bend_channel(e) { return DhPitchBendV2_channel(e); }
+#inline
+#must_use
+fn dhvani_midi2_pitch_bend_value(e) { return DhPitchBendV2_value(e); }
