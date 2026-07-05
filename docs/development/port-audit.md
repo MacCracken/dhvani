@@ -265,8 +265,12 @@ their upstream deps (svara for voice) are already ported.
   smooth); `Exponential(f32)` payload → `exp` field; `f64_pow(0)` guarded. **22 green**.
 - ✅ `svf` → `src/svf.cyr` — Cytomic SVF, 8 modes; per-channel state vec;
   `dhvani_tan` (added to error.cyr — no `f64_tan` in stdlib). **16 green**.
-- ⬜ Next: `biquad` (RBJ design, data-carrying `FilterType`), `dsp/mod`
-  (facade + soft_knee_gain), `routing`, then Wave C.
+- ✅ `biquad` → `src/biquad.cyr` — RBJ cookbook, 8 types; data-carrying
+  `FilterType{gain_db}` → code + separate field; `abaco::angular_frequency`/
+  `db_gain_factor`; SIMD stereo fast-path dropped (scalar loop). **16 green**.
+- ⬜ Next: `dsp/mod` (facade + soft_knee_gain + noise_gate/limiter/normalize
+  free fns), `routing`, then Wave C (eq/deesser/compressor/limiter/delay/
+  reverb/graphic_eq).
 
 ### Cyrius idioms confirmed (this port)
 

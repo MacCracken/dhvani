@@ -1,0 +1,220 @@
+# biquad.cyr -- RBJ Audio EQ Cookbook biquad filters (Direct Form II Transposed).
+# Ports rust-old/src/dsp/biquad.rs. L1: deps error + buffer + abaco
+# (angular_frequency, db_gain_factor). FilterType enum with data-carrying
+# Peaking/LowShelf/HighShelf{gain_db} -> integer code + a separate gain_db
+# param/field. The SIMD stereo fast path is dropped (scalar per-channel loop).
+
+var DH_BQ_LOWPASS   = 0;
+var DH_BQ_HIGHPASS  = 1;
+var DH_BQ_BANDPASS  = 2;
+var DH_BQ_NOTCH     = 3;
+var DH_BQ_ALLPASS   = 4;
+var DH_BQ_PEAKING   = 5;   # uses gain_db
+var DH_BQ_LOWSHELF  = 6;   # uses gain_db
+var DH_BQ_HIGHSHELF = 7;   # uses gain_db
+
+#derive(accessors)
+struct DhBiquadCoeffs { b0; b1; b2; a1; a2; }
+
+#derive(accessors)
+struct DhBiquadState { z1; z2; }
+
+#derive(accessors)
+struct DhBiquadFilter { coeffs; states; filter_type; gain_db; freq_hz; q; sample_rate; bypassed; mix; }
+
+# design(filter_type, gain_db, freq_hz, q, sample_rate) -> coeffs handle.
+#must_use
+fn dhvani_biquad_design(filter_type, gain_db, freq_hz, q, sample_rate) {
+    var sr = f64_from(sample_rate);
+    var f0 = f64_clamp(freq_hz, 1.0, f64_mul(sr, 0.499));
+    var qq = f64_max(q, 0.01);
+    var w0 = angular_frequency(f0, sr);
+    var cos_w0 = f64_cos(w0);
+    var sin_w0 = f64_sin(w0);
+    var alpha = f64_div(sin_w0, f64_mul(2.0, qq));
+    var neg2cos = f64_mul(f64_neg(2.0), cos_w0);
+    var b0 = 0; var b1 = 0; var b2 = 0;
+    var a0 = 0; var a1 = 0; var a2 = 0;
+    var a = 0; var tsa = 0;
+    if (filter_type == DH_BQ_LOWPASS) {
+        b1 = f64_sub(1.0, cos_w0);
+        b0 = f64_div(b1, 2.0);
+        b2 = b0;
+        a0 = f64_add(1.0, alpha); a1 = neg2cos; a2 = f64_sub(1.0, alpha);
+    } elif (filter_type == DH_BQ_HIGHPASS) {
+        b0 = f64_div(f64_add(1.0, cos_w0), 2.0);
+        b1 = f64_neg(f64_add(1.0, cos_w0));
+        b2 = b0;
+        a0 = f64_add(1.0, alpha); a1 = neg2cos; a2 = f64_sub(1.0, alpha);
+    } elif (filter_type == DH_BQ_BANDPASS) {
+        b0 = alpha; b1 = 0; b2 = f64_neg(alpha);
+        a0 = f64_add(1.0, alpha); a1 = neg2cos; a2 = f64_sub(1.0, alpha);
+    } elif (filter_type == DH_BQ_NOTCH) {
+        b0 = 1.0; b1 = neg2cos; b2 = 1.0;
+        a0 = f64_add(1.0, alpha); a1 = neg2cos; a2 = f64_sub(1.0, alpha);
+    } elif (filter_type == DH_BQ_ALLPASS) {
+        b0 = f64_sub(1.0, alpha); b1 = neg2cos; b2 = f64_add(1.0, alpha);
+        a0 = f64_add(1.0, alpha); a1 = neg2cos; a2 = f64_sub(1.0, alpha);
+    } elif (filter_type == DH_BQ_PEAKING) {
+        a = db_gain_factor(gain_db);
+        b0 = f64_add(1.0, f64_mul(alpha, a));
+        b1 = neg2cos;
+        b2 = f64_sub(1.0, f64_mul(alpha, a));
+        a0 = f64_add(1.0, f64_div(alpha, a));
+        a1 = neg2cos;
+        a2 = f64_sub(1.0, f64_div(alpha, a));
+    } elif (filter_type == DH_BQ_LOWSHELF) {
+        a = db_gain_factor(gain_db);
+        tsa = f64_mul(f64_mul(2.0, f64_sqrt(a)), alpha);
+        b0 = f64_mul(a, f64_add(f64_sub(f64_add(a, 1.0), f64_mul(f64_sub(a, 1.0), cos_w0)), tsa));
+        b1 = f64_mul(f64_mul(2.0, a), f64_sub(f64_sub(a, 1.0), f64_mul(f64_add(a, 1.0), cos_w0)));
+        b2 = f64_mul(a, f64_sub(f64_sub(f64_add(a, 1.0), f64_mul(f64_sub(a, 1.0), cos_w0)), tsa));
+        a0 = f64_add(f64_add(f64_add(a, 1.0), f64_mul(f64_sub(a, 1.0), cos_w0)), tsa);
+        a1 = f64_mul(f64_neg(2.0), f64_add(f64_sub(a, 1.0), f64_mul(f64_add(a, 1.0), cos_w0)));
+        a2 = f64_sub(f64_add(f64_add(a, 1.0), f64_mul(f64_sub(a, 1.0), cos_w0)), tsa);
+    } else {
+        # HighShelf
+        a = db_gain_factor(gain_db);
+        tsa = f64_mul(f64_mul(2.0, f64_sqrt(a)), alpha);
+        b0 = f64_mul(a, f64_add(f64_add(f64_add(a, 1.0), f64_mul(f64_sub(a, 1.0), cos_w0)), tsa));
+        b1 = f64_mul(f64_mul(f64_neg(2.0), a), f64_add(f64_sub(a, 1.0), f64_mul(f64_add(a, 1.0), cos_w0)));
+        b2 = f64_mul(a, f64_sub(f64_add(f64_add(a, 1.0), f64_mul(f64_sub(a, 1.0), cos_w0)), tsa));
+        a0 = f64_add(f64_sub(f64_add(a, 1.0), f64_mul(f64_sub(a, 1.0), cos_w0)), tsa);
+        a1 = f64_mul(2.0, f64_sub(f64_sub(a, 1.0), f64_mul(f64_add(a, 1.0), cos_w0)));
+        a2 = f64_sub(f64_sub(f64_add(a, 1.0), f64_mul(f64_sub(a, 1.0), cos_w0)), tsa);
+    }
+    var c = alloc(sizeof(DhBiquadCoeffs));
+    DhBiquadCoeffs_set_b0(c, f64_div(b0, a0));
+    DhBiquadCoeffs_set_b1(c, f64_div(b1, a0));
+    DhBiquadCoeffs_set_b2(c, f64_div(b2, a0));
+    DhBiquadCoeffs_set_a1(c, f64_div(a1, a0));
+    DhBiquadCoeffs_set_a2(c, f64_div(a2, a0));
+    return c;
+}
+
+# unity (pass-through) coefficients.
+#must_use
+fn dhvani_biquad_coeffs_unity() {
+    var c = alloc(sizeof(DhBiquadCoeffs));
+    DhBiquadCoeffs_set_b0(c, 1.0);
+    DhBiquadCoeffs_set_b1(c, 0);
+    DhBiquadCoeffs_set_b2(c, 0);
+    DhBiquadCoeffs_set_a1(c, 0);
+    DhBiquadCoeffs_set_a2(c, 0);
+    return c;
+}
+
+# process one sample through a state (Direct Form II Transposed).
+fn dhvani_biquad_state_process(st, input, c) {
+    var out = f64_add(f64_mul(DhBiquadCoeffs_b0(c), input), DhBiquadState_z1(st));
+    DhBiquadState_set_z1(st, f64_add(f64_sub(f64_mul(DhBiquadCoeffs_b1(c), input), f64_mul(DhBiquadCoeffs_a1(c), out)), DhBiquadState_z2(st)));
+    DhBiquadState_set_z2(st, f64_sub(f64_mul(DhBiquadCoeffs_b2(c), input), f64_mul(DhBiquadCoeffs_a2(c), out)));
+    return out;
+}
+
+# new(filter_type, gain_db, freq_hz, q, sample_rate, channels).
+#must_use
+fn dhvani_biquad_new(filter_type, gain_db, freq_hz, q, sample_rate, channels) {
+    var self = alloc(sizeof(DhBiquadFilter));
+    DhBiquadFilter_set_coeffs(self, dhvani_biquad_design(filter_type, gain_db, freq_hz, q, sample_rate));
+    var states = vec_new();
+    var c = 0;
+    while (c < channels) {
+        var st = alloc(sizeof(DhBiquadState));
+        DhBiquadState_set_z1(st, 0);
+        DhBiquadState_set_z2(st, 0);
+        vec_push(states, st);
+        c = c + 1;
+    }
+    DhBiquadFilter_set_states(self, states);
+    DhBiquadFilter_set_filter_type(self, filter_type);
+    DhBiquadFilter_set_gain_db(self, gain_db);
+    DhBiquadFilter_set_freq_hz(self, freq_hz);
+    DhBiquadFilter_set_q(self, q);
+    DhBiquadFilter_set_sample_rate(self, sample_rate);
+    DhBiquadFilter_set_bypassed(self, 0);
+    DhBiquadFilter_set_mix(self, 1.0);
+    return self;
+}
+
+# process(buf) -- filter in place with dry/wet mix (scalar per-channel).
+fn dhvani_biquad_process(self, buf) {
+    if (DhBiquadFilter_bypassed(self) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var coeffs = DhBiquadFilter_coeffs(self);
+    var states = DhBiquadFilter_states(self);
+    var mix = DhBiquadFilter_mix(self);
+    var dry = f64_sub(1.0, mix);
+    var frame = 0;
+    while (frame < frames) {
+        var c = 0;
+        while (c < ch) {
+            var idx = frame * ch + c;
+            var input = vec_get(samples, idx);
+            var wet = dhvani_biquad_state_process(vec_get(states, c), input, coeffs);
+            vec_set(samples, idx, f64_add(f64_mul(input, dry), f64_mul(wet, mix)));
+            c = c + 1;
+        }
+        frame = frame + 1;
+    }
+    return 0;
+}
+
+# process_sample(sample, channel) -- passthrough if channel out of range.
+#must_use
+fn dhvani_biquad_process_sample(self, sample, channel) {
+    if (channel < vec_len(DhBiquadFilter_states(self))) {
+        return dhvani_biquad_state_process(vec_get(DhBiquadFilter_states(self), channel), sample, DhBiquadFilter_coeffs(self));
+    }
+    return sample;
+}
+
+fn dhvani_biquad_reset(self) {
+    var states = DhBiquadFilter_states(self);
+    var n = vec_len(states);
+    var i = 0;
+    while (i < n) {
+        var st = vec_get(states, i);
+        DhBiquadState_set_z1(st, 0);
+        DhBiquadState_set_z2(st, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# set_params(filter_type, gain_db, freq_hz, q) -- recompute coeffs, keep state.
+fn dhvani_biquad_set_params(self, filter_type, gain_db, freq_hz, q) {
+    DhBiquadFilter_set_filter_type(self, filter_type);
+    DhBiquadFilter_set_gain_db(self, gain_db);
+    DhBiquadFilter_set_freq_hz(self, freq_hz);
+    DhBiquadFilter_set_q(self, q);
+    DhBiquadFilter_set_coeffs(self, dhvani_biquad_design(filter_type, gain_db, freq_hz, q, DhBiquadFilter_sample_rate(self)));
+    return 0;
+}
+fn dhvani_biquad_set_sample_rate(self, sample_rate) {
+    DhBiquadFilter_set_sample_rate(self, sample_rate);
+    DhBiquadFilter_set_coeffs(self, dhvani_biquad_design(DhBiquadFilter_filter_type(self), DhBiquadFilter_gain_db(self), DhBiquadFilter_freq_hz(self), DhBiquadFilter_q(self), sample_rate));
+    return 0;
+}
+fn dhvani_biquad_set_bypass(self, bypassed) { DhBiquadFilter_set_bypassed(self, bypassed); return 0; }
+fn dhvani_biquad_set_mix(self, mix) { DhBiquadFilter_set_mix(self, f64_clamp(mix, 0, 1.0)); return 0; }
+
+#inline
+#must_use
+fn dhvani_biquad_filter_type(self) { return DhBiquadFilter_filter_type(self); }
+#inline
+#must_use
+fn dhvani_biquad_freq_hz(self) { return DhBiquadFilter_freq_hz(self); }
+#inline
+#must_use
+fn dhvani_biquad_q(self) { return DhBiquadFilter_q(self); }
+#inline
+#must_use
+fn dhvani_biquad_mix(self) { return DhBiquadFilter_mix(self); }
+#must_use
+fn dhvani_biquad_is_bypassed(self) {
+    if (DhBiquadFilter_bypassed(self) == 1) { return 1; }
+    return 0;
+}

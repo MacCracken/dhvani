@@ -1,0 +1,152 @@
+# biquad.tcyr -- parity tests for src/biquad.cyr
+# Ported one-for-one from the 15 #[test] blocks in rust-old/src/dsp/biquad.rs.
+# FilterType::X{gain_db} -> (code, gain_db) args; non-gain types pass gain_db=0.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/biquad.cyr"
+
+alloc_init();
+
+fn make_sine(freq, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr));
+        vec_push(v, f64_sin(ph));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+
+# ---- silence_passthrough ----
+test_group("silence_passthrough");
+var b1 = dhvani_buffer_silence(2, 1024, 44100);
+var f1 = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 2);
+dhvani_biquad_process(f1, b1);
+assert(f64_lt(dhvani_buffer_peak(b1), 0.0000001), "silence stays silent");
+
+# ---- unity_coeffs_passthrough ----
+test_group("unity_coeffs_passthrough");
+var uc = dhvani_biquad_coeffs_unity();
+var ust = alloc(sizeof(DhBiquadState));
+DhBiquadState_set_z1(ust, 0);
+DhBiquadState_set_z2(ust, 0);
+assert(f64_lt(f64_abs(f64_sub(dhvani_biquad_state_process(ust, 0.5, uc), 0.5)), 0.0000000001), "unity passes 0.5");
+
+# ---- lowpass_attenuates_high_frequencies ----
+test_group("lowpass_attenuates_high_frequencies");
+var b3 = make_sine(10000.0, 44100, 4096);
+var r3 = dhvani_buffer_rms(b3);
+var f3 = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 500.0, 0.707, 44100, 1);
+dhvani_biquad_process(f3, b3);
+assert(f64_lt(dhvani_buffer_rms(b3), f64_mul(r3, 0.1)), "LP attenuates 10kHz");
+
+# ---- highpass_attenuates_low_frequencies ----
+test_group("highpass_attenuates_low_frequencies");
+var b4 = make_sine(100.0, 44100, 4096);
+var r4 = dhvani_buffer_rms(b4);
+var f4 = dhvani_biquad_new(DH_BQ_HIGHPASS, 0, 5000.0, 0.707, 44100, 1);
+dhvani_biquad_process(f4, b4);
+assert(f64_lt(dhvani_buffer_rms(b4), f64_mul(r4, 0.1)), "HP attenuates 100Hz");
+
+# ---- peaking_boosts_target_frequency ----
+test_group("peaking_boosts_target_frequency");
+var b5 = make_sine(1000.0, 44100, 4096);
+var r5 = dhvani_buffer_rms(b5);
+var f5 = dhvani_biquad_new(DH_BQ_PEAKING, 12.0, 1000.0, 1.0, 44100, 1);
+dhvani_biquad_process(f5, b5);
+assert(f64_gt(dhvani_buffer_rms(b5), f64_mul(r5, 1.5)), "peaking boosts 1kHz");
+
+# ---- notch_attenuates_target_frequency ----
+test_group("notch_attenuates_target_frequency");
+var b6 = make_sine(1000.0, 44100, 4096);
+var r6 = dhvani_buffer_rms(b6);
+var f6 = dhvani_biquad_new(DH_BQ_NOTCH, 0, 1000.0, 10.0, 44100, 1);
+dhvani_biquad_process(f6, b6);
+assert(f64_lt(dhvani_buffer_rms(b6), f64_mul(r6, 0.2)), "notch attenuates 1kHz");
+
+# ---- reset_clears_state ----
+test_group("reset_clears_state");
+var f7 = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 2);
+var b7 = make_sine(440.0, 44100, 256);
+dhvani_biquad_process(f7, b7);
+dhvani_biquad_reset(f7);
+assert(f64_lt(f64_abs(dhvani_biquad_process_sample(f7, 0, 0)), 0.0000001), "fresh after reset");
+
+# ---- set_params_updates_coefficients ----
+test_group("set_params_updates_coefficients");
+var f8 = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 1);
+dhvani_biquad_set_params(f8, DH_BQ_HIGHPASS, 0, 5000.0, 1.0);
+assert_eq(dhvani_biquad_filter_type(f8), DH_BQ_HIGHPASS, "type updated");
+assert(f64_lt(f64_abs(f64_sub(dhvani_biquad_freq_hz(f8), 5000.0)), 0.0001), "freq updated");
+
+# ---- stereo_channels_independent ----
+test_group("stereo_channels_independent");
+var sv9 = vec_new();
+vec_push(sv9, 1.0); vec_push(sv9, 0); vec_push(sv9, 0.5); vec_push(sv9, 0);
+vec_push(sv9, 0.25); vec_push(sv9, 0); vec_push(sv9, 0); vec_push(sv9, 0);
+var b9 = dhvani_buffer_from_interleaved(sv9, 2, 44100);
+var f9 = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 10000.0, 0.707, 44100, 2);
+dhvani_biquad_process(f9, b9);
+var s9 = dhvani_buffer_samples(b9);
+var fr9 = 0;
+var rok9 = 1;
+while (fr9 < 4) {
+    if (f64_gt(f64_abs(vec_get(s9, fr9 * 2 + 1)), 0.01) == 1) { rok9 = 0; }
+    fr9 = fr9 + 1;
+}
+assert_eq(rok9, 1, "right channel stays near zero");
+
+# ---- extreme_q_does_not_panic ----
+test_group("extreme_q_does_not_panic");
+var b10 = make_sine(440.0, 44100, 256);
+var f10 = dhvani_biquad_new(DH_BQ_BANDPASS, 0, 20000.0, 100.0, 44100, 1);
+dhvani_biquad_process(f10, b10);
+var s10 = dhvani_buffer_samples(b10);
+var i10 = 0;
+var fin10 = 1;
+while (i10 < 256) { if (dhvani_is_finite(vec_get(s10, i10)) == 0) { fin10 = 0; } i10 = i10 + 1; }
+assert_eq(fin10, 1, "extreme Q stays finite");
+
+# ---- allpass_preserves_magnitude ----
+test_group("allpass_preserves_magnitude");
+var b11 = make_sine(1000.0, 44100, 4096);
+var r11 = dhvani_buffer_rms(b11);
+var f11 = dhvani_biquad_new(DH_BQ_ALLPASS, 0, 1000.0, 0.707, 44100, 1);
+dhvani_biquad_process(f11, b11);
+assert(f64_lt(f64_abs(f64_sub(dhvani_buffer_rms(b11), r11)), f64_mul(r11, 0.05)), "allpass preserves RMS");
+
+# ---- low_shelf_boosts_lows ----
+test_group("low_shelf_boosts_lows");
+var b12 = make_sine(200.0, 44100, 4096);
+var r12 = dhvani_buffer_rms(b12);
+var f12 = dhvani_biquad_new(DH_BQ_LOWSHELF, 12.0, 500.0, 0.707, 44100, 1);
+dhvani_biquad_process(f12, b12);
+assert(f64_gt(dhvani_buffer_rms(b12), f64_mul(r12, 1.5)), "low shelf boosts 200Hz");
+
+# ---- high_shelf_boosts_highs ----
+test_group("high_shelf_boosts_highs");
+var b13 = make_sine(8000.0, 44100, 4096);
+var r13 = dhvani_buffer_rms(b13);
+var f13 = dhvani_biquad_new(DH_BQ_HIGHSHELF, 12.0, 5000.0, 0.707, 44100, 1);
+dhvani_biquad_process(f13, b13);
+assert(f64_gt(dhvani_buffer_rms(b13), f64_mul(r13, 1.5)), "high shelf boosts 8kHz");
+
+# ---- low_shelf_cuts_lows ----
+test_group("low_shelf_cuts_lows");
+var b14 = make_sine(200.0, 44100, 4096);
+var r14 = dhvani_buffer_rms(b14);
+var f14 = dhvani_biquad_new(DH_BQ_LOWSHELF, f64_neg(12.0), 500.0, 0.707, 44100, 1);
+dhvani_biquad_process(f14, b14);
+assert(f64_lt(dhvani_buffer_rms(b14), f64_mul(r14, 0.5)), "low shelf cuts 200Hz");
+
+# ---- process_sample_out_of_range_channel ----
+test_group("process_sample_out_of_range_channel");
+var f15 = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 1);
+assert(f64_lt(f64_abs(f64_sub(dhvani_biquad_process_sample(f15, 0.75, 5), 0.75)), 0.0000001), "out-of-range channel passthrough");
+
+var rc = assert_summary();
+syscall(60, rc);
