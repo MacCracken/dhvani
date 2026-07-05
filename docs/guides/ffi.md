@@ -1,137 +1,58 @@
 # FFI Usage Guide
 
-## Overview
+## Status: FFI is a non-goal in the Cyrius port
 
-Dhvani provides a C-compatible FFI (`src/ffi.rs`) for integration with C, Python, and other languages. The API uses opaque handles with create/free lifecycle management.
+The Rust dhvani shipped a C-compatible FFI (`src/ffi.rs`) with opaque handles
+and create/free lifecycle management, for calling from C, Python, and other
+languages. **The Cyrius port does not provide a C-ABI.** FFI is a deliberate
+post-port non-goal, for two reasons:
 
-## Building the Shared Library
+- **No C boundary in Cyrius.** There is no `extern "C"` / `#[no_mangle]` /
+  raw-pointer handle story; the consumers (shruti, jalwa, aethersafta, kiran)
+  are all Cyrius-native and link the in-language bundle directly.
+- **The free-less bump allocator breaks `*_free`.** The Rust FFI's
+  `nada_buffer_free` / `nada_free_string` contract has no meaning under a
+  bump allocator that never frees, so the create/free handle model can't be
+  ported as-is.
 
-```bash
-# Build as cdylib
-cargo build --release --lib
-# Output: target/release/libdhvani.so (Linux) / libdhvani.dylib (macOS)
+See `docs/development/roadmap.md` (deferred layers) — if a C boundary is ever
+needed it would be re-architected as an in-language handle table, not the old
+`extern "C"` surface.
+
+## Consuming dhvani from Cyrius (the FFI replacement)
+
+There is no shared library to `dlopen`. A Cyrius consumer links the dist bundle
+`dist/dhvani.cyr` (rebuild with `cyrius distlib`) and calls the flat `dhvani_*`
+surface directly — the same operations the Rust FFI wrapped, minus the handle
+lifecycle:
+
+```cyr
+# Create 1 second of stereo silence at 44.1 kHz (0 sentinel on bad args —
+# no NULL handle, no free)
+var buf = dhvani_buffer_silence(2, 44100, 44100);
+
+# Apply gain, clamp, read level — all in place, alloc-free
+dhvani_buffer_apply_gain(buf, 0.5);
+dhvani_buffer_clamp(buf);
+var rms = dhvani_buffer_rms(buf);
+
+# Access the raw sample vec + its length
+var samples = dhvani_buffer_samples(buf);
+var len = dhvani_buffer_total_samples(buf);
 ```
 
-Add to `Cargo.toml` if not already present:
-```toml
-[lib]
-crate-type = ["lib", "cdylib"]
-```
+Notes for anyone porting off the old C API:
 
-## C API
+- Constructors return a **0 sentinel** on invalid parameters (zero channels,
+  zero/oversized sample rate, mis-sized interleaved length) instead of a `NULL`
+  handle — check `== 0`.
+- There is **no `_free`**: the bump allocator reclaims nothing during a render,
+  so buffers are not individually released. Size the workload accordingly (see
+  `rt-safety.md`).
+- Values that were error-typed in Rust come back as sentinels (negative code /
+  NaN / 0), not `Result` — there is no unwinding.
 
-### Buffer Lifecycle
+## Cross-language (C / Python) consumers
 
-```c
-#include <stdint.h>
-
-// Opaque handle
-typedef struct NadaBuffer NadaBuffer;
-
-// Create a silent buffer
-NadaBuffer* nada_buffer_silence(uint32_t channels, size_t frames, uint32_t sample_rate);
-
-// Create from interleaved f32 samples
-NadaBuffer* nada_buffer_from_interleaved(
-    const float* samples, size_t len, uint32_t channels, uint32_t sample_rate
-);
-
-// Free a buffer (must call for every created buffer)
-void nada_buffer_free(NadaBuffer* buf);
-
-// Access raw sample pointer (read-only)
-const float* nada_buffer_samples(const NadaBuffer* buf, size_t* out_len);
-
-// Get sample rate
-uint32_t nada_buffer_sample_rate(const NadaBuffer* buf);
-```
-
-### DSP Operations
-
-```c
-// Apply gain to all samples
-void nada_buffer_apply_gain(NadaBuffer* buf, float gain);
-
-// Clamp all samples to [-1.0, 1.0]
-void nada_buffer_clamp(NadaBuffer* buf);
-
-// Get RMS level
-float nada_buffer_rms(const NadaBuffer* buf);
-
-// Hard limiter
-void nada_buffer_hard_limiter(NadaBuffer* buf, float ceiling);
-
-// Noise gate
-void nada_buffer_noise_gate(NadaBuffer* buf, float threshold);
-```
-
-### Memory String
-
-```c
-// Get JSON representation (caller must free with nada_free_string)
-char* nada_buffer_json(const NadaBuffer* buf);
-void nada_free_string(char* s);
-```
-
-## C Example
-
-```c
-#include <stdio.h>
-
-int main() {
-    // Create 1 second of silence, stereo, 44.1kHz
-    NadaBuffer* buf = nada_buffer_silence(2, 44100, 44100);
-    if (!buf) return 1;
-
-    // Apply gain
-    nada_buffer_apply_gain(buf, 0.5);
-
-    // Read samples
-    size_t len;
-    const float* samples = nada_buffer_samples(buf, &len);
-    printf("Buffer has %zu samples\n", len);
-
-    // Cleanup
-    nada_buffer_free(buf);
-    return 0;
-}
-```
-
-Compile:
-```bash
-gcc -o example example.c -L target/release -ldhvani
-```
-
-## Python (ctypes) Example
-
-```python
-import ctypes
-
-lib = ctypes.CDLL("target/release/libdhvani.so")
-
-# Define return types
-lib.nada_buffer_silence.restype = ctypes.c_void_p
-lib.nada_buffer_rms.restype = ctypes.c_float
-lib.nada_buffer_samples.restype = ctypes.POINTER(ctypes.c_float)
-
-# Create buffer
-buf = lib.nada_buffer_silence(2, 44100, 44100)
-
-# Apply gain
-lib.nada_buffer_apply_gain(buf, ctypes.c_float(0.8))
-
-# Get RMS
-rms = lib.nada_buffer_rms(buf)
-print(f"RMS: {rms}")
-
-# Cleanup
-lib.nada_buffer_free(buf)
-```
-
-## Safety Notes
-
-- All FFI functions validate input pointers before dereferencing
-- `NULL` pointers are returned on invalid parameters (zero channels, zero sample rate)
-- Every `nada_buffer_*` create function requires a corresponding `nada_buffer_free`
-- Every `nada_buffer_json` call requires a `nada_free_string`
-- The `samples` pointer from `nada_buffer_samples` is valid only while the buffer lives
+Not supported. Wrap dhvani from another Cyrius unit; there is no `.so`/`.dylib`
+to bind via `gcc -ldhvani` or `ctypes.CDLL`.

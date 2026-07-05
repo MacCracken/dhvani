@@ -2,48 +2,60 @@
 
 Direct dependencies to monitor for updates, CVEs, and breaking changes.
 
+dhvani is a Cyrius engine: `[deps.abaco]` is the one auto-resolved bundle;
+the synthesis siblings + device-I/O bundles are **vendored into `lib/`** (committed)
+and `include`d in dependency order, not wired as `[deps]` (see
+[`port-audit.md`](port-audit.md) Wave F). "Version" below is the tag/bundle version
+tracked, not a crates.io release.
+
 ## Core Dependencies
 
-| Crate | Version | Role | Notes |
-|-------|---------|------|-------|
-| **abaco** | 1.1.0 | DSP math (amplitude/dB, poly_blep, panning, filters) | AGNOS crate — coordinate upgrades with consumers |
-| **serde** | 1 | Serialization for all public types | Stable, low risk |
-| **thiserror** | 2 | Error derive macros | MSRV 1.89 compatible |
-| **tracing** | 0.1 | Structured logging | Stable facade, low risk |
+| Bundle | Version | Role | Notes |
+|--------|---------|------|-------|
+| **abaco** | 2.3.2 | DSP math (amplitude/dB, poly_blep, panning, filters) | AGNOS bundle — the one `[deps]`-wired dep; coordinate upgrades with consumers |
 
-## Optional Dependencies
+## Synthesis-Stack Siblings (vendored in `lib/`, included in dep order)
 
-| Crate | Version | Feature | Notes |
-|-------|---------|---------|-------|
-| **naad** | 1.0.0 | `synthesis` | AGNOS synthesis crate — coordinate with svara |
-| **svara** | 2.0.0 | `voice` | AGNOS voice synthesis — depends on naad |
-| **goonj** | 1.1.0 | `acoustics` | AGNOS acoustics — depends on hisab |
-| **prani** | 1.1.0 | `creature` | AGNOS creature vocals |
-| **garjan** | 1.0.0 | `environment` | AGNOS environmental sounds — depends on naad |
-| **ghurni** | 1.0.0 | `mechanical` | AGNOS mechanical sounds — depends on naad |
-| **nidhi** | 1.1.0 | `sampler` | AGNOS sample playback |
-| **shabda** | 2.0.0 | `g2p` | AGNOS grapheme-to-phoneme — depends on shabdakosh, svara |
-| **bhava** | 2.0.0 | `bhava-voice` | AGNOS emotion/personality engine — mood, traits, stress, energy |
-| **rayon** | 1 | `parallel` | Stable, well-maintained |
-| **pipewire** | 0.9 | `pipewire` | Rust bindings — track upstream PipeWire releases |
+| Bundle | Version | Layer | Notes |
+|--------|---------|-------|-------|
+| **naad** | 2.1.1 | `synthesis` | AGNOS synthesis — coordinate with svara |
+| **svara** | 3.0.1 | `voice` | AGNOS voice synthesis — depends on naad |
+| **goonj** | 2.0.0 | `acoustics` | AGNOS acoustics — depends on hisab |
+| **prani** | 2.0.1 | `creature` | AGNOS creature vocals |
+| **garjan** | 2.0.0 | `environment` | AGNOS environmental sounds — depends on naad |
+| **ghurni** | 2.0.0 | `mechanical` | AGNOS mechanical sounds — depends on naad |
+| **nidhi** | 2.0.0 | `sampler` | AGNOS sample playback — needs shravan (WAV codec) |
+| **sakshi** | 2.4.4 | (support) | Logging used across the stack |
+| **hisab** | 2.6.7 | (support) | HVec3 math for goonj |
+| **shravan** | 2.x | (support) | WAV codec, needed by nidhi |
 
-## Dev Dependencies
+Include order (dependency order):
+`sakshi → hisab → goonj → naad → shravan → svara → ghurni → garjan → prani`.
 
-| Crate | Version | Notes |
-|-------|---------|-------|
-| **criterion** | 0.8 | Benchmarking — html_reports feature |
-| **proptest** | 1 | Property-based testing |
-| **serde_json** | 1 | Test serialization roundtrips |
+## Device-I/O Bundles (2.1.x, vendored in `lib/`)
+
+| Bundle | Role | Notes |
+|--------|------|-------|
+| **vani** | ALSA PCM via raw `/dev/snd` ioctls | dh(vani)'s sibling — no libpipewire/libasound, no FFI; drives `playback` (S16/S24/S32) |
+| **yukti** | PCM device discovery | backs `device` enumeration / default-open |
+
+## Blocked (not yet ported to Cyrius — still Rust)
+
+| Bundle | Feature | Notes |
+|--------|---------|-------|
+| **shabda** | `g2p` | grapheme-to-phoneme — port shabda first |
+| **bhava** | `bhava-voice` | emotion/personality engine — port bhava first |
 
 ## Security Monitoring
 
-- `cargo audit` — run in CI, check weekly
-- `cargo deny check` — advisories, bans, licenses, sources
-- AGNOS crates are maintained in-house — prioritize coordinated upgrades
+- AGNOS bundles are maintained in-house — prioritize coordinated upgrades.
+- Vendored `lib/` bundles are committed and auditable — re-vendor on upgrade and
+  review the diff; `cyrius.lock` pins the resolved `[deps]` set (abaco).
+- No third-party crate supply chain: dhvani is Cyrius-native, no Cargo/crates.io.
 
 ## Upgrade Policy
 
-- **Patch versions**: Apply immediately if CI passes
-- **Minor versions**: Review changelog, test, apply within a week
-- **Major versions**: Plan migration, update CHANGELOG with breaking section
-- **AGNOS crates**: Coordinate across the stack (abaco → naad/svara/goonj → dhvani → shruti/jalwa)
+- **Patch versions**: Apply immediately if `cyrius test` passes.
+- **Minor versions**: Review changelog, test, apply within a week.
+- **Major versions**: Plan migration, update CHANGELOG with breaking section.
+- **AGNOS bundles**: Coordinate across the stack (abaco → naad/svara/goonj → dhvani → shruti/jalwa).

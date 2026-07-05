@@ -22,7 +22,7 @@ dhvani (ध्वनि — "sound") **owns the core audio engine for AGNOS**: s
 buffers, format conversion (i16/i24/i32/f32/f64/u8), mixing, resampling, DSP
 effects (biquad/SVF/EQ/dynamics/reverb/delay/…), MIDI (v1/v2, voice, routing),
 spectral & temporal analysis (FFT/STFT/chroma/key/beat/onset/loudness), a
-processing graph, metering, and PipeWire capture. Feature-gated layers wrap the
+processing graph, metering, and ALSA device I/O via vani. Feature-gated layers wrap the
 sibling synthesis engines — naad (synthesis), svara (voice), prani (creature),
 garjan (environment), ghurni (mechanical), nidhi (sampler), goonj (acoustics).
 Consumers: **shruti** (DAW), **jalwa** (media player), **aethersafta**
@@ -105,5 +105,5 @@ Full per-module ledger + established conventions live in
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — Runnable examples
 - [`docs/development/state.md`](docs/development/state.md) — Live state
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through v1.0
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through 2.0.0 (then the 2.1.x device-I/O line)
 

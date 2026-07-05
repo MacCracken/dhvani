@@ -2,86 +2,62 @@
 
 ## Overview
 
-Dhvani uses platform-specific SIMD instructions to accelerate audio processing. The `simd` feature (enabled by default) selects the optimal implementation at compile time (architecture) and runtime (CPU feature detection for AVX2).
+The Rust dhvani used platform-specific SIMD intrinsics (SSE2/AVX2 on x86_64,
+NEON on aarch64) to accelerate audio processing. In the Cyrius port these
+intrinsics have **no equivalent** — Cyrius has no SIMD story yet — so
+`src/simd.cyr` ports **only the scalar fallbacks**. Every kernel below runs
+scalar. This is the primary source of the Rust-vs-Cyrius throughput gap and is
+tracked as a post-port non-goal (see `docs/development/port-audit.md`).
 
-## Platform Coverage
+## Kernel Coverage
 
-| Kernel | SSE2 (x86_64) | AVX2 (x86_64) | NEON (aarch64) | Scalar fallback |
-|--------|:---:|:---:|:---:|:---:|
-| `add_buffers` | 4-wide | 8-wide | 4-wide | yes |
-| `apply_gain` | 4-wide | 8-wide | 4-wide | yes |
-| `clamp` | 4-wide | 8-wide | 4-wide | yes |
-| `peak_abs` | 4-wide | 8-wide | 4-wide | yes |
-| `sum_of_squares` | 4-wide f64 | 8-wide f64 | 4-wide | yes |
-| `noise_gate` | 4-wide | 8-wide | 4-wide | yes |
-| `weighted_sum` | 4-wide | 8-wide | 4-wide | yes |
-| `i16_to_f32` | 4-wide | 8-wide | 4-wide | yes |
-| `f32_to_i16` | 4-wide | 8-wide | 4-wide | yes |
-| `i24_to_f32` | 4-wide | 8-wide | 4-wide | yes |
-| `f32_to_i24` | 4-wide | 8-wide | 4-wide | yes |
-| `u8_to_f32` | 4-wide | 8-wide | 4-wide | yes |
-| `f32_to_u8` | 4-wide | 8-wide | 4-wide | yes |
-| `biquad_stereo` | 2×f64 | — | 2×f64 | yes |
+The scalar kernels ported from `rust-old/src/simd/mod.rs` (the SSE2/AVX2/NEON
+arms in `x86.rs` / `aarch64.rs` were dropped):
 
-## Runtime Dispatch (x86_64)
+| Kernel | Cyrius symbol | Status |
+|--------|---------------|:---:|
+| `add_buffers` | `dhvani_simd_add_buffers` | scalar |
+| `apply_gain` | `dhvani_simd_apply_gain` | scalar |
+| `clamp` | `dhvani_simd_clamp` | scalar |
+| `peak_abs` | `dhvani_simd_peak_abs` | scalar |
+| `sum_of_squares` | `dhvani_simd_sum_of_squares` | scalar (f64 accum) |
+| `noise_gate` | `dhvani_simd_noise_gate` | scalar |
+| `weighted_sum` | `dhvani_simd_weighted_sum` | scalar |
+| `i16_to_f32` | `dhvani_simd_i16_to_f32` | scalar |
+| `f32_to_i16` | `dhvani_simd_f32_to_i16` | scalar |
+| `i24_to_f32` | `dhvani_simd_i24_to_f32` | scalar |
+| `f32_to_i24` | `dhvani_simd_f32_to_i24` | scalar |
+| `u8_to_f32` | `dhvani_simd_u8_to_f32` | scalar |
+| `f32_to_u8` | `dhvani_simd_f32_to_u8` | scalar |
+| `biquad_stereo` | `dhvani_simd_biquad_stereo` | scalar |
 
-On x86_64, SSE2 is always available (baseline). AVX2 is detected at runtime:
+These scalar kernels are the public compute surface that `buffer`, `convert`,
+and `resample` call. Samples are `vec` handles holding f64 in each 8-byte slot
+(integer-PCM sources hold their integer value per slot); everything operates in
+place and is alloc-free.
 
-```rust
-pub fn apply_gain(samples: &mut [f32], gain: f32) {
-    if is_x86_feature_detected!("avx2") {
-        unsafe { apply_gain_avx2(samples, gain) };
-    } else {
-        unsafe { apply_gain_sse2(samples, gain) };
-    }
-}
+## No Runtime Dispatch
+
+There is no `is_x86_feature_detected!`-style dispatch: there is exactly one
+implementation per kernel — the scalar one — selected at build time by
+whichever unit includes `src/simd.cyr`. Nothing to feature-gate, nothing to
+detect at runtime.
+
+## Benchmarking
+
+Hot-path kernels have `.bcyr` benchmarks; the numbers are the proof a port
+didn't regress relative to the scalar Rust path:
+
+```sh
+cyrius bench                             # run tests/*.bcyr
 ```
 
-## Expected Speedups
+`tests/hotpath.bcyr` and `tests/bench_compare.bcyr` cover the compute-heavy
+paths. Capture numbers before claiming a throughput win.
 
-Measured on x86_64 with AVX2, stereo 1-second buffer (88,200 samples):
+## Restoring SIMD Later
 
-| Operation | SIMD Time | Notes |
-|-----------|-----------|-------|
-| `apply_gain` | ~5.5 µs | 8-wide AVX2 |
-| `clamp` | ~5.5 µs | 8-wide AVX2 |
-| `peak_abs` | ~3.2 µs | 8-wide AVX2 with horizontal max |
-| `sum_of_squares` (RMS) | ~7.8 µs | f64 accumulation to avoid precision loss |
-| `noise_gate` | ~6.2 µs | Branchless via SIMD compare + mask |
-| `biquad_stereo` | ~147 µs | 2×f64 SSE2 cross-channel (−42% vs scalar) |
-
-## Biquad Cross-Channel Optimization
-
-The stereo biquad processes L and R channels simultaneously using 2×f64 SIMD:
-
-- **SSE2**: `__m128d` (2 × f64) — processes both channels per sample
-- **NEON**: `float64x2_t` — same approach on aarch64
-- Activated automatically for stereo buffers at full wet mix
-
-## Disabling SIMD
-
-```toml
-[dependencies]
-dhvani = { version = "0.22", default-features = false, features = ["dsp", "analysis"] }
-```
-
-Without the `simd` feature, all kernels use scalar fallbacks. Useful for debugging or platforms without SIMD support.
-
-## Benchmarking SIMD vs Scalar
-
-```bash
-# With SIMD (default)
-cargo bench --bench simd
-
-# Without SIMD (scalar fallback)
-cargo bench --bench simd --no-default-features --features dsp
-```
-
-## Adding New SIMD Kernels
-
-1. Add scalar implementation in `src/simd/mod.rs`
-2. Add SSE2 + AVX2 in `src/simd/x86.rs`
-3. Add NEON in `src/simd/aarch64.rs`
-4. Add dispatch in `mod.rs` with `#[cfg(target_arch)]`
-5. Add parity test (SIMD vs scalar) in `mod.rs` tests
-6. Wire into the calling module with `#[cfg(feature = "simd")]` gate
+If Cyrius grows SIMD intrinsics, the port would re-add architecture-specific
+arms behind the scalar kernels in `src/simd.cyr` and dispatch to them, keeping
+the scalar path as the portable fallback and parity oracle. Until then, scalar
+is the only path.

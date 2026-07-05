@@ -2,72 +2,87 @@
 
 ## Build errors
 
-### `pipewire` feature fails to compile
+### Toolchain pin drift
 ```
-error: could not find system library 'libpipewire-0.3'
+error: cyrius toolchain 6.4.x does not match pinned 6.4.3
 ```
-Install PipeWire development headers:
+The toolchain is pinned in `cyrius.cyml [package].cyrius` (currently `6.4.3`) —
+that manifest is the source of truth, not a CI YAML or an env override. Install
+or select the pinned toolchain rather than editing the pin:
 ```bash
-# Ubuntu/Debian
-sudo apt-get install libpipewire-0.3-dev
-
-# Arch
-sudo pacman -S pipewire
-
-# Fedora
-sudo dnf install pipewire-devel
+cyrius --version
 ```
 
-Or build without PipeWire:
-```bash
-cargo build --no-default-features
-```
+### Benign warnings (safe to ignore)
+The following warnings are expected and do **not** indicate a broken build:
+- **Duplicate `ERR_INVALID`** — the same sentinel error code is defined by more
+  than one included bundle; the flat namespace reports the shadow. Harmless.
+- **Undefined `bayan_*` / `map_*` / `http_*` symbols DCE-pruned** — abaco's and
+  the siblings' json/http/net helpers are unreachable from dhvani's code and get
+  dead-code-eliminated. The "undefined, pruned" note is expected.
+- **Toolchain pin drift** — see above; a mismatch note against the `cyrius.cyml`
+  pin is informational.
 
-### MSRV errors
-Dhvani requires Rust 1.89+. Check your toolchain:
+### LEXID cap overflow
+```
+error: identifier table overflow (16384 LEXID cap)
+```
+Linking **all 10 siblings + `dist/dhvani.cyr` in one compilation unit** overflows
+the compiler's 16384-entry LEXID identifier table (force-including `bayan` is the
+usual trigger). This is the unrealistic "every feature at once" case — link only
+the sibling bundles for the features a consumer actually uses (per-feature linking
+is well under the cap). Include siblings **in dependency order**, not as `[deps]`.
+
+### Concurrent `cyrius` calls corrupt `cyrius.lock`
+Every `cyrius build/test/deps` re-resolves deps and races on `cyrius.lock`.
+Serialize toolchain calls behind a file lock:
 ```bash
-rustc --version
-rustup update stable
+flock <scratch>/dhvani-build.lock cyrius test tests/buffer.tcyr
 ```
 
 ## Runtime issues
 
-### PipeWire: `enumerate_devices()` returns empty
-- Verify PipeWire is running: `systemctl --user status pipewire`
-- Check for audio nodes: `pw-cli list-objects | grep Audio`
-- Ensure `libpipewire-0.3.so` is loadable: `ldd target/debug/dhvani | grep pipewire`
+### Device I/O: `dhvani_devices_list()` returns empty
+Device I/O runs over **vani** (raw `/dev/snd` ALSA PCM via ioctls — no PipeWire,
+no libasound, no FFI). Enumeration is via yukti (`src/device.cyr`).
+- Verify the sound subsystem exposes PCM nodes: `ls /dev/snd/`
+- Check your user is in the `audio` group: `groups`
+- List cards directly: `cat /proc/asound/cards`
 
-### PipeWire: capture produces silence
-- Check the target device ID matches an active source
-- Verify the audio format matches (dhvani uses F32LE)
-- Monitor PipeWire graph: `pw-top`
+### Capture produces silence
+- Check the target card/device index matches an active capture device
+- Verify the PCM format matches (dhvani bridges S16/S24/S32 little-endian PCM)
+- Confirm the default-capture open picked a real device
+  (`dhvani_capture_open_default`)
 
 ### DSP output contains NaN or Infinity
 - Check input samples for NaN/Inf before processing
 - Ensure compressor ratio > 1.0
 - Check that sample rates are non-zero
-- The `hard_limiter()` function clamps output — use as a safety net
+- The `dhvani_dsp_hard_limiter()` function clamps output — use as a safety net
 
 ### FFT returns all zeros
-- Input may be silence — check `buf.peak() > 0`
-- Window size must be a power of 2 for `spectrum_fft()` (it rounds down automatically)
-- For very short buffers, use `spectrum_dft()` which handles any size
-
-### SIMD not active
-- Verify the `simd` feature is enabled (it's default)
-- On x86_64, SSE2 is always used; AVX2 requires CPU support
-- Check with: `cargo test simd` — SIMD tests should pass
+- Input may be silence — check the buffer peak is nonzero
+- Window size must be a power of 2 for `dhvani_fft_spectrum()` (it rounds down
+  automatically)
+- For very short buffers, use `dhvani_analysis_spectrum_dft()` which handles any
+  size
 
 ## Performance issues
 
 ### Audio glitches/dropouts
-- Increase buffer size (`CaptureConfig::buffer_frames`)
-- Avoid allocation in the audio callback
-- Use `GraphProcessor` instead of manual DSP chains
+- Increase the ring/buffer size on the RT player/recorder
+- Avoid allocation in the audio path — the free-less bump allocator leaks any
+  per-block allocation
+- Use the RT ring **player**/**recorder** (`dhvani_player_*` / `dhvani_recorder_*`)
+  for real-time-safe I/O
 - Check CPU usage with `htop` during processing
 
 ### Benchmarks slower than expected
-- Ensure running in release mode: `cargo bench`
+- Run the hot-path benches: `cyrius test tests/hotpath.bcyr`
 - Close other CPU-intensive applications
 - Check thermal throttling: `sensors`
-- AVX2 benchmarks require CPU support — check `lscpu | grep avx2`
+- Note the port is **scalar-f64 only** (no SIMD intrinsics yet) — see
+  [`performance.md`](performance.md) and
+  [`benchmarks-rust-v-cyrius.md`](benchmarks-rust-v-cyrius.md) for the expected
+  Rust-vs-Cyrius throughput gap.
