@@ -48,16 +48,16 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**25 / 64 modules ported** — **Waves A + B + C COMPLETE** (the entire DSP surface).
-**412 parity assertions.** dsp/mod facade at full 19/19 test parity. Portable now:
-~55 across A–G. Deferred: 9.
+**29 / 64 modules ported** — Waves A+B+C complete (DSP surface); **Wave D in flight**
+(analysis foundation: waveform, zcr, analysis-facade + FFT green). **453 parity
+assertions.** Portable now: ~55 across A–G. Deferred: 9.
 
 | Layer / Wave | Modules | Status |
 |--------------|---------|--------|
 | A — Foundation (core) | ✅ error, ✅ clock, ✅ simd(scalar), ✅ buffer/{mod,convert,resample,dither,ops} | ✅ |
 | B — DSP L0/L1 (dsp) | ✅ oscillator, pan, gain_smoother, lfo, envelope, automation, svf, biquad, dsp(facade), routing | ✅ |
 | C — DSP dependents (dsp) | ✅ compressor, limiter, delay, reverb, eq, deesser, graphic_eq | ✅ |
-| D — Analysis (analysis) | ⬜ waveform, zcr, mod, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ⬜ (next) |
+| D — Analysis (analysis) | ✅ waveform, zcr, analysis(mod), fft · ⬜ dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | 🟡 |
 | D — Analysis (analysis) | waveform, zcr, mod, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ⬜ |
 | E — MIDI/graph/meter/capture | midi/{mod,voice,routing,v2,translate}, meter, graph, capture/{mod,record} | ⬜ |
 | F — Synthesis stack | synthesis, sampler, creature, environment, mechanical, voice_synth/mod, acoustics | ⬜ |

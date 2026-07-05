@@ -1,0 +1,81 @@
+# analysis.tcyr -- parity tests for src/analysis.cyr (Spectrum + DFT + helpers)
+# Ported one-for-one from the #[test] blocks in rust-old/src/analysis/mod.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+fn fill_c(n, v) { var out = vec_new(); var i = 0; while (i < n) { vec_push(out, v); i = i + 1; } return out; }
+fn make_sine(freq, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        vec_push(v, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr))));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+fn all_mags_zero(spec) {
+    var m = dhvani_spectrum_magnitudes(spec);
+    var n = vec_len(m); var i = 0;
+    while (i < n) { if (vec_get(m, i) != 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# ---- spectrum_of_silence ----
+test_group("spectrum_of_silence");
+var s1 = dhvani_analysis_spectrum_dft(dhvani_buffer_silence(1, 256, 44100), 256);
+assert_eq(dhvani_spectrum_bin_count(s1), 128, "128 bins");
+assert_eq(all_mags_zero(s1), 1, "silence mags all 0");
+
+# ---- spectrum_bin_frequency ----
+test_group("spectrum_bin_frequency");
+var s2 = dhvani_analysis_spectrum_dft(dhvani_buffer_silence(1, 1024, 44100), 1024);
+assert(near(dhvani_spectrum_freq_resolution(s2), f64_div(f64_from(44100), f64_from(1024)), 0.1), "freq res");
+assert(f64_lt(f64_abs(dhvani_spectrum_bin_frequency(s2, 0)), 0.1), "bin 0 = 0 Hz");
+assert(near(dhvani_spectrum_bin_frequency(s2, 1), dhvani_spectrum_freq_resolution(s2), 0.1), "bin 1 = freq res");
+
+# ---- loudness_of_silence ----
+test_group("loudness_of_silence");
+assert_eq(dhvani_analysis_loudness_lufs(dhvani_buffer_silence(1, 1024, 44100)), DH_NEG_INF, "silence -> -inf LUFS");
+
+# ---- is_silent_detects_silence / signal ----
+test_group("is_silent");
+assert_eq(dhvani_analysis_is_silent(dhvani_buffer_silence(1, 1024, 44100), f64_neg(60.0)), 1, "silence is silent");
+assert_eq(dhvani_analysis_is_silent(dhvani_buffer_from_interleaved(fill_c(1024, 0.5), 1, 44100), f64_neg(60.0)), 0, "signal not silent");
+
+# ---- spectrum_dominant_frequency ----
+test_group("spectrum_dominant_frequency");
+var s6 = dhvani_analysis_spectrum_dft(make_sine(440.0, 44100, 4096), 4096);
+assert(f64_lt(f64_abs(f64_sub(dhvani_spectrum_dominant_frequency(s6), 440.0)), f64_mul(dhvani_spectrum_freq_resolution(s6), 2.0)), "dominant ~440");
+
+# ---- suggest_gain ----
+test_group("suggest_gain");
+assert(f64_lt(dhvani_analysis_suggest_gain(dhvani_buffer_from_interleaved(fill_c(1024, 0.8), 1, 44100), 0.125), 1.0), "loud -> gain < 1");
+var qg = dhvani_analysis_suggest_gain(dhvani_buffer_from_interleaved(fill_c(1024, 0.01), 1, 44100), 0.125);
+assert(f64_gt(qg, 1.0), "quiet -> gain > 1");
+assert(f64_le(qg, 10.0), "gain clamped <= 10");
+assert_eq(dhvani_analysis_suggest_gain(dhvani_buffer_silence(1, 1024, 44100), 0.125), 1.0, "silence -> 1.0");
+assert_eq(dhvani_analysis_suggest_gain(dhvani_buffer_from_interleaved(fill_c(1024, 0.0001), 1, 44100), 0.125), 10.0, "extreme -> clamp 10");
+
+# ---- spectral_centroid ----
+test_group("spectral_centroid");
+assert_eq(dhvani_spectrum_spectral_centroid(dhvani_analysis_spectrum_dft(dhvani_buffer_silence(1, 256, 44100), 256)), 0, "silence centroid 0");
+var sc = dhvani_spectrum_spectral_centroid(dhvani_fft_spectrum(make_sine(2000.0, 44100, 4096), 4096));
+assert(f64_lt(f64_abs(f64_sub(sc, 2000.0)), 200.0), "sine centroid ~2000");
+
+# ---- spectral_rolloff ----
+test_group("spectral_rolloff");
+assert_eq(dhvani_spectrum_spectral_rolloff(dhvani_analysis_spectrum_dft(dhvani_buffer_silence(1, 256, 44100), 256), 0.95), 0, "silence rolloff 0");
+var ro = dhvani_spectrum_spectral_rolloff(dhvani_fft_spectrum(make_sine(1000.0, 44100, 4096), 4096), 0.95);
+assert(f64_gt(ro, 0), "rolloff > 0");
+assert(f64_lt(ro, 22050.0), "rolloff below Nyquist");
+
+var rc = assert_summary();
+syscall(60, rc);

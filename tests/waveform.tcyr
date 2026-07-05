@@ -1,0 +1,86 @@
+# waveform.tcyr -- parity tests for src/waveform.cyr
+# Ported one-for-one from the 5 #[test] blocks in rust-old/src/analysis/waveform.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/waveform.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# ---- silence_waveform ----
+test_group("silence_waveform");
+var w1 = dhvani_waveform_compute(dhvani_buffer_silence(2, 44100, 44100), 100);
+assert_eq(dhvani_waveform_num_channels(w1), 2, "2 channels");
+assert(dhvani_waveform_num_peaks(w1) > 0, "has peaks");
+var np1 = dhvani_waveform_num_peaks(w1);
+var c1 = 0; var ok1 = 1;
+while (c1 < 2) {
+    var p1 = 0;
+    while (p1 < np1) {
+        if (dhvani_waveform_min(w1, c1, p1) != 0) { ok1 = 0; }
+        if (dhvani_waveform_max(w1, c1, p1) != 0) { ok1 = 0; }
+        p1 = p1 + 1;
+    }
+    c1 = c1 + 1;
+}
+assert_eq(ok1, 1, "silence peaks all (0,0)");
+
+# ---- sine_waveform_has_range ----
+test_group("sine_waveform_has_range");
+var sv = vec_new();
+var i = 0;
+while (i < 44100) {
+    var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(i)), f64_from(44100));
+    vec_push(sv, f64_sin(ph));
+    i = i + 1;
+}
+var w2 = dhvani_waveform_compute(dhvani_buffer_from_interleaved(sv, 1, 44100), 100);
+assert_eq(dhvani_waveform_num_channels(w2), 1, "1 channel");
+var np2 = dhvani_waveform_num_peaks(w2);
+var p2 = 0; var has_range = 0;
+while (p2 < np2) {
+    if (f64_lt(dhvani_waveform_min(w2, 0, p2), f64_neg(0.5)) == 1) {
+        if (f64_gt(dhvani_waveform_max(w2, 0, p2), 0.5) == 1) { has_range = 1; }
+    }
+    p2 = p2 + 1;
+}
+assert_eq(has_range, 1, "sine shows amplitude range");
+
+# ---- resolution_affects_peak_count ----
+test_group("resolution_affects_peak_count");
+var w100 = dhvani_waveform_compute(dhvani_buffer_silence(1, 44100, 44100), 100);
+var w50 = dhvani_waveform_compute(dhvani_buffer_silence(1, 44100, 44100), 50);
+assert(dhvani_waveform_num_peaks(w100) > dhvani_waveform_num_peaks(w50), "higher pps -> more peaks");
+
+# ---- duration_correct ----
+test_group("duration_correct");
+var w4 = dhvani_waveform_compute(dhvani_buffer_silence(1, 44100, 44100), 100);
+assert(near(dhvani_waveform_duration_secs(w4), 1.0, 0.1), "~1 second");
+
+# ---- stereo_waveform ----
+test_group("stereo_waveform");
+var stv = vec_new();
+var k = 0;
+while (k < 88200) {
+    if (k % 2 == 0) { vec_push(stv, 0.5); } else { vec_push(stv, f64_neg(0.5)); }
+    k = k + 1;
+}
+var w5 = dhvani_waveform_compute(dhvani_buffer_from_interleaved(stv, 2, 44100), 100);
+assert_eq(dhvani_waveform_num_channels(w5), 2, "2 channels");
+var np5 = dhvani_waveform_num_peaks(w5);
+var p5 = 0; var lok = 1; var rok = 1;
+while (p5 < np5) {
+    if (near(dhvani_waveform_min(w5, 0, p5), 0.5, 0.0001) == 0) { lok = 0; }
+    if (near(dhvani_waveform_max(w5, 0, p5), 0.5, 0.0001) == 0) { lok = 0; }
+    if (near(dhvani_waveform_min(w5, 1, p5), f64_neg(0.5), 0.0001) == 0) { rok = 0; }
+    if (near(dhvani_waveform_max(w5, 1, p5), f64_neg(0.5), 0.0001) == 0) { rok = 0; }
+    p5 = p5 + 1;
+}
+assert_eq(lok, 1, "L channel all 0.5");
+assert_eq(rok, 1, "R channel all -0.5");
+
+var rc = assert_summary();
+syscall(60, rc);

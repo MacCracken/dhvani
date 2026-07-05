@@ -1,0 +1,167 @@
+# analysis.cyr -- Spectrum type + DFT + loudness/silence/gain helpers.
+# Ports the OWN code of rust-old/src/analysis/mod.rs (the per-submodule facade
+# re-exports are implicit in the flat bundle). L1: deps error + simd + buffer +
+# abaco (amplitude_to_db). Spectrum consumed by fft.cyr (spectrum_fft) too.
+# log10(x) = ln(x)/ln(10) (no f64_log10 in stdlib).
+
+#derive(accessors)
+struct DhSpectrum { magnitudes; magnitude_db; freq_resolution; sample_rate; fft_size; peak_frequency; peak_magnitude_db; }
+
+#must_use
+fn dh_log10(x) { return f64_div(f64_ln(x), F64_LN10); }
+
+# from_magnitudes(magnitudes, freq_resolution, sample_rate, fft_size) -> Spectrum.
+#must_use
+fn dhvani_spectrum_from_magnitudes(magnitudes, freq_resolution, sample_rate, fft_size) {
+    var n = vec_len(magnitudes);
+    var magnitude_db = dh_vec_zeros(n);
+    var peak_idx = 0;
+    var peak_mag = 0;
+    var i = 0;
+    while (i < n) {
+        var m = vec_get(magnitudes, i);
+        if (f64_gt(m, 0.0000000001) == 1) { vec_set(magnitude_db, i, f64_mul(20.0, dh_log10(m))); }
+        else { vec_set(magnitude_db, i, f64_neg(200.0)); }
+        if (f64_gt(m, peak_mag) == 1) { peak_mag = m; peak_idx = i; }
+        i = i + 1;
+    }
+    var peak_magnitude_db = f64_neg(200.0);
+    if (f64_gt(peak_mag, 0.0000000001) == 1) { peak_magnitude_db = f64_mul(20.0, dh_log10(peak_mag)); }
+    var self = alloc(sizeof(DhSpectrum));
+    DhSpectrum_set_magnitudes(self, magnitudes);
+    DhSpectrum_set_magnitude_db(self, magnitude_db);
+    DhSpectrum_set_freq_resolution(self, freq_resolution);
+    DhSpectrum_set_sample_rate(self, sample_rate);
+    DhSpectrum_set_fft_size(self, fft_size);
+    DhSpectrum_set_peak_frequency(self, f64_mul(f64_from(peak_idx), freq_resolution));
+    DhSpectrum_set_peak_magnitude_db(self, peak_magnitude_db);
+    return self;
+}
+
+#inline
+#must_use
+fn dhvani_spectrum_magnitudes(self) { return DhSpectrum_magnitudes(self); }
+#inline
+#must_use
+fn dhvani_spectrum_freq_resolution(self) { return DhSpectrum_freq_resolution(self); }
+#inline
+#must_use
+fn dhvani_spectrum_bin_count(self) { return vec_len(DhSpectrum_magnitudes(self)); }
+#must_use
+fn dhvani_spectrum_bin_frequency(self, bin) { return f64_mul(f64_from(bin), DhSpectrum_freq_resolution(self)); }
+# magnitude at bin k.
+#must_use
+fn dhvani_spectrum_magnitude(self, k) { return vec_get(DhSpectrum_magnitudes(self), k); }
+# dominant frequency (peak bin frequency); 0.0 for an empty spectrum.
+#must_use
+fn dhvani_spectrum_dominant_frequency(self) { return DhSpectrum_peak_frequency(self); }
+
+# spectral centroid — magnitude-weighted mean frequency; 0.0 for silence.
+#must_use
+fn dhvani_spectrum_spectral_centroid(self) {
+    var mags = DhSpectrum_magnitudes(self);
+    var fr = DhSpectrum_freq_resolution(self);
+    var n = vec_len(mags);
+    var total = 0;
+    var i = 0;
+    while (i < n) { total = f64_add(total, vec_get(mags, i)); i = i + 1; }
+    if (f64_le(total, 0) == 1) { return 0; }
+    var weighted = 0;
+    var j = 0;
+    while (j < n) { weighted = f64_add(weighted, f64_mul(f64_mul(f64_from(j), fr), vec_get(mags, j))); j = j + 1; }
+    return f64_div(weighted, total);
+}
+
+# spectral rolloff — frequency below which `threshold` fraction of energy sits.
+#must_use
+fn dhvani_spectrum_spectral_rolloff(self, threshold) {
+    var mags = DhSpectrum_magnitudes(self);
+    var fr = DhSpectrum_freq_resolution(self);
+    var n = vec_len(mags);
+    var total_energy = 0;
+    var i = 0;
+    while (i < n) { var m = vec_get(mags, i); total_energy = f64_add(total_energy, f64_mul(m, m)); i = i + 1; }
+    if (f64_le(total_energy, 0) == 1) { return 0; }
+    var target = f64_mul(total_energy, f64_clamp(threshold, 0, 1.0));
+    var cumulative = 0;
+    var k = 0;
+    while (k < n) {
+        var mm = vec_get(mags, k);
+        cumulative = f64_add(cumulative, f64_mul(mm, mm));
+        if (f64_ge(cumulative, target) == 1) { return f64_mul(f64_from(k), fr); }
+        k = k + 1;
+    }
+    return f64_mul(f64_from(n), fr);
+}
+
+# spectrum_dft(buf, window_size) -- O(n^2) DFT magnitude spectrum, or 0 on error.
+#must_use
+fn dhvani_analysis_spectrum_dft(buf, window_size) {
+    var samples = DhAudioBuffer_samples(buf);
+    var slen = vec_len(samples);
+    if (slen == 0) { return 0; }
+    if (DhAudioBuffer_channels(buf) == 0) { return 0; }
+    var n = window_size;
+    if (slen < window_size) { n = slen; }
+    var num_bins = n / 2;
+    var magnitudes = dh_vec_zeros(num_bins);
+    var k = 0;
+    while (k < num_bins) {
+        var re = 0;
+        var im = 0;
+        var i = 0;
+        while (i < n) {
+            var angle = f64_div(f64_mul(f64_mul(f64_mul(f64_neg(2.0), F64_PI), f64_from(k)), f64_from(i)), f64_from(n));
+            var s = vec_get(samples, i);
+            re = f64_add(re, f64_mul(s, f64_cos(angle)));
+            im = f64_add(im, f64_mul(s, f64_sin(angle)));
+            i = i + 1;
+        }
+        vec_set(magnitudes, k, f64_div(f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im))), f64_from(n)));
+        k = k + 1;
+    }
+    dhvani_analysis_normalize(magnitudes, num_bins);
+    var freq_resolution = f64_div(f64_from(DhAudioBuffer_sample_rate(buf)), f64_from(n));
+    return dhvani_spectrum_from_magnitudes(magnitudes, freq_resolution, DhAudioBuffer_sample_rate(buf), n);
+}
+
+# normalize magnitudes to 0..1 by the peak (shared by DFT + FFT).
+fn dhvani_analysis_normalize(magnitudes, num_bins) {
+    var max = 0;
+    var m = 0;
+    while (m < num_bins) { max = f64_max(max, vec_get(magnitudes, m)); m = m + 1; }
+    if (f64_gt(max, 0) == 1) {
+        var p = 0;
+        while (p < num_bins) { vec_set(magnitudes, p, f64_div(vec_get(magnitudes, p), max)); p = p + 1; }
+    }
+    return 0;
+}
+
+# loudness_lufs(buf) -- simplified EBU R128; -inf for empty/silence.
+#must_use
+fn dhvani_analysis_loudness_lufs(buf) {
+    var samples = DhAudioBuffer_samples(buf);
+    var len = vec_len(samples);
+    if (len == 0) { return DH_NEG_INF; }
+    var sum = 0;
+    var i = 0;
+    while (i < len) { var s = vec_get(samples, i); sum = f64_add(sum, f64_mul(s, s)); i = i + 1; }
+    var mean_sq = f64_div(sum, f64_from(len));
+    if (f64_le(mean_sq, 0) == 1) { return DH_NEG_INF; }
+    return f64_add(f64_neg(0.691), f64_mul(10.0, dh_log10(mean_sq)));
+}
+
+# is_silent(buf, threshold_db) -- peak dB below threshold.
+#must_use
+fn dhvani_analysis_is_silent(buf, threshold_db) {
+    if (f64_lt(amplitude_to_db(dhvani_buffer_peak(buf)), threshold_db) == 1) { return 1; }
+    return 0;
+}
+
+# suggest_gain(buf, target_rms) -- linear gain clamped to [0.1, 10.0]; 1.0 for silence.
+#must_use
+fn dhvani_analysis_suggest_gain(buf, target_rms) {
+    var rms = dhvani_buffer_rms(buf);
+    if (f64_lt(rms, 0.000001) == 1) { return 1.0; }
+    return f64_clamp(f64_div(target_rms, rms), 0.1, 10.0);
+}

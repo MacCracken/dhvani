@@ -297,10 +297,18 @@ their upstream deps (svara for voice) are already ported.
 Ported via a 4-agent workflow (eq+deesser parallel → graphic_eq → verify);
 independently reviewed (hex constants, dry/wet blend, reduction formula) — parity holds.
 
-Next: **Wave D (analysis)** — `waveform`/`zcr` (L0), `analysis/mod`/`fft`/
-`dynamics`/`loudness` (L1, loudness needs biquad), `stft`/`chroma`/`convolution`/
-`noise_reduction` (L2, conv/nr need fft), `key`/`onset` (L3), `beat` (L4). Then
-the deferred `buffer/ops::normalize_to_lufs` + `resample` spectrum test unblock.
+**Wave D (analysis) — in flight (29/64, 453 assertions):**
+- ✅ `zcr` → `src/zcr.cyr` — sign-change rate; ZcrResult. **6 green**.
+- ✅ `waveform` → `src/waveform.cyr` — min/max peak windows (Vec<Vec<(f32,f32)>>
+  → per-channel flat interleaved vecs). **10 green**.
+- ✅ `analysis/mod` → `src/analysis.cyr` — `Spectrum` type + `spectrum_dft` +
+  centroid/rolloff + loudness_lufs/is_silent/suggest_gain (`log10`=ln/F64_LN10). **19 green**.
+- ✅ `fft` → `src/fft.cyr` — radix-2 Cooley-Tukey `fft_in_place` + Hann-windowed
+  `spectrum_fft` (pow2 helpers; rounds window down). **6 green**.
+- ⬜ Next: `dynamics`, `loudness` (R128, needs biquad), `stft`/`chroma`
+  (need FFT), `convolution`/`noise_reduction` (need fft_in_place), `key` (chroma),
+  `onset`, `beat`. Then the deferred `buffer/ops::normalize_to_lufs` +
+  `resample` spectrum test unblock (fft/loudness now available).
 
 ### Cyrius idioms confirmed (this port)
 

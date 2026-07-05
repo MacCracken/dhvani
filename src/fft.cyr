@@ -1,0 +1,114 @@
+# fft.cyr -- radix-2 Cooley-Tukey FFT + windowed magnitude spectrum.
+# Ports rust-old/src/analysis/fft.rs. L1: deps error + simd + buffer + analysis
+# (Spectrum). fft_in_place operates on two f64 `vec`s (real, imag) in place.
+
+# smallest power of two >= v (v >= 1). Ports usize::next_power_of_two.
+#must_use
+fn dh_next_pow2(v) {
+    var p = 1;
+    while (p < v) { p = p << 1; }
+    return p;
+}
+# 1 if n is a power of two (n > 0), else 0.
+#must_use
+fn dh_is_pow2(n) {
+    if (n == 0) { return 0; }
+    if ((n & (n - 1)) == 0) { return 1; }
+    return 0;
+}
+
+# in-place radix-2 FFT on parallel real/imag vecs. Returns 1 on success, 0 if
+# length is not a power of two / mismatched / zero.
+fn dhvani_fft_in_place(real, imag) {
+    var n = vec_len(real);
+    if (dh_is_pow2(n) == 0) { return 0; }
+    if (n != vec_len(imag)) { return 0; }
+    # bit-reversal permutation
+    var j = 0;
+    var i = 0;
+    while (i < n) {
+        if (i < j) {
+            var tr0 = vec_get(real, i); vec_set(real, i, vec_get(real, j)); vec_set(real, j, tr0);
+            var ti0 = vec_get(imag, i); vec_set(imag, i, vec_get(imag, j)); vec_set(imag, j, ti0);
+        }
+        var m = n >> 1;
+        var cont = 1;
+        while (cont == 1) {
+            if (m >= 1) {
+                if (j >= m) { j = j - m; m = m >> 1; } else { cont = 0; }
+            } else { cont = 0; }
+        }
+        j = j + m;
+        i = i + 1;
+    }
+    # butterfly stages
+    var len = 2;
+    while (len <= n) {
+        var half = len / 2;
+        var angle_step = f64_div(f64_mul(f64_neg(2.0), F64_PI), f64_from(len));
+        var start = 0;
+        while (start < n) {
+            var angle = 0;
+            var k = 0;
+            while (k < half) {
+                var cos_a = f64_cos(angle);
+                var sin_a = f64_sin(angle);
+                var ii = start + k;
+                var jj = start + k + half;
+                var rj = vec_get(real, jj);
+                var ij = vec_get(imag, jj);
+                var tr = f64_sub(f64_mul(rj, cos_a), f64_mul(ij, sin_a));
+                var ti = f64_add(f64_mul(rj, sin_a), f64_mul(ij, cos_a));
+                var ri = vec_get(real, ii);
+                var iiv = vec_get(imag, ii);
+                vec_set(real, jj, f64_sub(ri, tr));
+                vec_set(imag, jj, f64_sub(iiv, ti));
+                vec_set(real, ii, f64_add(ri, tr));
+                vec_set(imag, ii, f64_add(iiv, ti));
+                angle = f64_add(angle, angle_step);
+                k = k + 1;
+            }
+            start = start + len;
+        }
+        len = len << 1;
+    }
+    return 1;
+}
+
+# spectrum_fft(buf, window_size) -- Hann-windowed radix-2 FFT magnitude
+# spectrum; window_size rounded DOWN to a power of two (>=2). 0 on error.
+#must_use
+fn dhvani_fft_spectrum(buf, window_size) {
+    var samples = DhAudioBuffer_samples(buf);
+    var slen = vec_len(samples);
+    if (slen == 0) { return 0; }
+    if (DhAudioBuffer_channels(buf) == 0) { return 0; }
+    var ws = window_size;
+    if (dh_is_pow2(ws) == 0) { ws = dh_next_pow2(ws) >> 1; }
+    if (ws < 2) { ws = 2; }
+    var n = ws;
+    if (slen < ws) { n = slen; }
+    var num_bins = ws / 2;
+    var real = dh_vec_zeros(ws);
+    var imag = dh_vec_zeros(ws);
+    var denom = n - 1;
+    if (denom < 1) { denom = 1; }
+    var i = 0;
+    while (i < n) {
+        var window = f64_mul(0.5, f64_sub(1.0, f64_cos(f64_div(f64_mul(f64_mul(2.0, F64_PI), f64_from(i)), f64_from(denom)))));
+        vec_set(real, i, f64_mul(vec_get(samples, i), window));
+        i = i + 1;
+    }
+    var freq_resolution = f64_div(f64_from(DhAudioBuffer_sample_rate(buf)), f64_from(ws));
+    if (dhvani_fft_in_place(real, imag) == 0) { return 0; }
+    var magnitudes = dh_vec_zeros(num_bins);
+    var k = 0;
+    while (k < num_bins) {
+        var re = vec_get(real, k);
+        var im = vec_get(imag, k);
+        vec_set(magnitudes, k, f64_div(f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im))), f64_from(ws)));
+        k = k + 1;
+    }
+    dhvani_analysis_normalize(magnitudes, num_bins);
+    return dhvani_spectrum_from_magnitudes(magnitudes, freq_resolution, DhAudioBuffer_sample_rate(buf), ws);
+}

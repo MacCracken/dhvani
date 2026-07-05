@@ -1,0 +1,58 @@
+# fft.tcyr -- parity tests for src/fft.cyr
+# Ported one-for-one from the 5 #[test] blocks in rust-old/src/analysis/fft.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+fn make_sine(freq, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        vec_push(v, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr))));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+
+# ---- silence_spectrum ----
+test_group("silence_spectrum");
+var f1 = dhvani_fft_spectrum(dhvani_buffer_silence(1, 1024, 44100), 1024);
+assert_eq(dhvani_spectrum_bin_count(f1), 512, "512 bins");
+var m1 = dhvani_spectrum_magnitudes(f1);
+var i1 = 0; var z1 = 1;
+while (i1 < 512) { if (vec_get(m1, i1) != 0) { z1 = 0; } i1 = i1 + 1; }
+assert_eq(z1, 1, "silence mags all 0");
+
+# ---- sine_dominant_frequency ----
+test_group("sine_dominant_frequency");
+var f2 = dhvani_fft_spectrum(make_sine(440.0, 44100, 4096), 4096);
+assert(f64_lt(f64_abs(f64_sub(dhvani_spectrum_dominant_frequency(f2), 440.0)), f64_mul(dhvani_spectrum_freq_resolution(f2), 2.0)), "dominant ~440");
+
+# ---- fft_matches_dft_roughly ----
+test_group("fft_matches_dft_roughly");
+var sig = make_sine(1000.0, 44100, 1024);
+var sdft = dhvani_analysis_spectrum_dft(sig, 1024);
+var sfft = dhvani_fft_spectrum(sig, 1024);
+assert(f64_lt(f64_abs(f64_sub(dhvani_spectrum_dominant_frequency(sdft), dhvani_spectrum_dominant_frequency(sfft))), f64_mul(dhvani_spectrum_freq_resolution(sfft), 2.0)), "DFT and FFT agree on dominant");
+
+# ---- non_power_of_two_handled ----
+test_group("non_power_of_two_handled");
+var f4 = dhvani_fft_spectrum(dhvani_buffer_from_interleaved(fill_np(1000, 0.5), 1, 44100), 1000);
+assert(dhvani_spectrum_bin_count(f4) <= 512, "1000 rounds down to <= 512 bins");
+
+# ---- frequency_resolution_correct ----
+test_group("frequency_resolution_correct");
+var f5 = dhvani_fft_spectrum(dhvani_buffer_silence(1, 2048, 48000), 2048);
+assert(near(dhvani_spectrum_freq_resolution(f5), f64_div(f64_from(48000), f64_from(2048)), 0.1), "48000/2048 Hz per bin");
+
+var rc = assert_summary();
+syscall(60, rc);
+
+fn fill_np(n, v) { var out = vec_new(); var i = 0; while (i < n) { vec_push(out, v); i = i + 1; } return out; }

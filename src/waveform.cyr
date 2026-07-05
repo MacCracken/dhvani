@@ -1,0 +1,73 @@
+# waveform.cyr -- downsampled peak data for visualization.
+# Ports rust-old/src/analysis/waveform.rs. L0: deps error + buffer.
+# WaveformData: channels[ch] = a flat vec of (min,max) pairs interleaved
+# (min at 2i, max at 2i+1) -- Vec<Vec<(f32,f32)>> flattened per channel.
+
+#derive(accessors)
+struct DhWaveformData { channels; peaks_per_second; sample_rate; }
+
+#must_use
+fn dhvani_waveform_num_peaks(self) {
+    var channels = DhWaveformData_channels(self);
+    if (vec_len(channels) == 0) { return 0; }
+    return vec_len(vec_get(channels, 0)) / 2;
+}
+#inline
+#must_use
+fn dhvani_waveform_num_channels(self) { return vec_len(DhWaveformData_channels(self)); }
+#must_use
+fn dhvani_waveform_duration_secs(self) {
+    var pps = DhWaveformData_peaks_per_second(self);
+    if (pps == 0) { return 0; }
+    return f64_div(f64_from(dhvani_waveform_num_peaks(self)), f64_from(pps));
+}
+# (min,max) of peak i on channel c.
+#must_use
+fn dhvani_waveform_min(self, c, i) { return vec_get(vec_get(DhWaveformData_channels(self), c), i * 2); }
+#must_use
+fn dhvani_waveform_max(self, c, i) { return vec_get(vec_get(DhWaveformData_channels(self), c), i * 2 + 1); }
+
+# compute_waveform(buf, peaks_per_second) -- (min,max) per time window per channel.
+#must_use
+fn dhvani_waveform_compute(buf, peaks_per_second) {
+    var pps = peaks_per_second;
+    if (pps < 1) { pps = 1; }
+    var ch = DhAudioBuffer_channels(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var spp = f64_to(f64_ceil(f64_div(f64_from(DhAudioBuffer_sample_rate(buf)), f64_from(pps))));
+    if (spp < 1) { spp = 1; }
+    var num_peaks = (frames + spp - 1) / spp;   # div_ceil
+    var channels = vec_new();
+    var c0 = 0;
+    while (c0 < ch) { vec_push(channels, vec_new()); c0 = c0 + 1; }
+    var peak_idx = 0;
+    while (peak_idx < num_peaks) {
+        var start_frame = peak_idx * spp;
+        var end_frame = (peak_idx + 1) * spp;
+        if (end_frame > frames) { end_frame = frames; }
+        var c = 0;
+        while (c < ch) {
+            var min_val = DH_POS_INF;
+            var max_val = DH_NEG_INF;
+            var frame = start_frame;
+            while (frame < end_frame) {
+                var sample = vec_get(samples, frame * ch + c);
+                min_val = f64_min(min_val, sample);
+                max_val = f64_max(max_val, sample);
+                frame = frame + 1;
+            }
+            if (min_val == DH_POS_INF) { min_val = 0; max_val = 0; }
+            var chan = vec_get(channels, c);
+            vec_push(chan, min_val);
+            vec_push(chan, max_val);
+            c = c + 1;
+        }
+        peak_idx = peak_idx + 1;
+    }
+    var self = alloc(sizeof(DhWaveformData));
+    DhWaveformData_set_channels(self, channels);
+    DhWaveformData_set_peaks_per_second(self, pps);
+    DhWaveformData_set_sample_rate(self, DhAudioBuffer_sample_rate(buf));
+    return self;
+}
