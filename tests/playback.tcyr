@@ -1,0 +1,61 @@
+# playback.tcyr -- tests for src/playback.cyr (the vani device-I/O bridge, 2.1.0).
+# Covers the hardware-free format bridge (AudioBuffer f64 <-> S16_LE PCM bytes):
+# exact byte packing + round-trip within i16 quantization. The device glue
+# (open/write/close/capture over vani) needs /dev/snd and is validated on real
+# hardware (see programs / play_tone), not here. Chain: yukti -> sakshi -> vani
+# (vani's externalized deps) then dhvani error -> simd -> buffer -> playback.
+
+include "lib/yukti.cyr"
+include "lib/sakshi.cyr"
+include "lib/vani.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/playback.cyr"
+
+alloc_init();
+
+# ---- to_s16le exact little-endian packing ----
+# samples [1.0, -1.0, 0.5, 0.0] -> i16 [32767, -32767, 16383, 0] (trunc * 32767).
+test_group("to_s16le_packing");
+var v = vec_new();
+vec_push(v, 1.0);
+vec_push(v, f64_neg(1.0));
+vec_push(v, 0.5);
+vec_push(v, 0);
+var pcm = dhvani_playback_to_s16le(dhvani_buffer_from_interleaved(v, 1, 44100));
+assert_eq(load8(pcm + 0), 0xFF, "32767 lo");   # 0x7FFF
+assert_eq(load8(pcm + 1), 0x7F, "32767 hi");
+assert_eq(load8(pcm + 2), 0x01, "-32767 lo");  # 0x8001
+assert_eq(load8(pcm + 3), 0x80, "-32767 hi");
+assert_eq(load8(pcm + 4), 0xFF, "16383 lo");   # 0x3FFF
+assert_eq(load8(pcm + 5), 0x3F, "16383 hi");
+assert_eq(load8(pcm + 6), 0, "0 lo");
+assert_eq(load8(pcm + 7), 0, "0 hi");
+
+# ---- round-trip AudioBuffer -> S16_LE -> AudioBuffer (within quantization) ----
+test_group("s16le_roundtrip");
+var rv = vec_new();
+var i = 0;
+while (i < 128) {
+    var s = f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, f64_from(440)), f64_from(i)), f64_from(44100)));
+    vec_push(rv, s);
+    vec_push(rv, f64_mul(s, 0.5));
+    i = i + 1;
+}
+var src = dhvani_buffer_from_interleaved(rv, 2, 44100);
+var back = dhvani_capture_from_s16le(dhvani_playback_to_s16le(src), 128, 2, 44100);
+assert_eq(dhvani_buffer_channels(back), 2, "stereo preserved");
+assert_eq(dhvani_buffer_frames(back), 128, "128 frames preserved");
+var os = dhvani_buffer_samples(src);
+var bs = dhvani_buffer_samples(back);
+var ok = 1;
+var j = 0;
+while (j < 256) {
+    if (f64_ge(f64_abs(f64_sub(vec_get(bs, j), vec_get(os, j))), 0.0001) == 1) { ok = 0; }
+    j = j + 1;
+}
+assert_eq(ok, 1, "round-trip within i16 quantization (<1e-4)");
+
+var rc = assert_summary();
+syscall(60, rc);

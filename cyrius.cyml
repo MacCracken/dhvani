@@ -80,6 +80,8 @@ modules = [
     "src/environment.cyr",
     "src/mechanical.cyr",
     "src/acoustics.cyr",
+    # Device I/O (2.1.0) — externalizes vani (ALSA PCM) + its yukti/sakshi deps
+    "src/playback.cyr",
 ]
 
 # stdlib: base set + the DSP/math set naad/svara use. `math` gives

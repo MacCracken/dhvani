@@ -5,10 +5,11 @@
 
 ## Version
 
-**2.0.0** (in progress) — Rust → Cyrius port, scaffolded 2026-07-04 via
-`cyrius port`. The 23,695-line Rust source (64 modules, ~660 `#[test]` blocks) is
-frozen at `rust-old/` as the parity oracle. The port lands as **2.0.0** (major
-break: language change), matching the sibling audio libs (naad 2.x, svara 3.x).
+**2.1.0** (in progress) — device I/O. **2.0.0 released 2026-07-05** (the Rust →
+Cyrius parity port; 23,695-line Rust source frozen at `rust-old/` as oracle). 2.1.0
+adds real-hardware audio via **vani** (ALSA PCM, dh(vani)'s I/O sibling): the
+`playback` module bridges `AudioBuffer` ↔ S16_LE PCM (`src/playback.cyr`,
+`tests/playback.tcyr`), filling the gap the platform-blocked PipeWire backend left.
 
 ## Toolchain
 
@@ -50,13 +51,14 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**54 / 64 modules ported** — **Waves A–F COMPLETE**; **Wave G assembly nearly done**:
-deferred tests re-enabled, `dist/dhvani.cyr` bundle built & validated, and the
-integration + dsp-reference + proptest suites ported (67 tests / 414 assertions
-against the assembled bundle) + hot-path benches + a Rust-vs-Cyrius comparison.
-**1625 parity assertions across 61 suites** (+ 1 scaffold smoke). **2.0.0 is
-release-ready** — CHANGELOG finalized, `VERSION` = 2.0.0, deps pinned; only the git
-tag remains (user handles git). Deferred: 9 (blocked deps + platform).
+**2.0.0 RELEASED** — the full Rust→Cyrius parity port (54/64 modules; 9 deferred on
+blocked deps/platform): Waves A–F + Wave G assembly (dist bundle, integration/
+dsp-reference/proptest suites, hot-path benches + Rust-vs-Cyrius comparison).
+
+**2.1.0 (in progress):** device I/O via vani. `playback` module bridges
+`AudioBuffer` ↔ S16_LE PCM + device glue (open/write/close/capture) over vani;
+bundled into the dist (DCE-prunes for vani-free consumers). **1636 assertions
+across 62 suites** (+ 1 scaffold smoke).
 
 **abaco 2.3.2** (dep bump): the numerical dsp-reference port caught abaco's dB
 constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.04%/dB

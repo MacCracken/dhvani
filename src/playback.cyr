@@ -1,0 +1,96 @@
+# playback.cyr -- dhvani AudioBuffer <-> vani ALSA device I/O (2.1.0 feature).
+#
+# vani (dh(vani)'s sibling) owns raw /dev/snd PCM playback/capture via ioctls
+# (no libasound, no FFI) — the real-hardware sink/source the Rust dhvani only had
+# via the platform-blocked PipeWire backend. This module bridges dhvani's f64
+# AudioBuffer to vani's interleaved S16_LE PCM.
+#
+# Requires (in dependency order before this unit): yukti -> sakshi -> vani, then
+# dhvani error -> simd -> buffer. Externalizes vani exactly like the Wave F
+# wrappers externalize the synthesis siblings — a consumer that wants device I/O
+# links vani alongside dhvani. The PURE format bridges (to/from S16_LE) need no
+# hardware and are unit-tested; the device glue needs /dev/snd.
+
+# ── Pure format bridge (no vani, no hardware) ──────────────────────────────
+
+# AudioBuffer f64 interleaved -> a freshly-allocated S16_LE PCM byte buffer
+# (channels*frames*2 bytes, little-endian). Caller owns the allocation.
+#must_use
+fn dhvani_playback_to_s16le(buf) {
+    var samples = dhvani_buffer_samples(buf);
+    var n = vec_len(samples);
+    var i16v = dh_vec_zeros(n);
+    dhvani_simd_f32_to_i16(samples, i16v);
+    var pcm = alloc(n * 2);
+    var i = 0;
+    while (i < n) {
+        var v = vec_get(i16v, i);
+        store8(pcm + i * 2, v & 0xFF);
+        store8(pcm + i * 2 + 1, (v >> 8) & 0xFF);
+        i = i + 1;
+    }
+    return pcm;
+}
+
+# S16_LE PCM bytes (frames*channels little-endian i16) -> AudioBuffer.
+#must_use
+fn dhvani_capture_from_s16le(pcm, frames, channels, sample_rate) {
+    var n = frames * channels;
+    var i16v = dh_vec_zeros(n);
+    var i = 0;
+    while (i < n) {
+        var lo = load8(pcm + i * 2);
+        var hi = load8(pcm + i * 2 + 1);
+        var v = (hi << 8) | lo;
+        if (v >= 0x8000) { v = v - 0x10000; }   # sign-extend 16-bit
+        vec_set(i16v, i, v);
+        i = i + 1;
+    }
+    var f = dh_vec_zeros(n);
+    dhvani_simd_i16_to_f32(i16v, f);
+    return dhvani_buffer_from_interleaved(f, channels, sample_rate);
+}
+
+# ── Device glue (over vani; needs /dev/snd) ────────────────────────────────
+
+# Open + configure an S16_LE playback device and start it. Returns the vani
+# device handle, or 0 on failure (open/configure error).
+fn dhvani_playback_open(card, device, sample_rate, channels) {
+    var ores = vani_open_playback(card, device);
+    if (is_ok(ores) == 0) { return 0; }
+    var d = payload(ores);
+    var cres = vani_configure(d, vani_format_new(sample_rate, channels, 16, vani_alsa_for(16, 1)));
+    if (is_ok(cres) == 0) { vani_close(d); return 0; }
+    vani_start(d);
+    return d;
+}
+
+# Convert an AudioBuffer to S16_LE and play it. Returns frames written, or -1.
+fn dhvani_playback_write(dev, buf) {
+    var frames = dhvani_buffer_frames(buf);
+    var pres = vani_play(dev, dhvani_playback_to_s16le(buf), frames);
+    if (is_ok(pres) == 0) { return 0 - 1; }
+    return payload(pres);
+}
+
+fn dhvani_playback_close(dev) { return vani_close(dev); }
+
+# Open + configure + start an S16_LE capture device. Handle, or 0 on failure.
+fn dhvani_capture_open(card, device, sample_rate, channels) {
+    var ores = vani_open_capture(card, device);
+    if (is_ok(ores) == 0) { return 0; }
+    var d = payload(ores);
+    var cres = vani_configure(d, vani_format_new(sample_rate, channels, 16, vani_alsa_for(16, 1)));
+    if (is_ok(cres) == 0) { vani_close(d); return 0; }
+    vani_start(d);
+    return d;
+}
+
+# Record `frames` from the device into a new AudioBuffer, or 0 on failure.
+#must_use
+fn dhvani_capture_read(dev, frames, channels, sample_rate) {
+    var pcm = alloc(frames * channels * 2);
+    var rres = vani_record(dev, pcm, frames);
+    if (is_ok(rres) == 0) { return 0; }
+    return dhvani_capture_from_s16le(pcm, frames, channels, sample_rate);
+}

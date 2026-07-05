@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — vani device I/O (in progress)
+
+Adds real-hardware audio I/O by bridging dhvani to **vani** — dh(vani)'s ALSA
+sibling: raw `/dev/snd` PCM playback/capture via ioctls, no libasound, no FFI.
+2.0.0 shipped headless (processing only); 2.1.0 gives the engine a device sink/
+source without the platform-blocked PipeWire path.
+
+### Added
+
+- **`playback` module** (`src/playback.cyr`) — bridges the f64 `AudioBuffer` to
+  vani's interleaved S16_LE PCM:
+  - `dhvani_playback_to_s16le` / `dhvani_capture_from_s16le` — hardware-free format
+    bridges (f64 interleaved ↔ little-endian i16 bytes), unit-tested (byte packing
+    + round-trip within i16 quantization).
+  - `dhvani_playback_open`/`_write`/`_close` + `dhvani_capture_open`/`_read` —
+    device glue over vani (open → configure S16_LE → start → play/record); needs
+    `/dev/snd`, validated on hardware.
+  - Bundled into `dist/dhvani.cyr`, externalizing vani (+ its `yukti`/`sakshi`
+    deps) and referencing it through functions only, so it DCE-prunes for consumers
+    that don't link vani — the core bundle stays device-agnostic.
+
+### Changed
+
+- **Dependencies**: **vani** (ALSA I/O) + **yukti** (device descriptors) vendored
+  into `lib/`; a consumer wanting device I/O links `yukti → sakshi → vani` ahead of
+  dhvani. No collisions with dhvani/abaco.
+
 ## [2.0.0] — Cyrius port — 2026-07-05
 
 Complete rewrite from Rust to **Cyrius**. dhvani's Rust line shipped through
