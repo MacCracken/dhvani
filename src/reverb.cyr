@@ -1,0 +1,254 @@
+# reverb.cyr -- Schroeder/Freeverb reverb (4 combs -> 2 allpass, per channel).
+# Ports rust-old/src/dsp/reverb.rs. L1: deps error + buffer. Comb/allpass rings
+# as `vec`s; filter banks as vecs of filter handles. serde dropped.
+# Base delays @44100 scaled to the target rate. ALLPASS_FEEDBACK = 0.5.
+
+#derive(accessors)
+struct DhReverbParams { room_size; damping; mix; }
+
+#derive(accessors)
+struct DhCombFilter { buffer; write_pos; feedback; damp; damp_state; }
+
+#derive(accessors)
+struct DhAllpassFilter { buffer; write_pos; }
+
+#derive(accessors)
+struct DhReverb { combs_l; combs_r; allpasses_l; allpasses_r; params; bypassed; }
+
+# ---- ReverbParams ----
+#must_use
+fn dhvani_reverbparams_new(room_size, damping, mix) {
+    var p = alloc(sizeof(DhReverbParams));
+    DhReverbParams_set_room_size(p, room_size);
+    DhReverbParams_set_damping(p, damping);
+    DhReverbParams_set_mix(p, mix);
+    return p;
+}
+#must_use
+fn dhvani_reverbparams_default() { return dhvani_reverbparams_new(0.5, 0.5, 0.3); }
+#must_use
+fn dhvani_reverbparams_validate(p) {
+    var rs = DhReverbParams_room_size(p);
+    if (f64_lt(rs, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_gt(rs, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var dp = DhReverbParams_damping(p);
+    if (f64_lt(dp, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_gt(dp, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var mx = DhReverbParams_mix(p);
+    if (f64_lt(mx, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_gt(mx, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    return DHVANI_ERR_NONE;
+}
+
+# scale a base delay (@44100) to the target rate; min 1.
+#must_use
+fn dhvani_reverb_scale_delay(base, sample_rate) {
+    var s = f64_to(f64_round(f64_div(f64_mul(f64_from(base), f64_from(sample_rate)), 44100.0)));
+    if (s < 1) { s = 1; }
+    return s;
+}
+
+# ---- CombFilter ----
+#must_use
+fn dhvani_comb_new(delay_samples) {
+    var self = alloc(sizeof(DhCombFilter));
+    var d = delay_samples;
+    if (d < 1) { d = 1; }
+    DhCombFilter_set_buffer(self, dh_vec_zeros(d));
+    DhCombFilter_set_write_pos(self, 0);
+    DhCombFilter_set_feedback(self, 0.5);
+    DhCombFilter_set_damp(self, 0.5);
+    DhCombFilter_set_damp_state(self, 0);
+    return self;
+}
+fn dhvani_comb_process(self, input) {
+    var ring = DhCombFilter_buffer(self);
+    var wp = DhCombFilter_write_pos(self);
+    var output = vec_get(ring, wp);
+    var damp = DhCombFilter_damp(self);
+    var ds = f64_add(f64_mul(output, f64_sub(1.0, damp)), f64_mul(DhCombFilter_damp_state(self), damp));
+    DhCombFilter_set_damp_state(self, ds);
+    vec_set(ring, wp, f64_add(input, f64_mul(ds, DhCombFilter_feedback(self))));
+    DhCombFilter_set_write_pos(self, (wp + 1) % vec_len(ring));
+    return output;
+}
+fn dhvani_comb_reset(self) {
+    var ring = DhCombFilter_buffer(self);
+    var n = vec_len(ring); var i = 0;
+    while (i < n) { vec_set(ring, i, 0); i = i + 1; }
+    DhCombFilter_set_write_pos(self, 0);
+    DhCombFilter_set_damp_state(self, 0);
+    return 0;
+}
+
+# ---- AllpassFilter ----
+#must_use
+fn dhvani_allpass_new(delay_samples) {
+    var self = alloc(sizeof(DhAllpassFilter));
+    var d = delay_samples;
+    if (d < 1) { d = 1; }
+    DhAllpassFilter_set_buffer(self, dh_vec_zeros(d));
+    DhAllpassFilter_set_write_pos(self, 0);
+    return self;
+}
+fn dhvani_allpass_process(self, input) {
+    var ring = DhAllpassFilter_buffer(self);
+    var wp = DhAllpassFilter_write_pos(self);
+    var buffered = vec_get(ring, wp);
+    vec_set(ring, wp, f64_add(input, f64_mul(buffered, 0.5)));
+    DhAllpassFilter_set_write_pos(self, (wp + 1) % vec_len(ring));
+    return f64_add(f64_neg(input), buffered);
+}
+fn dhvani_allpass_reset(self) {
+    var ring = DhAllpassFilter_buffer(self);
+    var n = vec_len(ring); var i = 0;
+    while (i < n) { vec_set(ring, i, 0); i = i + 1; }
+    DhAllpassFilter_set_write_pos(self, 0);
+    return 0;
+}
+
+# ---- Reverb ----
+# run one channel's chain: sum 4 combs (x0.25) -> cascade allpasses.
+#must_use
+fn dhvani_reverb_run_chain(combs, allpasses, input) {
+    var comb_sum = 0;
+    var nc = vec_len(combs); var i = 0;
+    while (i < nc) { comb_sum = f64_add(comb_sum, dhvani_comb_process(vec_get(combs, i), input)); i = i + 1; }
+    comb_sum = f64_mul(comb_sum, 0.25);
+    var out = comb_sum;
+    var na = vec_len(allpasses); var j = 0;
+    while (j < na) { out = dhvani_allpass_process(vec_get(allpasses, j), out); j = j + 1; }
+    return out;
+}
+
+fn dhvani_reverb_set_combs_fd(combs, feedback, damp) {
+    var n = vec_len(combs); var i = 0;
+    while (i < n) {
+        var comb = vec_get(combs, i);
+        DhCombFilter_set_feedback(comb, feedback);
+        DhCombFilter_set_damp(comb, damp);
+        i = i + 1;
+    }
+    return 0;
+}
+fn dhvani_reverb_update_params(self, params) {
+    var feedback = f64_add(f64_mul(f64_clamp(DhReverbParams_room_size(params), 0, 1.0), 0.9), 0.05);
+    var damp = f64_clamp(DhReverbParams_damping(params), 0, 1.0);
+    dhvani_reverb_set_combs_fd(DhReverb_combs_l(self), feedback, damp);
+    dhvani_reverb_set_combs_fd(DhReverb_combs_r(self), feedback, damp);
+    return 0;
+}
+
+#must_use
+fn dhvani_reverb_new(params, sample_rate) {
+    if (dhvani_is_err(dhvani_reverbparams_validate(params)) == 1) { return 0; }
+    var self = alloc(sizeof(DhReverb));
+    var cd = vec_new(); vec_push(cd, 1557); vec_push(cd, 1617); vec_push(cd, 1491); vec_push(cd, 1422);
+    var combs_l = vec_new();
+    var combs_r = vec_new();
+    var i = 0;
+    while (i < 4) {
+        vec_push(combs_l, dhvani_comb_new(dhvani_reverb_scale_delay(vec_get(cd, i), sample_rate)));
+        vec_push(combs_r, dhvani_comb_new(dhvani_reverb_scale_delay(vec_get(cd, i) + 23, sample_rate)));
+        i = i + 1;
+    }
+    var ad = vec_new(); vec_push(ad, 225); vec_push(ad, 556);
+    var allpasses_l = vec_new();
+    var allpasses_r = vec_new();
+    var j = 0;
+    while (j < 2) {
+        vec_push(allpasses_l, dhvani_allpass_new(dhvani_reverb_scale_delay(vec_get(ad, j), sample_rate)));
+        vec_push(allpasses_r, dhvani_allpass_new(dhvani_reverb_scale_delay(vec_get(ad, j) + 23, sample_rate)));
+        j = j + 1;
+    }
+    DhReverb_set_combs_l(self, combs_l);
+    DhReverb_set_combs_r(self, combs_r);
+    DhReverb_set_allpasses_l(self, allpasses_l);
+    DhReverb_set_allpasses_r(self, allpasses_r);
+    DhReverb_set_params(self, params);
+    DhReverb_set_bypassed(self, 0);
+    dhvani_reverb_update_params(self, params);
+    return self;
+}
+
+fn dhvani_reverb_process(self, buf) {
+    if (DhReverb_bypassed(self) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var p = DhReverb_params(self);
+    var mix = DhReverbParams_mix(p);
+    var dry = f64_sub(1.0, mix);
+    var combs_l = DhReverb_combs_l(self);
+    var combs_r = DhReverb_combs_r(self);
+    var allpasses_l = DhReverb_allpasses_l(self);
+    var allpasses_r = DhReverb_allpasses_r(self);
+    var frame = 0;
+    while (frame < frames) {
+        if (ch == 1) {
+            var input = vec_get(samples, frame);
+            var rev = dhvani_reverb_run_chain(combs_l, allpasses_l, input);
+            var out = f64_add(f64_mul(input, dry), f64_mul(rev, mix));
+            if (dhvani_is_finite(out) == 0) { out = 0; }
+            vec_set(samples, frame, out);
+        } else {
+            var l_idx = frame * ch;
+            var r_idx = frame * ch + 1;
+            var input_l = vec_get(samples, l_idx);
+            var input_r = vec_get(samples, r_idx);
+            var rev_l = dhvani_reverb_run_chain(combs_l, allpasses_l, input_l);
+            var rev_r = dhvani_reverb_run_chain(combs_r, allpasses_r, input_r);
+            var out_l = f64_add(f64_mul(input_l, dry), f64_mul(rev_l, mix));
+            var out_r = f64_add(f64_mul(input_r, dry), f64_mul(rev_r, mix));
+            if (dhvani_is_finite(out_l) == 0) { out_l = 0; }
+            if (dhvani_is_finite(out_r) == 0) { out_r = 0; }
+            vec_set(samples, l_idx, out_l);
+            vec_set(samples, r_idx, out_r);
+        }
+        frame = frame + 1;
+    }
+    return 0;
+}
+
+fn dhvani_reverb_set_bypass(self, bypassed) { DhReverb_set_bypassed(self, bypassed); return 0; }
+#must_use
+fn dhvani_reverb_is_bypassed(self) { if (DhReverb_bypassed(self) == 1) { return 1; } return 0; }
+
+fn dhvani_reverb_set_params(self, params) {
+    var rc = dhvani_reverbparams_validate(params);
+    if (dhvani_is_err(rc) == 1) { return rc; }
+    dhvani_reverb_update_params(self, params);
+    DhReverb_set_params(self, params);
+    return DHVANI_ERR_NONE;
+}
+
+fn dhvani_reverb_set_sample_rate(self, sample_rate) {
+    var was_bypassed = DhReverb_bypassed(self);
+    var fresh = dhvani_reverb_new(DhReverb_params(self), sample_rate);
+    if (fresh != 0) {
+        DhReverb_set_combs_l(self, DhReverb_combs_l(fresh));
+        DhReverb_set_combs_r(self, DhReverb_combs_r(fresh));
+        DhReverb_set_allpasses_l(self, DhReverb_allpasses_l(fresh));
+        DhReverb_set_allpasses_r(self, DhReverb_allpasses_r(fresh));
+    }
+    DhReverb_set_bypassed(self, was_bypassed);
+    return 0;
+}
+
+fn dhvani_reverb_reset_combs(combs) {
+    var n = vec_len(combs); var i = 0;
+    while (i < n) { dhvani_comb_reset(vec_get(combs, i)); i = i + 1; }
+    return 0;
+}
+fn dhvani_reverb_reset_allpasses(aps) {
+    var n = vec_len(aps); var i = 0;
+    while (i < n) { dhvani_allpass_reset(vec_get(aps, i)); i = i + 1; }
+    return 0;
+}
+fn dhvani_reverb_reset(self) {
+    dhvani_reverb_reset_combs(DhReverb_combs_l(self));
+    dhvani_reverb_reset_combs(DhReverb_combs_r(self));
+    dhvani_reverb_reset_allpasses(DhReverb_allpasses_l(self));
+    dhvani_reverb_reset_allpasses(DhReverb_allpasses_r(self));
+    return 0;
+}

@@ -48,14 +48,14 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 
 ## Port progress
 
-**21 / 64 modules ported** — Wave A + B done; **Wave C in flight** (compressor +
-limiter + delay green). **351 parity assertions**. Portable now: ~55 across A–G. Deferred: 9.
+**22 / 64 modules ported** — Wave A + B done; **Wave C in flight** (compressor,
+limiter, delay, reverb green). **357 parity assertions**. Portable now: ~55 across A–G. Deferred: 9.
 
 | Layer / Wave | Modules | Status |
 |--------------|---------|--------|
 | A — Foundation (core) | ✅ error, ✅ clock, ✅ simd(scalar), ✅ buffer/{mod,convert,resample,dither,ops} | ✅ |
 | B — DSP L0/L1 (dsp) | ✅ oscillator, pan, gain_smoother, lfo, envelope, automation, svf, biquad, dsp(facade), routing | ✅ |
-| C — DSP dependents (dsp) | ✅ compressor, ✅ limiter, ✅ delay · ⬜ reverb, eq, deesser, graphic_eq | 🟡 |
+| C — DSP dependents (dsp) | ✅ compressor, ✅ limiter, ✅ delay, ✅ reverb · ⬜ eq, deesser, graphic_eq | 🟡 |
 | D — Analysis (analysis) | waveform, zcr, mod, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ⬜ |
 | E — MIDI/graph/meter/capture | midi/{mod,voice,routing,v2,translate}, meter, graph, capture/{mod,record} | ⬜ |
 | F — Synthesis stack | synthesis, sampler, creature, environment, mechanical, voice_synth/mod, acoustics | ⬜ |

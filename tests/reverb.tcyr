@@ -1,0 +1,88 @@
+# reverb.tcyr -- parity tests for src/reverb.cyr
+# Ported one-for-one from the 6 #[test] blocks in rust-old/src/dsp/reverb.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/reverb.cyr"
+
+alloc_init();
+
+# RMS over samples[start..end] of a buffer's sample vec.
+fn tail_rms(samples, start, end) {
+    var sum = 0;
+    var i = start;
+    while (i < end) { var s = vec_get(samples, i); sum = f64_add(sum, f64_mul(s, s)); i = i + 1; }
+    return f64_sqrt(f64_div(sum, f64_from(end - start)));
+}
+fn all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s); var i = 0;
+    while (i < n) { if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# ---- silence_in_silence_out ----
+test_group("silence_in_silence_out");
+var rv1 = dhvani_reverb_new(dhvani_reverbparams_default(), 44100);
+var b1 = dhvani_buffer_silence(2, 4096, 44100);
+dhvani_reverb_process(rv1, b1);
+assert(f64_lt(dhvani_buffer_peak(b1), 0.0000001), "silence in, silence out");
+
+# ---- impulse_produces_tail ----
+test_group("impulse_produces_tail");
+var rv2 = dhvani_reverb_new(dhvani_reverbparams_new(0.8, 0.3, 1.0), 44100);
+var sv2 = dh_vec_zeros(88200);
+vec_set(sv2, 0, 1.0); vec_set(sv2, 1, 1.0);
+var b2 = dhvani_buffer_from_interleaved(sv2, 2, 44100);
+dhvani_reverb_process(rv2, b2);
+assert(f64_gt(tail_rms(dhvani_buffer_samples(b2), 4000, 88200), 0.001), "reverb produces a tail");
+
+# ---- zero_room_size_minimal_reverb ----
+test_group("zero_room_size_minimal_reverb");
+var rv3 = dhvani_reverb_new(dhvani_reverbparams_new(0, 1.0, 1.0), 44100);
+var sv3 = dh_vec_zeros(88200);
+vec_set(sv3, 0, 1.0); vec_set(sv3, 1, 1.0);
+var b3 = dhvani_buffer_from_interleaved(sv3, 2, 44100);
+dhvani_reverb_process(rv3, b3);
+assert(f64_lt(tail_rms(dhvani_buffer_samples(b3), 20000, 88200), 0.01), "minimal reverb has short tail");
+
+# ---- mono_processing ----
+test_group("mono_processing");
+var rv4 = dhvani_reverb_new(dhvani_reverbparams_default(), 44100);
+var sv4 = dh_vec_zeros(4096);
+vec_set(sv4, 0, 1.0);
+var b4 = dhvani_buffer_from_interleaved(sv4, 1, 44100);
+dhvani_reverb_process(rv4, b4);
+assert_eq(all_finite(b4), 1, "mono output finite");
+
+# ---- reset_clears_tail ----
+test_group("reset_clears_tail");
+var rv5 = dhvani_reverb_new(dhvani_reverbparams_new(0.9, 0.2, 1.0), 44100);
+var sv5 = dh_vec_zeros(2048);
+vec_set(sv5, 0, 1.0);
+var b5 = dhvani_buffer_from_interleaved(sv5, 1, 44100);
+dhvani_reverb_process(rv5, b5);
+dhvani_reverb_reset(rv5);
+var sil5 = dhvani_buffer_silence(1, 1024, 44100);
+dhvani_reverb_process(rv5, sil5);
+assert(f64_lt(dhvani_buffer_peak(sil5), 0.0000001), "reset clears the tail");
+
+# ---- different_sample_rates ----
+test_group("different_sample_rates");
+var rates = vec_new(); vec_push(rates, 22050); vec_push(rates, 44100); vec_push(rates, 48000); vec_push(rates, 96000);
+var ridx = 0; var rok = 1;
+while (ridx < 4) {
+    var sr = vec_get(rates, ridx);
+    var rvx = dhvani_reverb_new(dhvani_reverbparams_default(), sr);
+    var bx = dhvani_buffer_silence(2, 1024, sr);
+    var bxs = dhvani_buffer_samples(bx);
+    vec_set(bxs, 0, 1.0); vec_set(bxs, 1, 1.0);
+    dhvani_reverb_process(rvx, bx);
+    if (all_finite(bx) == 0) { rok = 0; }
+    ridx = ridx + 1;
+}
+assert_eq(rok, 1, "all sample rates produce finite output");
+
+var rc = assert_summary();
+syscall(60, rc);

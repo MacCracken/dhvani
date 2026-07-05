@@ -281,8 +281,10 @@ their upstream deps (svara for voice) are already ported.
   safety net. **10 green**.
 - ✅ `delay` → `src/delay.cyr` — delay line (per-channel ring buffers) + modulated
   delay (chorus/flanger, sine LFO, interpolated reads). **9 green**.
-- ⬜ Next: `reverb` (L1), `eq`/`deesser` (L2, wrap biquad), `graphic_eq`
-  (L3, wraps eq). Then re-enable the 7 deferred `dsp.tcyr` integration tests.
+- ✅ `reverb` → `src/reverb.cyr` — Schroeder/Freeverb (4 combs → 2 allpass per
+  channel; damped feedback; rate-scaled delays). **6 green**.
+- ⬜ Next: `eq`/`deesser` (L2, wrap biquad), `graphic_eq` (L3, wraps eq). Then
+  re-enable the 7 deferred `dsp.tcyr` integration tests.
 
 ### Cyrius idioms confirmed (this port)
 
