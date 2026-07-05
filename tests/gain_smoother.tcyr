@@ -1,0 +1,57 @@
+# gain_smoother.tcyr -- parity tests for src/gain_smoother.cyr
+# Ported from the #[test] blocks in rust-old/src/dsp/gain_smoother.rs.
+# serde_roundtrip DROPPED (no serde).
+
+include "src/error.cyr"
+include "src/gain_smoother.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# ---- converges_toward_target ----
+test_group("converges_toward_target");
+var s = dhvani_gs_new(0.3, 0.05);
+var i = 0;
+while (i < 50) { dhvani_gs_smooth(s, 0.5); i = i + 1; }
+assert(near(dhvani_gs_current(s), 0.5, 0.01), "converges to 0.5");
+
+# ---- attack_faster_than_release ----
+test_group("attack_faster_than_release");
+var s1 = dhvani_gs_new(0.3, 0.05);
+var after_attack = dhvani_gs_smooth(s1, 0.5);          # 1.0 -> 0.5 (attack)
+var s2 = dhvani_gs_new(0.3, 0.05);
+dhvani_gs_reset(s2, 0.5);
+var after_release = dhvani_gs_smooth(s2, 1.0);         # 0.5 -> 1.0 (release)
+var attack_delta = f64_abs(f64_sub(1.0, after_attack));
+var release_delta = f64_abs(f64_sub(after_release, 0.5));
+assert(f64_gt(attack_delta, release_delta), "attack moves further than release");
+
+# ---- reset_sets_value ----
+test_group("reset_sets_value");
+var s3 = dhvani_gs_new(0.3, 0.05);
+dhvani_gs_smooth(s3, 0.5);
+dhvani_gs_reset(s3, 1.0);
+assert_eq(dhvani_gs_current(s3), 1.0, "reset to 1.0");
+
+# ---- identity_when_target_equals_current ----
+test_group("identity_when_target_equals_current");
+var s4 = dhvani_gs_new(0.3, 0.05);
+assert_eq(dhvani_gs_smooth(s4, 1.0), 1.0, "target==current is identity");
+
+# ---- params_default ----
+test_group("params_default");
+var pd = dhvani_gsparams_default();
+assert_eq(dhvani_gsparams_attack(pd), 0.3, "default attack 0.3");
+assert_eq(dhvani_gsparams_release(pd), 0.05, "default release 0.05");
+assert_eq(dhvani_gsparams_validate(pd), DHVANI_ERR_NONE, "default validates");
+
+# ---- params_validate_rejects_out_of_range ----
+test_group("params_validate_rejects_out_of_range");
+var pbad1 = dhvani_gsparams_new(1.5, 0.05);
+assert_eq(dhvani_is_err(dhvani_gsparams_validate(pbad1)), 1, "attack 1.5 rejected");
+var pbad2 = dhvani_gsparams_new(0.3, f64_neg(0.1));
+assert_eq(dhvani_is_err(dhvani_gsparams_validate(pbad2)), 1, "release -0.1 rejected");
+
+var rc = assert_summary();
+syscall(60, rc);

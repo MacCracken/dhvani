@@ -1,0 +1,151 @@
+# envelope.cyr -- ADSR envelope generator.
+# Ports rust-old/src/dsp/envelope.rs. L0, deps error only.
+# AdsrParams + EnvelopeState enum -> codes. validate()/set_params() Result ->
+# error codes. stage_pos is an integer sample counter. serde dropped.
+
+# ---- EnvelopeState ----
+var DH_ENV_IDLE    = 0;
+var DH_ENV_ATTACK  = 1;
+var DH_ENV_DECAY   = 2;
+var DH_ENV_SUSTAIN = 3;
+var DH_ENV_RELEASE = 4;
+
+#derive(accessors)
+struct DhAdsrParams { attack; decay; sustain; release; }
+
+#derive(accessors)
+struct DhEnvelope { params; state; level; sample_rate; stage_pos; release_start_level; }
+
+# ---- AdsrParams ----
+#must_use
+fn dhvani_adsr_new(attack, decay, sustain, release) {
+    var p = alloc(sizeof(DhAdsrParams));
+    DhAdsrParams_set_attack(p, attack);
+    DhAdsrParams_set_decay(p, decay);
+    DhAdsrParams_set_sustain(p, sustain);
+    DhAdsrParams_set_release(p, release);
+    return p;
+}
+#must_use
+fn dhvani_adsr_default() { return dhvani_adsr_new(0.01, 0.1, 0.7, 0.3); }
+
+# validate -- attack/decay/release >= 0, sustain in [0,1].
+#must_use
+fn dhvani_adsr_validate(p) {
+    if (f64_lt(DhAdsrParams_attack(p), 0) == 1)  { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhAdsrParams_decay(p), 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
+    var s = DhAdsrParams_sustain(p);
+    if (f64_lt(s, 0) == 1)                        { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_gt(s, 1.0) == 1)                      { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhAdsrParams_release(p), 0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    return DHVANI_ERR_NONE;
+}
+
+# ---- Envelope ----
+#must_use
+fn dhvani_env_new(params, sample_rate) {
+    var self = alloc(sizeof(DhEnvelope));
+    DhEnvelope_set_params(self, params);
+    DhEnvelope_set_state(self, DH_ENV_IDLE);
+    DhEnvelope_set_level(self, 0);
+    DhEnvelope_set_sample_rate(self, f64_from(sample_rate));
+    DhEnvelope_set_stage_pos(self, 0);
+    DhEnvelope_set_release_start_level(self, 0);
+    return self;
+}
+
+# trigger -- note-on: enter Attack.
+fn dhvani_env_trigger(self) {
+    DhEnvelope_set_state(self, DH_ENV_ATTACK);
+    DhEnvelope_set_stage_pos(self, 0);
+    return 0;
+}
+
+# release -- note-off: enter Release from the current level (unless Idle).
+fn dhvani_env_release(self) {
+    if (DhEnvelope_state(self) != DH_ENV_IDLE) {
+        DhEnvelope_set_release_start_level(self, DhEnvelope_level(self));
+        DhEnvelope_set_state(self, DH_ENV_RELEASE);
+        DhEnvelope_set_stage_pos(self, 0);
+    }
+    return 0;
+}
+
+# tick -- advance one sample, return current level (0..1).
+fn dhvani_env_tick(self) {
+    var state = DhEnvelope_state(self);
+    var p = DhEnvelope_params(self);
+    var sr = DhEnvelope_sample_rate(self);
+    var stage_pos = DhEnvelope_stage_pos(self);
+    var samples = 0;
+    var progress = 0;
+    if (state == DH_ENV_IDLE) {
+        DhEnvelope_set_level(self, 0);
+    } elif (state == DH_ENV_ATTACK) {
+        samples = f64_to(f64_trunc(f64_max(f64_mul(DhAdsrParams_attack(p), sr), 1.0)));
+        var lvl = f64_div(f64_from(stage_pos), f64_from(samples));
+        if (f64_ge(lvl, 1.0) == 1) {
+            DhEnvelope_set_level(self, 1.0);
+            DhEnvelope_set_state(self, DH_ENV_DECAY);
+            DhEnvelope_set_stage_pos(self, 0);
+        } else {
+            DhEnvelope_set_level(self, lvl);
+            DhEnvelope_set_stage_pos(self, stage_pos + 1);
+        }
+    } elif (state == DH_ENV_DECAY) {
+        samples = f64_to(f64_trunc(f64_max(f64_mul(DhAdsrParams_decay(p), sr), 1.0)));
+        progress = f64_div(f64_from(stage_pos), f64_from(samples));
+        var sustain = DhAdsrParams_sustain(p);
+        DhEnvelope_set_level(self, f64_add(1.0, f64_mul(f64_sub(sustain, 1.0), progress)));
+        if (f64_ge(progress, 1.0) == 1) {
+            DhEnvelope_set_level(self, sustain);
+            DhEnvelope_set_state(self, DH_ENV_SUSTAIN);
+            DhEnvelope_set_stage_pos(self, 0);
+        } else {
+            DhEnvelope_set_stage_pos(self, stage_pos + 1);
+        }
+    } elif (state == DH_ENV_SUSTAIN) {
+        DhEnvelope_set_level(self, DhAdsrParams_sustain(p));
+    } else {
+        # Release
+        samples = f64_to(f64_trunc(f64_max(f64_mul(DhAdsrParams_release(p), sr), 1.0)));
+        progress = f64_div(f64_from(stage_pos), f64_from(samples));
+        DhEnvelope_set_level(self, f64_mul(DhEnvelope_release_start_level(self), f64_sub(1.0, progress)));
+        if (f64_ge(progress, 1.0) == 1) {
+            DhEnvelope_set_level(self, 0);
+            DhEnvelope_set_state(self, DH_ENV_IDLE);
+            DhEnvelope_set_stage_pos(self, 0);
+        } else {
+            DhEnvelope_set_stage_pos(self, stage_pos + 1);
+        }
+    }
+    return DhEnvelope_level(self);
+}
+
+#inline
+#must_use
+fn dhvani_env_level(self) { return DhEnvelope_level(self); }
+#inline
+#must_use
+fn dhvani_env_state(self) { return DhEnvelope_state(self); }
+#must_use
+fn dhvani_env_is_finished(self) {
+    if (DhEnvelope_state(self) == DH_ENV_IDLE) { return 1; }
+    return 0;
+}
+fn dhvani_env_set_sample_rate(self, sample_rate) { DhEnvelope_set_sample_rate(self, f64_from(sample_rate)); return 0; }
+
+fn dhvani_env_reset(self) {
+    DhEnvelope_set_state(self, DH_ENV_IDLE);
+    DhEnvelope_set_level(self, 0);
+    DhEnvelope_set_stage_pos(self, 0);
+    return 0;
+}
+
+# set_params -- validate then store; returns error code on invalid params.
+fn dhvani_env_set_params(self, params) {
+    var rc = dhvani_adsr_validate(params);
+    if (dhvani_is_err(rc) == 1) { return rc; }
+    DhEnvelope_set_params(self, params);
+    return DHVANI_ERR_NONE;
+}

@@ -1,0 +1,112 @@
+# automation.tcyr -- parity tests for src/automation.cyr
+# Ported one-for-one from the 10 #[test] blocks in rust-old/src/dsp/automation.rs.
+# CurveType::Exponential(exp) -> (DH_CURVE_EXPONENTIAL, exp arg); non-exp uses exp=0.
+
+include "src/error.cyr"
+include "src/automation.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# ---- empty_lane_returns_default ----
+test_group("empty_lane_returns_default");
+var l1 = dhvani_auto_new(0.5);
+assert_eq(dhvani_auto_value_at(l1, 0), 0.5, "default at 0");
+assert_eq(dhvani_auto_value_at(l1, 44100), 0.5, "default at 44100");
+
+# ---- single_breakpoint ----
+test_group("single_breakpoint");
+var l2 = dhvani_auto_new(0);
+dhvani_auto_add(l2, dhvani_breakpoint_new(1000, 1.0, DH_CURVE_LINEAR, 0));
+assert_eq(dhvani_auto_value_at(l2, 0), 1.0, "before first = first value (linear)");
+assert_eq(dhvani_auto_value_at(l2, 1000), 1.0, "at breakpoint");
+assert_eq(dhvani_auto_value_at(l2, 2000), 1.0, "after last = last value");
+
+# ---- linear_interpolation ----
+test_group("linear_interpolation");
+var l3 = dhvani_auto_new(0);
+dhvani_auto_add(l3, dhvani_breakpoint_new(0, 0, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(l3, dhvani_breakpoint_new(1000, 1.0, DH_CURVE_LINEAR, 0));
+assert(near(dhvani_auto_value_at(l3, 0), 0, 0.000001), "at 0 -> 0");
+assert(near(dhvani_auto_value_at(l3, 500), 0.5, 0.000001), "at 500 -> 0.5");
+assert(near(dhvani_auto_value_at(l3, 1000), 1.0, 0.000001), "at 1000 -> 1.0");
+
+# ---- step_interpolation ----
+test_group("step_interpolation");
+var l4 = dhvani_auto_new(0);
+dhvani_auto_add(l4, dhvani_breakpoint_new(0, 0, DH_CURVE_STEP, 0));
+dhvani_auto_add(l4, dhvani_breakpoint_new(1000, 1.0, DH_CURVE_STEP, 0));
+assert_eq(dhvani_auto_value_at(l4, 0), 0, "at 0 -> 0");
+assert_eq(dhvani_auto_value_at(l4, 500), 0, "step holds previous");
+assert_eq(dhvani_auto_value_at(l4, 1000), 1.0, "at 1000 -> 1.0");
+
+# ---- exponential_curve ----
+test_group("exponential_curve");
+var l5 = dhvani_auto_new(0);
+dhvani_auto_add(l5, dhvani_breakpoint_new(0, 0, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(l5, dhvani_breakpoint_new(1000, 1.0, DH_CURVE_EXPONENTIAL, 2.0));
+assert(near(dhvani_auto_value_at(l5, 500), 0.25, 0.01), "exp midpoint 0.25");
+
+# ---- smooth_curve_midpoint ----
+test_group("smooth_curve_midpoint");
+var l6 = dhvani_auto_new(0);
+dhvani_auto_add(l6, dhvani_breakpoint_new(0, 0, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(l6, dhvani_breakpoint_new(1000, 1.0, DH_CURVE_SMOOTH, 0));
+assert(near(dhvani_auto_value_at(l6, 500), 0.5, 0.01), "smooth midpoint 0.5");
+
+# ---- render_buffer ----
+test_group("render_buffer");
+var l7 = dhvani_auto_new(0);
+dhvani_auto_add(l7, dhvani_breakpoint_new(0, 0, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(l7, dhvani_breakpoint_new(100, 1.0, DH_CURVE_LINEAR, 0));
+var out7 = vec_new();
+var oi = 0;
+while (oi < 101) { vec_push(out7, 0); oi = oi + 1; }
+dhvani_auto_render(l7, out7, 0);
+assert(near(vec_get(out7, 0), 0, 0.000001), "out[0] = 0");
+assert(near(vec_get(out7, 50), 0.5, 0.000001), "out[50] = 0.5");
+assert(near(vec_get(out7, 100), 1.0, 0.000001), "out[100] = 1.0");
+
+# ---- render_fast_matches_render ----
+test_group("render_fast_matches_render");
+var l8 = dhvani_auto_new(0.5);
+dhvani_auto_add(l8, dhvani_breakpoint_new(100, 0, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(l8, dhvani_breakpoint_new(500, 1.0, DH_CURVE_SMOOTH, 0));
+dhvani_auto_add(l8, dhvani_breakpoint_new(900, 0.3, DH_CURVE_EXPONENTIAL, 1.5));
+var slow = vec_new();
+var fast = vec_new();
+var si = 0;
+while (si < 1000) { vec_push(slow, 0); vec_push(fast, 0); si = si + 1; }
+dhvani_auto_render(l8, slow, 0);
+dhvani_auto_render_fast(l8, fast, 0);
+var mi = 0;
+var match_ok = 1;
+while (mi < 1000) {
+    if (near(vec_get(slow, mi), vec_get(fast, mi), 0.000001) == 0) { match_ok = 0; }
+    mi = mi + 1;
+}
+assert_eq(match_ok, 1, "render_fast matches render");
+
+# ---- add_maintains_order ----
+test_group("add_maintains_order");
+var l9 = dhvani_auto_new(0);
+dhvani_auto_add(l9, dhvani_breakpoint_new(500, 0.5, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(l9, dhvani_breakpoint_new(100, 0.1, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(l9, dhvani_breakpoint_new(900, 0.9, DH_CURVE_LINEAR, 0));
+var bps9 = dhvani_auto_breakpoints(l9);
+assert_eq(DhBreakpoint_frame(vec_get(bps9, 0)), 100, "sorted[0]=100");
+assert_eq(DhBreakpoint_frame(vec_get(bps9, 1)), 500, "sorted[1]=500");
+assert_eq(DhBreakpoint_frame(vec_get(bps9, 2)), 900, "sorted[2]=900");
+
+# ---- remove_at_frame ----
+test_group("remove_at_frame");
+var l10 = dhvani_auto_new(0);
+dhvani_auto_add(l10, dhvani_breakpoint_new(100, 1.0, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(l10, dhvani_breakpoint_new(200, 2.0, DH_CURVE_LINEAR, 0));
+dhvani_auto_remove_at(l10, 100);
+assert_eq(dhvani_auto_len(l10), 1, "one left");
+assert_eq(DhBreakpoint_frame(vec_get(dhvani_auto_breakpoints(l10), 0)), 200, "remaining frame 200");
+
+var rc = assert_summary();
+syscall(60, rc);

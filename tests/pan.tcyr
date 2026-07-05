@@ -1,0 +1,68 @@
+# pan.tcyr -- parity tests for src/pan.cyr
+# Ported one-for-one from the 6 #[test] blocks in rust-old/src/dsp/pan.rs.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/pan.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# ---- center_pan_equal_gains ----
+test_group("center_pan_equal_gains");
+var pc = dhvani_pan_new(0);
+assert(f64_lt(f64_abs(f64_sub(dhvani_pan_gain_l(pc), dhvani_pan_gain_r(pc))), 0.01), "L==R at center");
+assert(near(dhvani_pan_gain_l(pc), F64_FRAC_1_SQRT2, 0.01), "center gain ~ 0.707");
+
+# ---- full_left ----
+test_group("full_left");
+var pl = dhvani_pan_new(f64_neg(1.0));
+assert(near(dhvani_pan_gain_l(pl), 1.0, 0.01), "L = 1.0");
+assert(f64_lt(f64_abs(dhvani_pan_gain_r(pl)), 0.01), "R ~ 0");
+
+# ---- full_right ----
+test_group("full_right");
+var pr = dhvani_pan_new(1.0);
+assert(f64_lt(f64_abs(dhvani_pan_gain_l(pr)), 0.01), "L ~ 0");
+assert(near(dhvani_pan_gain_r(pr), 1.0, 0.01), "R = 1.0");
+
+# ---- constant_power_preserved ----
+test_group("constant_power_preserved");
+var pans = vec_new();
+vec_push(pans, f64_neg(1.0)); vec_push(pans, f64_neg(0.5)); vec_push(pans, 0);
+vec_push(pans, 0.25); vec_push(pans, 0.5); vec_push(pans, 1.0);
+var pi = 0;
+var cp_ok = 1;
+while (pi < 6) {
+    var pp = dhvani_pan_new(vec_get(pans, pi));
+    var gl = dhvani_pan_gain_l(pp);
+    var gr = dhvani_pan_gain_r(pp);
+    var power = f64_add(f64_mul(gl, gl), f64_mul(gr, gr));
+    if (near(power, 1.0, 0.01) == 0) { cp_ok = 0; }
+    pi = pi + 1;
+}
+assert_eq(cp_ok, 1, "L^2 + R^2 ~ 1 at all positions");
+
+# ---- process_stereo ----
+test_group("process_stereo");
+var psv = vec_new(); vec_push(psv, 1.0); vec_push(psv, 1.0); vec_push(psv, 1.0); vec_push(psv, 1.0);
+var psbuf = dhvani_buffer_from_interleaved(psv, 2, 44100);
+var pp2 = dhvani_pan_new(f64_neg(1.0));
+dhvani_pan_process(pp2, psbuf);
+assert(near(vec_get(dhvani_buffer_samples(psbuf), 0), 1.0, 0.01), "L preserved");
+assert(f64_lt(f64_abs(vec_get(dhvani_buffer_samples(psbuf), 1)), 0.01), "R zeroed");
+
+# ---- mono_no_op ----
+test_group("mono_no_op");
+var mv = vec_new(); vec_push(mv, 0.5); vec_push(mv, 0.5);
+var mbuf = dhvani_buffer_from_interleaved(mv, 1, 44100);
+var pp3 = dhvani_pan_new(1.0);
+dhvani_pan_process(pp3, mbuf);
+assert(near(vec_get(dhvani_buffer_samples(mbuf), 0), 0.5, 0.0001), "mono[0] unchanged");
+assert(near(vec_get(dhvani_buffer_samples(mbuf), 1), 0.5, 0.0001), "mono[1] unchanged");
+
+var rc = assert_summary();
+syscall(60, rc);

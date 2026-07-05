@@ -1,0 +1,116 @@
+# lfo.tcyr -- parity tests for src/lfo.cyr
+# Ported one-for-one from the 8 #[test] blocks in rust-old/src/dsp/lfo.rs.
+# Unique var names per group (Cyrius vars are function/unit-scoped).
+
+include "src/error.cyr"
+include "src/lfo.cyr"
+
+alloc_init();
+
+# ---- sine_oscillates ----
+test_group("sine_oscillates");
+var ls = dhvani_lfo_new(DH_LFO_SINE, 1.0, 1.0, 1000);
+var sp = 0;
+var sn = 0;
+var i = 0;
+while (i < 1000) {
+    var va = dhvani_lfo_tick(ls);
+    if (f64_gt(va, 0.3) == 1) { sp = 1; }
+    if (f64_lt(va, f64_neg(0.3)) == 1) { sn = 1; }
+    i = i + 1;
+}
+assert_eq(sp, 1, "sine positive");
+assert_eq(sn, 1, "sine negative");
+
+# ---- depth_scales_output ----
+test_group("depth_scales_output");
+var ld = dhvani_lfo_new(DH_LFO_SINE, 10.0, 0.5, 44100);
+var maxabs = 0;
+i = 0;
+while (i < 44100) {
+    var vb = f64_abs(dhvani_lfo_tick(ld));
+    if (f64_gt(vb, maxabs) == 1) { maxabs = vb; }
+    i = i + 1;
+}
+assert(f64_le(maxabs, 0.51), "max <= depth 0.5 (+tol)");
+assert(f64_gt(maxabs, 0.4), "max near 0.5");
+
+# ---- square_bipolar ----
+test_group("square_bipolar");
+var lsq = dhvani_lfo_new(DH_LFO_SQUARE, 10.0, 1.0, 44100);
+var qh = 0;
+var qlw = 0;
+i = 0;
+while (i < 44100) {
+    var vc = dhvani_lfo_tick(lsq);
+    if (f64_gt(vc, 0.5) == 1) { qh = 1; }
+    if (f64_lt(vc, f64_neg(0.5)) == 1) { qlw = 1; }
+    i = i + 1;
+}
+assert_eq(qh, 1, "square high");
+assert_eq(qlw, 1, "square low");
+
+# ---- triangle_range ----
+test_group("triangle_range");
+var lt = dhvani_lfo_new(DH_LFO_TRIANGLE, 10.0, 1.0, 44100);
+var tmn = 1.0;
+var tmx = f64_neg(1.0);
+i = 0;
+while (i < 44100) {
+    var vd = dhvani_lfo_tick(lt);
+    if (f64_lt(vd, tmn) == 1) { tmn = vd; }
+    if (f64_gt(vd, tmx) == 1) { tmx = vd; }
+    i = i + 1;
+}
+assert(f64_lt(tmn, f64_neg(0.9)), "triangle min < -0.9");
+assert(f64_gt(tmx, 0.9), "triangle max > 0.9");
+
+# ---- saw_up_range ----
+test_group("saw_up_range");
+var lsu = dhvani_lfo_new(DH_LFO_SAWUP, 10.0, 1.0, 44100);
+var umn = 1.0;
+var umx = f64_neg(1.0);
+i = 0;
+while (i < 44100) {
+    var ve = dhvani_lfo_tick(lsu);
+    if (f64_lt(ve, umn) == 1) { umn = ve; }
+    if (f64_gt(ve, umx) == 1) { umx = ve; }
+    i = i + 1;
+}
+assert(f64_lt(umn, f64_neg(0.9)), "sawup min < -0.9");
+assert(f64_gt(umx, 0.9), "sawup max > 0.9");
+
+# ---- sample_and_hold_changes ----
+test_group("sample_and_hold_changes");
+var lsh = dhvani_lfo_new(DH_LFO_SAMPLE_AND_HOLD, 10.0, 1.0, 44100);
+var changes = 0;
+var prev = dhvani_lfo_tick(lsh);
+i = 0;
+while (i < 44100) {
+    var vf = dhvani_lfo_tick(lsh);
+    if (f64_gt(f64_abs(f64_sub(vf, prev)), 0.01) == 1) { changes = changes + 1; }
+    prev = vf;
+    i = i + 1;
+}
+assert(changes > 5, "S&H changes multiple times per second");
+
+# ---- reset_clears ----
+test_group("reset_clears");
+var lr = dhvani_lfo_new(DH_LFO_SINE, 10.0, 1.0, 44100);
+i = 0;
+while (i < 1000) { dhvani_lfo_tick(lr); i = i + 1; }
+dhvani_lfo_reset(lr);
+assert(f64_lt(f64_abs(dhvani_lfo_phase(lr)), 0.0000001), "phase cleared");
+
+# ---- setters ----
+test_group("setters");
+var lx = dhvani_lfo_new(DH_LFO_SINE, 1.0, 0.5, 44100);
+dhvani_lfo_set_rate(lx, 5.0);
+dhvani_lfo_set_depth(lx, 0.8);
+dhvani_lfo_set_shape(lx, DH_LFO_SQUARE);
+assert_eq(dhvani_lfo_rate(lx), 5.0, "rate = 5.0");
+assert(f64_lt(f64_abs(f64_sub(dhvani_lfo_depth(lx), 0.8)), 0.0000001), "depth = 0.8");
+assert_eq(dhvani_lfo_shape(lx), DH_LFO_SQUARE, "shape = square");
+
+var rc = assert_summary();
+syscall(60, rc);

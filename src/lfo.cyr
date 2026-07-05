@@ -1,0 +1,99 @@
+# lfo.cyr -- low-frequency oscillator for modulation (6 shapes).
+# Ports rust-old/src/dsp/lfo.rs. L0, deps error only. LfoShape enum -> codes;
+# validate() Result -> error code; serde dropped. Output range [-depth,+depth].
+# S&H uses xorshift32 (inline, 32-bit masked); TAU via exact-hex F64_TAU.
+
+var DH_LFO_SINE            = 0;
+var DH_LFO_TRIANGLE        = 1;
+var DH_LFO_SQUARE          = 2;
+var DH_LFO_SAWUP           = 3;
+var DH_LFO_SAWDOWN         = 4;
+var DH_LFO_SAMPLE_AND_HOLD = 5;
+
+#derive(accessors)
+struct DhLfo { shape; rate; depth; phase; sample_rate; sh_value; rng_state; prev_phase; }
+
+# new(shape, rate, depth, sample_rate) -- depth clamped to [0,1]; RNG seeded.
+#must_use
+fn dhvani_lfo_new(shape, rate, depth, sample_rate) {
+    var self = alloc(sizeof(DhLfo));
+    DhLfo_set_shape(self, shape);
+    DhLfo_set_rate(self, rate);
+    DhLfo_set_depth(self, f64_clamp(depth, 0, 1.0));
+    DhLfo_set_phase(self, 0);
+    DhLfo_set_sample_rate(self, f64_from(sample_rate));
+    DhLfo_set_sh_value(self, 0);
+    DhLfo_set_rng_state(self, 0xDEADBEEF);
+    DhLfo_set_prev_phase(self, 0);
+    return self;
+}
+
+# validate -- rate>=0, depth>=0, sample_rate>0.
+#must_use
+fn dhvani_lfo_validate(self) {
+    if (f64_lt(DhLfo_rate(self), 0) == 1)        { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(DhLfo_depth(self), 0) == 1)       { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_le(DhLfo_sample_rate(self), 0) == 1) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
+    return DHVANI_ERR_NONE;
+}
+
+# tick -- advance one sample; return value in [-depth, +depth].
+fn dhvani_lfo_tick(self) {
+    var phase = DhLfo_phase(self);
+    var shape = DhLfo_shape(self);
+    var raw = 0;
+    if (shape == DH_LFO_SINE) {
+        raw = f64_sin(f64_mul(phase, F64_TAU));
+    } elif (shape == DH_LFO_TRIANGLE) {
+        raw = f64_sub(f64_mul(4.0, f64_abs(f64_sub(phase, 0.5))), 1.0);
+    } elif (shape == DH_LFO_SQUARE) {
+        raw = f64_neg(1.0);
+        if (f64_lt(phase, 0.5) == 1) { raw = 1.0; }
+    } elif (shape == DH_LFO_SAWUP) {
+        raw = f64_sub(f64_mul(2.0, phase), 1.0);
+    } elif (shape == DH_LFO_SAWDOWN) {
+        raw = f64_sub(1.0, f64_mul(2.0, phase));
+    } else {
+        # SampleAndHold: new value on phase wrap.
+        if (f64_lt(phase, DhLfo_prev_phase(self)) == 1) {
+            var s = DhLfo_rng_state(self);
+            s = (s ^ ((s << 13) & 0xFFFFFFFF)) & 0xFFFFFFFF;
+            s = (s ^ (s >> 17)) & 0xFFFFFFFF;
+            s = (s ^ ((s << 5) & 0xFFFFFFFF)) & 0xFFFFFFFF;
+            DhLfo_set_rng_state(self, s);
+            DhLfo_set_sh_value(self, f64_sub(f64_mul(f64_div(f64_from(s), f64_from(4294967295)), 2.0), 1.0));
+        }
+        raw = DhLfo_sh_value(self);
+    }
+    DhLfo_set_prev_phase(self, phase);
+    var new_phase = f64_add(phase, f64_div(DhLfo_rate(self), DhLfo_sample_rate(self)));
+    if (f64_ge(new_phase, 1.0) == 1) { new_phase = f64_sub(new_phase, 1.0); }
+    DhLfo_set_phase(self, new_phase);
+    return f64_mul(raw, DhLfo_depth(self));
+}
+
+fn dhvani_lfo_set_sample_rate(self, sample_rate) { DhLfo_set_sample_rate(self, f64_from(sample_rate)); return 0; }
+
+fn dhvani_lfo_reset(self) {
+    DhLfo_set_phase(self, 0);
+    DhLfo_set_prev_phase(self, 0);
+    DhLfo_set_sh_value(self, 0);
+    return 0;
+}
+
+fn dhvani_lfo_set_rate(self, rate) { DhLfo_set_rate(self, f64_max(rate, 0)); return 0; }
+fn dhvani_lfo_set_depth(self, depth) { DhLfo_set_depth(self, f64_clamp(depth, 0, 1.0)); return 0; }
+fn dhvani_lfo_set_shape(self, shape) { DhLfo_set_shape(self, shape); return 0; }
+
+#inline
+#must_use
+fn dhvani_lfo_rate(self) { return DhLfo_rate(self); }
+#inline
+#must_use
+fn dhvani_lfo_depth(self) { return DhLfo_depth(self); }
+#inline
+#must_use
+fn dhvani_lfo_shape(self) { return DhLfo_shape(self); }
+#inline
+#must_use
+fn dhvani_lfo_phase(self) { return DhLfo_phase(self); }

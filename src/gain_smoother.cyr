@@ -1,0 +1,77 @@
+# gain_smoother.cyr -- exponential-moving-average gain smoother (anti-pumping).
+# Ports rust-old/src/dsp/gain_smoother.rs. L0, deps error only.
+# GainSmootherParams held by GainSmoother as a nested struct handle. Attack
+# (gain decreasing, fast) vs release (increasing, slow). serde dropped.
+
+#derive(accessors)
+struct DhGainSmootherParams { attack; release; }
+
+#derive(accessors)
+struct DhGainSmoother { params; current; }
+
+# ---- GainSmootherParams ----
+#must_use
+fn dhvani_gsparams_new(attack, release) {
+    var p = alloc(sizeof(DhGainSmootherParams));
+    DhGainSmootherParams_set_attack(p, attack);
+    DhGainSmootherParams_set_release(p, release);
+    return p;
+}
+#must_use
+fn dhvani_gsparams_default() { return dhvani_gsparams_new(0.3, 0.05); }
+#inline
+#must_use
+fn dhvani_gsparams_attack(p) { return DhGainSmootherParams_attack(p); }
+#inline
+#must_use
+fn dhvani_gsparams_release(p) { return DhGainSmootherParams_release(p); }
+
+# validate -- ERR_NONE if attack & release in [0,1], else ERR_INVALID_PARAMETER.
+#must_use
+fn dhvani_gsparams_validate(p) {
+    var a = DhGainSmootherParams_attack(p);
+    var r = DhGainSmootherParams_release(p);
+    if (f64_lt(a, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_gt(a, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_lt(r, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_gt(r, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    return DHVANI_ERR_NONE;
+}
+
+# ---- GainSmoother ----
+# new(attack, release) -- clamps coeffs to [0,1]; current starts at 1.0.
+#must_use
+fn dhvani_gs_new(attack, release) {
+    var self = alloc(sizeof(DhGainSmoother));
+    DhGainSmoother_set_params(self, dhvani_gsparams_new(f64_clamp(attack, 0, 1.0), f64_clamp(release, 0, 1.0)));
+    DhGainSmoother_set_current(self, 1.0);
+    return self;
+}
+#must_use
+fn dhvani_gs_from_params(params) {
+    var self = alloc(sizeof(DhGainSmoother));
+    DhGainSmoother_set_params(self, params);
+    DhGainSmoother_set_current(self, 1.0);
+    return self;
+}
+
+# smooth(target) -- converge toward target (attack coeff if decreasing, else
+# release); returns the new smoothed value.
+fn dhvani_gs_smooth(self, target) {
+    var current = DhGainSmoother_current(self);
+    var p = DhGainSmoother_params(self);
+    var alpha = DhGainSmootherParams_release(p);
+    if (f64_lt(target, current) == 1) { alpha = DhGainSmootherParams_attack(p); }
+    current = f64_add(current, f64_mul(alpha, f64_sub(target, current)));
+    DhGainSmoother_set_current(self, current);
+    return current;
+}
+
+#inline
+#must_use
+fn dhvani_gs_current(self) { return DhGainSmoother_current(self); }
+fn dhvani_gs_reset(self, value) { DhGainSmoother_set_current(self, value); return 0; }
+fn dhvani_gs_set_params(self, params) { DhGainSmoother_set_params(self, params); return 0; }
+#inline
+#must_use
+fn dhvani_gs_params(self) { return DhGainSmoother_params(self); }

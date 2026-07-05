@@ -254,10 +254,17 @@ their upstream deps (svara for voice) are already ported.
   `lib/abaco.cyr`, `cyrius.lock` written. DSP helpers verified; abaco's unused
   json/http/net DCE-prune (benign warnings). No stdlib expansion needed.
 - ✅ `oscillator` → `src/oscillator.cyr` — Waveform→codes; PolyBLEP via
-  `abaco::poly_blep`; u32 xorshift inlined; `F64_TAU` exact. `tests/oscillator.tcyr`: **14 green**.
-- ⬜ Next: `pan` (constant_power_pan), `gain_smoother`, `envelope`, `lfo`,
-  `automation` (L0 leaves), then `svf`/`biquad`/`dsp/mod`/`routing` (L1),
-  then Wave C (eq/deesser/compressor/limiter/delay/reverb/graphic_eq).
+  `abaco::poly_blep`; u32 xorshift inlined; `F64_TAU` exact. **14 green**.
+- ✅ `pan` → `src/pan.cyr` — `abaco::constant_power_pan` (out-pointers). **11 green**.
+- ✅ `gain_smoother` → `src/gain_smoother.cyr` — EMA attack/release; nested
+  params struct; serde test dropped. **9 green**.
+- ✅ `lfo` → `src/lfo.cyr` — 6 shapes; S&H xorshift; `F64_TAU`. **15 green**.
+- ✅ `envelope` → `src/envelope.cyr` — ADSR state machine; params struct;
+  set_params error code. **15 green**.
+- ✅ `automation` → `src/automation.cyr` — breakpoint curves (step/linear/exp/
+  smooth); `Exponential(f32)` payload → `exp` field; `f64_pow(0)` guarded. **22 green**.
+- ⬜ Next: `svf`/`biquad`/`dsp/mod`/`routing` (L1 filters), then Wave C
+  (eq/deesser/compressor/limiter/delay/reverb/graphic_eq).
 
 ### Cyrius idioms confirmed (this port)
 
