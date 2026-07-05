@@ -5,7 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.0] — vani device I/O (in progress)
+## [2.1.1] — real-time playback path (in progress)
+
+### Added
+
+- **Lock-free, alloc-free ring playback** (`src/playback.cyr`) —
+  `dhvani_player_new` / `dhvani_player_push` / `dhvani_player_ring` /
+  `dhvani_player_drain`. A player owns a vani ring plus a reusable scratch PCM
+  buffer, so pushing a block converts into scratch and copies into the ring with
+  **zero per-block allocation** (what the free-less bump allocator requires of an
+  RT hot path); the RT loop pushes producer blocks and drains to the device via
+  `vani_play_from_ring`. Unit-tested hardware-free (push → ring read-back matches
+  the one-shot `to_s16le` bytes).
+- Factored S16_LE packing into an alloc-free `dh_pack_s16le(samples, n, dst)`
+  helper shared by the one-shot (`dhvani_playback_to_s16le`) and RT paths.
+
+## [2.1.0] — vani device I/O
 
 Adds real-hardware audio I/O by bridging dhvani to **vani** — dh(vani)'s ALSA
 sibling: raw `/dev/snd` PCM playback/capture via ioctls, no libasound, no FFI.

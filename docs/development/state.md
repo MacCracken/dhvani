@@ -5,11 +5,11 @@
 
 ## Version
 
-**2.1.0** (in progress) — device I/O. **2.0.0 released 2026-07-05** (the Rust →
-Cyrius parity port; 23,695-line Rust source frozen at `rust-old/` as oracle). 2.1.0
-adds real-hardware audio via **vani** (ALSA PCM, dh(vani)'s I/O sibling): the
-`playback` module bridges `AudioBuffer` ↔ S16_LE PCM (`src/playback.cyr`,
-`tests/playback.tcyr`), filling the gap the platform-blocked PipeWire backend left.
+**2.1.1** (in progress) — RT playback path. **2.0.0** (Rust→Cyrius parity port) and
+**2.1.0** (vani device I/O) released. The `playback` module (`src/playback.cyr`)
+bridges `AudioBuffer` ↔ vani ALSA PCM; 2.1.1 adds the **lock-free, alloc-free ring
+path** (`dhvani_player_*` over `vani_play_from_ring`) for real-time-safe playback —
+zero per-block allocation, as the free-less bump allocator requires.
 
 ## Toolchain
 
@@ -55,10 +55,10 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 blocked deps/platform): Waves A–F + Wave G assembly (dist bundle, integration/
 dsp-reference/proptest suites, hot-path benches + Rust-vs-Cyrius comparison).
 
-**2.1.0 (in progress):** device I/O via vani. `playback` module bridges
-`AudioBuffer` ↔ S16_LE PCM + device glue (open/write/close/capture) over vani;
-bundled into the dist (DCE-prunes for vani-free consumers). **1636 assertions
-across 62 suites** (+ 1 scaffold smoke).
+**2.1.x (in progress):** device I/O via vani. `playback` bridges `AudioBuffer` ↔
+S16_LE PCM + device glue (open/write/close/capture) + the 2.1.1 alloc-free ring
+player (`dhvani_player_*`); bundled into the dist (DCE-prunes for vani-free
+consumers). **1639 assertions across 62 suites** (+ 1 scaffold smoke).
 
 **abaco 2.3.2** (dep bump): the numerical dsp-reference port caught abaco's dB
 constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.04%/dB

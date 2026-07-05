@@ -57,5 +57,26 @@ while (j < 256) {
 }
 assert_eq(ok, 1, "round-trip within i16 quantization (<1e-4)");
 
+# ---- ring player: alloc-free push enqueues the same S16_LE bytes ----
+test_group("player_ring_push");
+var pv = vec_new();
+vec_push(pv, 1.0);
+vec_push(pv, f64_neg(0.5));
+vec_push(pv, 0.25);
+vec_push(pv, 0);
+var pbuf = dhvani_buffer_from_interleaved(pv, 2, 44100);   # 2 frames stereo = 4 samples = 8 bytes
+var expect = dhvani_playback_to_s16le(pbuf);
+var player = dhvani_player_new(1024, 2, 2);
+assert_eq(dhvani_player_push(player, pbuf), 8, "pushed 8 bytes");
+var got = alloc(8);
+assert_eq(vani_ring_read(dhvani_player_ring(player), got, 8), 8, "read 8 bytes back");
+var pok = 1;
+var k = 0;
+while (k < 8) {
+    if (load8(got + k) != load8(expect + k)) { pok = 0; }
+    k = k + 1;
+}
+assert_eq(pok, 1, "ring bytes == one-shot to_s16le bytes");
+
 var rc = assert_summary();
 syscall(60, rc);
