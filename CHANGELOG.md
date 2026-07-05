@@ -17,15 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the fill side; multi-format (S16/S24/S32). Unit-tested hardware-free (fill the
   ring with known PCM → read back → decoded samples match).
 
-### Deferred
-
-- **Device enumeration** (`yukti_audio_devices` → default-device open) —
-  attempted but not shipped: yukti discovers PCM endpoints via a udevadm
-  subprocess + sysfs, externalizing `patra`/`fs`, so it faults in a sandbox
-  without those deps and needs real audio hardware to return anything. Manual
-  device selection (`dhvani_playback_open(card, device, …)`, since 2.1.0) covers
-  the common case; auto-enumeration waits on wiring yukti's `patra`/`fs` + a
-  real-HW test.
+- **Device enumeration** (`src/device.cyr`) — `dhvani_devices_list` + descriptor
+  accessors (`dhvani_device_card`/`_index`/`_direction`/`_name`/`_is_playback`/
+  `_is_capture`) + default-device open (`dhvani_playback_open_default[_fmt]` /
+  `dhvani_capture_open_default[_fmt]`: enumerate → open the first match). Wraps
+  yukti's PCM discovery (udevadm subprocess + sysfs), which pulls yukti's
+  `freelist`/`process`/`fs`/`patra` deps (vendored) — so it's a separate module,
+  NOT in the core dist (it references yukti direction consts + the heavier stack;
+  the bundle stays device-agnostic). Tested against the machine's real endpoints.
 
 ## [2.1.1] — real-time playback path
 

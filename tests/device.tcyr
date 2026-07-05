@@ -1,0 +1,49 @@
+# device.tcyr -- tests for src/device.cyr (audio device enumeration, 2.1.2).
+# Enumerates the machine's real PCM endpoints (yukti shells out to udevadm + reads
+# sysfs), so it asserts the invariants on whatever hardware is present. It does
+# NOT open a device (that would grab the real PCM). Full chain: yukti's deps
+# (freelist -> process -> fs -> patra) then yukti -> sakshi -> vani, then dhvani
+# error -> simd -> buffer -> playback -> device.
+
+include "lib/freelist.cyr"
+include "lib/process.cyr"
+include "lib/fs.cyr"
+include "lib/patra.cyr"
+include "lib/yukti.cyr"
+include "lib/sakshi.cyr"
+include "lib/vani.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/playback.cyr"
+include "src/device.cyr"
+
+alloc_init();
+
+# ---- enumeration lists real endpoints; each obeys the direction/card invariant ----
+test_group("device_list");
+var devs = dhvani_devices_list();
+var n = 0;
+if (devs != 0) { n = vec_len(devs); }
+assert(n > 0, "enumerated > 0 PCM endpoints on this machine");
+
+var inv = 1;
+var pc = 0;
+var i = 0;
+while (i < n) {
+    var d = vec_get(devs, i);
+    var dir = dhvani_device_direction(d);
+    if (dir != YUKTI_AUDIO_PLAYBACK) {
+        if (dir != YUKTI_AUDIO_CAPTURE) { inv = 0; }
+    }
+    if (dhvani_device_card(d) < 0) { inv = 0; }
+    if (dhvani_device_index(d) < 0) { inv = 0; }
+    if (dhvani_device_is_playback(d) == 1) { pc = pc + 1; }
+    if (dhvani_device_is_capture(d) == 1) { pc = pc + 1; }
+    i = i + 1;
+}
+assert_eq(inv, 1, "each endpoint: valid direction + card/index >= 0");
+assert_eq(pc, n, "every endpoint classified playback xor capture");
+
+var rc = assert_summary();
+syscall(60, rc);

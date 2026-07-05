@@ -1,0 +1,70 @@
+# device.cyr -- audio device enumeration + default-device open (2.1.2).
+#
+# Wraps yukti's PCM discovery (yukti_audio_devices) so a consumer can list
+# endpoints and open the default playback/capture device without hardcoding
+# card/device numbers. yukti discovers endpoints via a udevadm subprocess +
+# sysfs, so its deps come first in the include chain:
+#   freelist -> process -> fs -> patra -> yukti -> sakshi -> vani
+# then dhvani error -> simd -> buffer -> playback -> device.
+#
+# NOT in dist/dhvani.cyr: it references yukti direction CONSTS (which don't
+# DCE-prune) + pulls the heavier yukti/patra/fs stack, and the core bundle stays
+# device-agnostic. A consumer wanting enumeration links this stack explicitly.
+
+# List audio endpoints: a vec of yukti device descriptors (0 if none found).
+#must_use
+fn dhvani_devices_list() { return yukti_audio_devices(); }
+
+# ── Descriptor accessors (dhvani-facing names over yukti's) ─────────────────
+fn dhvani_device_card(d) { return yukti_audio_card(d); }
+fn dhvani_device_index(d) { return yukti_audio_device(d); }
+fn dhvani_device_direction(d) { return yukti_audio_direction(d); }
+fn dhvani_device_name(d) { return yukti_audio_name(d); }
+fn dhvani_device_is_playback(d) {
+    if (yukti_audio_direction(d) == YUKTI_AUDIO_PLAYBACK) { return 1; }
+    return 0;
+}
+fn dhvani_device_is_capture(d) {
+    if (yukti_audio_direction(d) == YUKTI_AUDIO_CAPTURE) { return 1; }
+    return 0;
+}
+
+# ── Default-device open (enumerate → open the first match) ──────────────────
+
+# Open the first playback endpoint at the given format. 0 if none.
+fn dhvani_playback_open_default_fmt(sample_rate, channels, bit_depth) {
+    var devs = yukti_audio_devices();
+    if (devs == 0) { return 0; }
+    var n = vec_len(devs);
+    var i = 0;
+    while (i < n) {
+        var d = vec_get(devs, i);
+        if (yukti_audio_direction(d) == YUKTI_AUDIO_PLAYBACK) {
+            return dhvani_playback_open_fmt(yukti_audio_card(d), yukti_audio_device(d), sample_rate, channels, bit_depth);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+fn dhvani_playback_open_default(sample_rate, channels) {
+    return dhvani_playback_open_default_fmt(sample_rate, channels, 16);
+}
+
+# Open the first capture endpoint at the given format. 0 if none.
+fn dhvani_capture_open_default_fmt(sample_rate, channels, bit_depth) {
+    var devs = yukti_audio_devices();
+    if (devs == 0) { return 0; }
+    var n = vec_len(devs);
+    var i = 0;
+    while (i < n) {
+        var d = vec_get(devs, i);
+        if (yukti_audio_direction(d) == YUKTI_AUDIO_CAPTURE) {
+            return dhvani_capture_open_fmt(yukti_audio_card(d), yukti_audio_device(d), sample_rate, channels, bit_depth);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+fn dhvani_capture_open_default(sample_rate, channels) {
+    return dhvani_capture_open_default_fmt(sample_rate, channels, 16);
+}
