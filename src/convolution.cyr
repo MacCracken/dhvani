@@ -1,0 +1,353 @@
+# convolution.cyr -- FFT-based partitioned overlap-add convolution reverb.
+# Ports rust-old/src/dsp/convolution.rs. L1: deps error + simd + buffer +
+# analysis + fft (dhvani_fft_in_place, dh_next_pow2).
+#
+# Rust Vec<(Vec<f64>,Vec<f64>)> -> a `vec` of DhComplexBuf handles (each holds a
+# `real` vec + an `imag` vec). Vec<Vec<f32>>/Vec<Vec<f64>> -> a `vec` of vec
+# handles. Vec<Vec<(...)>> (per-channel FDL) -> a `vec` of vec-of-DhComplexBuf.
+# f32 samples stored as f64 slots (lossless for the tested values). serde +
+# Display + Clone dropped. IFFT via the conjugate trick, exactly as the oracle.
+
+# ---- ComplexBuf: one frequency-domain block (parallel real/imag vecs) ----
+#derive(accessors)
+struct DhComplexBuf { real; imag; }
+
+#must_use
+fn dhvani_cbuf_new(fft_size) {
+    var self = alloc(sizeof(DhComplexBuf));
+    DhComplexBuf_set_real(self, dh_vec_zeros(fft_size));
+    DhComplexBuf_set_imag(self, dh_vec_zeros(fft_size));
+    return self;
+}
+
+# fill both real/imag with zeros.
+fn dhvani_cbuf_clear(self, fft_size) {
+    var r = DhComplexBuf_real(self);
+    var im = DhComplexBuf_imag(self);
+    var i = 0;
+    while (i < fft_size) { vec_set(r, i, 0); vec_set(im, i, 0); i = i + 1; }
+    return 0;
+}
+
+# ---- ConvolutionReverb ----
+#derive(accessors)
+struct DhConvolutionReverb {
+    fft_size;
+    block_size;
+    ir_partitions;
+    input_buffers;
+    overlap;
+    write_pos;
+    mix;
+    channels;
+    scratch_real;
+    scratch_imag;
+    fdl;
+    fdl_pos;
+}
+
+# partition_ir(ir, block_size, fft_size) -> a `vec` of DhComplexBuf handles.
+# Empty IR -> an empty vec. Each partition is a zero-padded, FFT'd block.
+#must_use
+fn dhvani_conv_partition_ir(ir, block_size, fft_size) {
+    var parts = vec_new();
+    var ir_len = vec_len(ir);
+    if (ir_len == 0) { return parts; }
+    # num_partitions = ir.len().div_ceil(block_size)
+    var num_partitions = f64_to(f64_ceil(f64_div(f64_from(ir_len), f64_from(block_size))));
+    var p = 0;
+    while (p < num_partitions) {
+        var start = p * block_size;
+        var end = start + block_size;
+        if (end > ir_len) { end = ir_len; }
+        var cb = dhvani_cbuf_new(fft_size);
+        var real = DhComplexBuf_real(cb);
+        var i = start;
+        while (i < end) { vec_set(real, i - start, vec_get(ir, i)); i = i + 1; }
+        dhvani_fft_in_place(real, DhComplexBuf_imag(cb));
+        vec_push(parts, cb);
+        p = p + 1;
+    }
+    return parts;
+}
+
+# with_block_size(ir, block_size, mix, sample_rate) -> handle.
+#must_use
+fn dhvani_conv_with_block_size(ir_samples, block_size, mix, sample_rate) {
+    var bs = block_size;
+    if (bs < 1) { bs = 1; }
+    bs = dh_next_pow2(bs);
+    var fft_size = bs * 2;
+    var ir_partitions = dhvani_conv_partition_ir(ir_samples, bs, fft_size);
+    var self = alloc(sizeof(DhConvolutionReverb));
+    DhConvolutionReverb_set_fft_size(self, fft_size);
+    DhConvolutionReverb_set_block_size(self, bs);
+    DhConvolutionReverb_set_ir_partitions(self, ir_partitions);
+    DhConvolutionReverb_set_input_buffers(self, vec_new());
+    DhConvolutionReverb_set_overlap(self, vec_new());
+    DhConvolutionReverb_set_write_pos(self, 0);
+    DhConvolutionReverb_set_mix(self, f64_clamp(mix, 0, 1.0));
+    DhConvolutionReverb_set_channels(self, 0);
+    DhConvolutionReverb_set_scratch_real(self, dh_vec_zeros(fft_size));
+    DhConvolutionReverb_set_scratch_imag(self, dh_vec_zeros(fft_size));
+    DhConvolutionReverb_set_fdl(self, vec_new());
+    DhConvolutionReverb_set_fdl_pos(self, 0);
+    return self;
+}
+
+# new(ir, mix, sample_rate) -- default block size 512.
+#must_use
+fn dhvani_conv_new(ir_samples, mix, sample_rate) {
+    return dhvani_conv_with_block_size(ir_samples, 512, mix, sample_rate);
+}
+
+# set_mix(mix) -- clamp to [0,1].
+fn dhvani_conv_set_mix(self, mix) {
+    DhConvolutionReverb_set_mix(self, f64_clamp(mix, 0, 1.0));
+    return 0;
+}
+
+#inline
+#must_use
+fn dhvani_conv_mix(self) { return DhConvolutionReverb_mix(self); }
+
+# set_ir(ir) -- rebuild partitions from a new IR, then reset state.
+fn dhvani_conv_set_ir(self, ir_samples) {
+    var parts = dhvani_conv_partition_ir(ir_samples,
+        DhConvolutionReverb_block_size(self), DhConvolutionReverb_fft_size(self));
+    DhConvolutionReverb_set_ir_partitions(self, parts);
+    dhvani_conv_reset(self);
+    return 0;
+}
+
+# reset() -- zero input buffers, overlap, FDL; reset write/fdl positions.
+fn dhvani_conv_reset(self) {
+    var fft_size = DhConvolutionReverb_fft_size(self);
+    var block_size = DhConvolutionReverb_block_size(self);
+    var input_buffers = DhConvolutionReverb_input_buffers(self);
+    var nib = vec_len(input_buffers);
+    var a = 0;
+    while (a < nib) {
+        var ib = vec_get(input_buffers, a);
+        var ni = vec_len(ib);
+        var bi = 0;
+        while (bi < ni) { vec_set(ib, bi, 0); bi = bi + 1; }
+        a = a + 1;
+    }
+    var overlap = DhConvolutionReverb_overlap(self);
+    var nov = vec_len(overlap);
+    var ci = 0;
+    while (ci < nov) {
+        var ov = vec_get(overlap, ci);
+        var no = vec_len(ov);
+        var di = 0;
+        while (di < no) { vec_set(ov, di, 0); di = di + 1; }
+        ci = ci + 1;
+    }
+    var fdl = DhConvolutionReverb_fdl(self);
+    var nfd = vec_len(fdl);
+    var ei = 0;
+    while (ei < nfd) {
+        var ch_fdl = vec_get(fdl, ei);
+        var np = vec_len(ch_fdl);
+        var fi = 0;
+        while (fi < np) {
+            dhvani_cbuf_clear(vec_get(ch_fdl, fi), fft_size);
+            fi = fi + 1;
+        }
+        ei = ei + 1;
+    }
+    DhConvolutionReverb_set_write_pos(self, 0);
+    DhConvolutionReverb_set_fdl_pos(self, 0);
+    return 0;
+}
+
+# ensure_channels(ch) -- (re)allocate per-channel buffers when count changes.
+fn dhvani_conv_ensure_channels(self, ch) {
+    if (DhConvolutionReverb_channels(self) == ch) { return 0; }
+    DhConvolutionReverb_set_channels(self, ch);
+    var block_size = DhConvolutionReverb_block_size(self);
+    var fft_size = DhConvolutionReverb_fft_size(self);
+    var num_partitions = vec_len(DhConvolutionReverb_ir_partitions(self));
+    if (num_partitions < 1) { num_partitions = 1; }
+    var input_buffers = vec_new();
+    var overlap = vec_new();
+    var fdl = vec_new();
+    var c = 0;
+    while (c < ch) {
+        vec_push(input_buffers, dh_vec_zeros(block_size));
+        vec_push(overlap, dh_vec_zeros(fft_size));
+        var ch_fdl = vec_new();
+        var p = 0;
+        while (p < num_partitions) {
+            vec_push(ch_fdl, dhvani_cbuf_new(fft_size));
+            p = p + 1;
+        }
+        vec_push(fdl, ch_fdl);
+        c = c + 1;
+    }
+    DhConvolutionReverb_set_input_buffers(self, input_buffers);
+    DhConvolutionReverb_set_overlap(self, overlap);
+    DhConvolutionReverb_set_fdl(self, fdl);
+    DhConvolutionReverb_set_write_pos(self, 0);
+    DhConvolutionReverb_set_fdl_pos(self, 0);
+    return 0;
+}
+
+# process_block(channel) -- partitioned convolution for one channel's block.
+fn dhvani_conv_process_block(self, channel) {
+    var fft_size = DhConvolutionReverb_fft_size(self);
+    var block_size = DhConvolutionReverb_block_size(self);
+    var ir_partitions = DhConvolutionReverb_ir_partitions(self);
+    var num_partitions = vec_len(ir_partitions);
+    var fdl_pos = DhConvolutionReverb_fdl_pos(self);
+    var fdl = DhConvolutionReverb_fdl(self);
+    var ch_fdl = vec_get(fdl, channel);
+    var input_ch = vec_get(DhConvolutionReverb_input_buffers(self), channel);
+
+    var scratch_real = DhConvolutionReverb_scratch_real(self);
+    var scratch_imag = DhConvolutionReverb_scratch_imag(self);
+    # FFT the input block (zero-padded)
+    var z = 0;
+    while (z < fft_size) { vec_set(scratch_real, z, 0); vec_set(scratch_imag, z, 0); z = z + 1; }
+    var i = 0;
+    while (i < block_size) { vec_set(scratch_real, i, vec_get(input_ch, i)); i = i + 1; }
+    if (dhvani_fft_in_place(scratch_real, scratch_imag) == 0) { return 0; }
+
+    # Store in the frequency delay line (copy scratch into fdl[fdl_pos]).
+    var slot = vec_get(ch_fdl, fdl_pos);
+    var slot_r = DhComplexBuf_real(slot);
+    var slot_i = DhComplexBuf_imag(slot);
+    var cp = 0;
+    while (cp < fft_size) {
+        vec_set(slot_r, cp, vec_get(scratch_real, cp));
+        vec_set(slot_i, cp, vec_get(scratch_imag, cp));
+        cp = cp + 1;
+    }
+
+    # Accumulate: sum over all partitions (FDL[pos-k] * IR[k]).
+    var acc_real = dh_vec_zeros(fft_size);
+    var acc_imag = dh_vec_zeros(fft_size);
+    var k = 0;
+    while (k < num_partitions) {
+        var fdl_idx = (fdl_pos + num_partitions - k) % num_partitions;
+        var fslot = vec_get(ch_fdl, fdl_idx);
+        var fdl_r = DhComplexBuf_real(fslot);
+        var fdl_i = DhComplexBuf_imag(fslot);
+        var iref = vec_get(ir_partitions, k);
+        var ir_r = DhComplexBuf_real(iref);
+        var ir_i = DhComplexBuf_imag(iref);
+        var bin = 0;
+        while (bin < fft_size) {
+            var fr = vec_get(fdl_r, bin);
+            var fi = vec_get(fdl_i, bin);
+            var cr = vec_get(ir_r, bin);
+            var di = vec_get(ir_i, bin);
+            # (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+            vec_set(acc_real, bin, f64_add(vec_get(acc_real, bin), f64_sub(f64_mul(fr, cr), f64_mul(fi, di))));
+            vec_set(acc_imag, bin, f64_add(vec_get(acc_imag, bin), f64_add(f64_mul(fr, di), f64_mul(fi, cr))));
+            bin = bin + 1;
+        }
+        k = k + 1;
+    }
+
+    # IFFT via conjugate: IFFT(X) = conj(FFT(conj(X))) / N
+    var n2 = 0;
+    while (n2 < fft_size) { vec_set(acc_imag, n2, f64_neg(vec_get(acc_imag, n2))); n2 = n2 + 1; }
+    if (dhvani_fft_in_place(acc_real, acc_imag) == 0) { return 0; }
+    var scale = f64_div(1.0, f64_from(fft_size));
+
+    # Overlap-add into output.
+    var ov = vec_get(DhConvolutionReverb_overlap(self), channel);
+    var o = 0;
+    while (o < fft_size) {
+        vec_set(ov, o, f64_add(vec_get(ov, o), f64_mul(vec_get(acc_real, o), scale)));
+        o = o + 1;
+    }
+    return 0;
+}
+
+# process(buf) -- convolution reverb in place. No-op if IR is empty.
+#inline
+fn dhvani_conv_process(self, buf) {
+    var ir_partitions = DhConvolutionReverb_ir_partitions(self);
+    if (vec_len(ir_partitions) == 0) { return 0; }
+
+    var ch = DhAudioBuffer_channels(buf);
+    dhvani_conv_ensure_channels(self, ch);
+
+    var mix = DhConvolutionReverb_mix(self);
+    var dry = f64_sub(1.0, mix);
+    var frames = DhAudioBuffer_frames(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var samples_len = vec_len(samples);
+    var block_size = DhConvolutionReverb_block_size(self);
+    var fft_size = DhConvolutionReverb_fft_size(self);
+    var input_buffers = DhConvolutionReverb_input_buffers(self);
+    var num_partitions = vec_len(ir_partitions);
+    if (num_partitions < 1) { num_partitions = 1; }
+
+    var frame = 0;
+    while (frame < frames) {
+        # Fill input block.
+        var write_pos = DhConvolutionReverb_write_pos(self);
+        var remaining_in_block = block_size - write_pos;
+        var to_copy = remaining_in_block;
+        var avail = frames - frame;
+        if (avail < to_copy) { to_copy = avail; }
+
+        var c0 = 0;
+        while (c0 < ch) {
+            var ibuf = vec_get(input_buffers, c0);
+            var ii = 0;
+            while (ii < to_copy) {
+                vec_set(ibuf, write_pos + ii, vec_get(samples, (frame + ii) * ch + c0));
+                ii = ii + 1;
+            }
+            c0 = c0 + 1;
+        }
+        write_pos = write_pos + to_copy;
+        DhConvolutionReverb_set_write_pos(self, write_pos);
+
+        # When the block is full, process it.
+        if (write_pos >= block_size) {
+            var cb = 0;
+            while (cb < ch) {
+                dhvani_conv_process_block(self, cb);
+                cb = cb + 1;
+            }
+            DhConvolutionReverb_set_fdl_pos(self, (DhConvolutionReverb_fdl_pos(self) + 1) % num_partitions);
+            DhConvolutionReverb_set_write_pos(self, 0);
+
+            # Write output: overlap[0..block_size] is the current block output.
+            var block_start = frame + to_copy - block_size;
+            var cw = 0;
+            while (cw < ch) {
+                var ov = vec_get(DhConvolutionReverb_overlap(self), cw);
+                var oi = 0;
+                while (oi < block_size) {
+                    var src_idx = (block_start + oi) * ch + cw;
+                    if (src_idx < samples_len) {
+                        var wet = vec_get(ov, oi);
+                        var cur = vec_get(samples, src_idx);
+                        vec_set(samples, src_idx, f64_add(f64_mul(cur, dry), f64_mul(wet, mix)));
+                    }
+                    oi = oi + 1;
+                }
+                # Shift overlap: move tail forward.
+                var tail_len = fft_size - block_size;
+                var ti = 0;
+                while (ti < tail_len) {
+                    vec_set(ov, ti, vec_get(ov, block_size + ti));
+                    ti = ti + 1;
+                }
+                var tj = tail_len;
+                while (tj < fft_size) { vec_set(ov, tj, 0); tj = tj + 1; }
+                cw = cw + 1;
+            }
+        }
+
+        frame = frame + to_copy;
+    }
+    return 0;
+}

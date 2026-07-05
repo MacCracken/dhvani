@@ -1,0 +1,245 @@
+# key.cyr -- Krumhansl-Schmuckler key detection from a chromagram.
+# Ports rust-old/src/analysis/key.rs. Classifies audio into one of 24 keys
+# (12 major + 12 minor) by correlating the 12-bin chromagram against rotated
+# Krumhansl-Kessler major/minor profiles (Pearson correlation).
+# L1: deps error + simd + buffer + abaco + analysis (Spectrum) + fft +
+# chroma (Chromagram). serde + Display dropped.
+#
+# KeyResult fields: key (name string), root (0..11 pitch class), is_major (0/1),
+# confidence (0..1), correlations (24-slot vec: [12 major..., 12 minor...]).
+
+# ---- PITCH_NAMES lookup (was [&str; 12]) ----
+#must_use
+fn dhvani_key_pitch_name(idx) {
+    if (idx == 0)  { return "C"; }
+    if (idx == 1)  { return "C#"; }
+    if (idx == 2)  { return "D"; }
+    if (idx == 3)  { return "D#"; }
+    if (idx == 4)  { return "E"; }
+    if (idx == 5)  { return "F"; }
+    if (idx == 6)  { return "F#"; }
+    if (idx == 7)  { return "G"; }
+    if (idx == 8)  { return "G#"; }
+    if (idx == 9)  { return "A"; }
+    if (idx == 10) { return "A#"; }
+    if (idx == 11) { return "B"; }
+    return "unknown";
+}
+
+# ---- MAJOR_PROFILE (Krumhansl-Kessler) as a 12-slot vec ----
+# [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+#must_use
+fn dhvani_key_major_profile() {
+    var p = vec_new();
+    vec_push(p, 6.35);
+    vec_push(p, 2.23);
+    vec_push(p, 3.48);
+    vec_push(p, 2.33);
+    vec_push(p, 4.38);
+    vec_push(p, 4.09);
+    vec_push(p, 2.52);
+    vec_push(p, 5.19);
+    vec_push(p, 2.39);
+    vec_push(p, 3.66);
+    vec_push(p, 2.29);
+    vec_push(p, 2.88);
+    return p;
+}
+
+# ---- MINOR_PROFILE (Krumhansl-Kessler) as a 12-slot vec ----
+# [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+#must_use
+fn dhvani_key_minor_profile() {
+    var p = vec_new();
+    vec_push(p, 6.33);
+    vec_push(p, 2.68);
+    vec_push(p, 3.52);
+    vec_push(p, 5.38);
+    vec_push(p, 2.60);
+    vec_push(p, 3.53);
+    vec_push(p, 2.54);
+    vec_push(p, 4.75);
+    vec_push(p, 3.98);
+    vec_push(p, 2.69);
+    vec_push(p, 3.34);
+    vec_push(p, 3.17);
+    return p;
+}
+
+#derive(accessors)
+struct DhKeyResult { key; root; is_major; confidence; correlations; }
+
+# --- accessors ---
+#inline
+#must_use
+fn dhvani_key_result_key(self) { return DhKeyResult_key(self); }
+#inline
+#must_use
+fn dhvani_key_result_root(self) { return DhKeyResult_root(self); }
+#inline
+#must_use
+fn dhvani_key_result_is_major(self) { return DhKeyResult_is_major(self); }
+#inline
+#must_use
+fn dhvani_key_result_confidence(self) { return DhKeyResult_confidence(self); }
+#inline
+#must_use
+fn dhvani_key_result_correlations(self) { return DhKeyResult_correlations(self); }
+
+# Full key name for (root, is_major): e.g. "C major", "A minor".
+# (Replaces the Rust format!("{} {mode}", PITCH_NAMES[root]).)
+#must_use
+fn dhvani_key_name(root, is_major) {
+    var name = dhvani_key_pitch_name(root);
+    if (is_major == 1) {
+        if (root == 0)  { return "C major"; }
+        if (root == 1)  { return "C# major"; }
+        if (root == 2)  { return "D major"; }
+        if (root == 3)  { return "D# major"; }
+        if (root == 4)  { return "E major"; }
+        if (root == 5)  { return "F major"; }
+        if (root == 6)  { return "F# major"; }
+        if (root == 7)  { return "G major"; }
+        if (root == 8)  { return "G# major"; }
+        if (root == 9)  { return "A major"; }
+        if (root == 10) { return "A# major"; }
+        if (root == 11) { return "B major"; }
+        return "unknown major";
+    }
+    if (root == 0)  { return "C minor"; }
+    if (root == 1)  { return "C# minor"; }
+    if (root == 2)  { return "D minor"; }
+    if (root == 3)  { return "D# minor"; }
+    if (root == 4)  { return "E minor"; }
+    if (root == 5)  { return "F minor"; }
+    if (root == 6)  { return "F# minor"; }
+    if (root == 7)  { return "G minor"; }
+    if (root == 8)  { return "G# minor"; }
+    if (root == 9)  { return "A minor"; }
+    if (root == 10) { return "A# minor"; }
+    if (root == 11) { return "B minor"; }
+    return "unknown minor";
+}
+
+# Pearson correlation between a 12-slot chroma `vec` and a 12-slot key profile
+# `vec` rotated to `root`. Mirrors the Rust helper exactly.
+#must_use
+fn dhvani_key_pearson_correlation(chroma, profile, root) {
+    var n = 12.0;
+
+    # Compute means.
+    var chroma_sum = 0;
+    var profile_sum = 0;
+    var s = 0;
+    while (s < 12) {
+        chroma_sum = f64_add(chroma_sum, vec_get(chroma, s));
+        profile_sum = f64_add(profile_sum, vec_get(profile, s));
+        s = s + 1;
+    }
+    var chroma_mean = f64_div(chroma_sum, n);
+    var profile_mean = f64_div(profile_sum, n);
+
+    var cov = 0;
+    var var_chroma = 0;
+    var var_profile = 0;
+    var i = 0;
+    while (i < 12) {
+        var c = f64_sub(vec_get(chroma, (i + root) % 12), chroma_mean);
+        var p = f64_sub(vec_get(profile, i), profile_mean);
+        cov = f64_add(cov, f64_mul(c, p));
+        var_chroma = f64_add(var_chroma, f64_mul(c, c));
+        var_profile = f64_add(var_profile, f64_mul(p, p));
+        i = i + 1;
+    }
+
+    var denom = f64_sqrt(f64_mul(var_chroma, var_profile));
+    if (f64_gt(denom, 0.0000000001) == 1) { return f64_div(cov, denom); }
+    return 0;
+}
+
+# Descending in-place insertion sort of a `vec` of f64 (mirrors Rust
+# sort_by(|a,b| b.partial_cmp(a)) with the correlations we produce being finite).
+fn dhvani_key_sort_desc(v) {
+    var n = vec_len(v);
+    var i = 1;
+    while (i < n) {
+        var key_v = vec_get(v, i);
+        var j = i - 1;
+        var cont = 1;
+        while (cont == 1) {
+            if (j < 0) { cont = 0; }
+            elif (f64_lt(vec_get(v, j), key_v) == 1) {
+                vec_set(v, j + 1, vec_get(v, j));
+                j = j - 1;
+            } else { cont = 0; }
+        }
+        vec_set(v, j + 1, key_v);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# detect_key_from_chroma(chroma) -- detect key from a pre-computed chromagram.
+#must_use
+fn dhvani_key_detect_from_chroma(chroma) {
+    var chroma_vals = dhvani_chromagram_chroma(chroma);
+    var major_profile = dhvani_key_major_profile();
+    var minor_profile = dhvani_key_minor_profile();
+    var correlations = dh_vec_zeros(24);
+    var best_idx = 0;
+    var best_corr = DH_NEG_INF;
+
+    # Test all 24 keys (12 major + 12 minor).
+    var root = 0;
+    while (root < 12) {
+        var major_corr = dhvani_key_pearson_correlation(chroma_vals, major_profile, root);
+        vec_set(correlations, root, major_corr);
+        if (f64_gt(major_corr, best_corr) == 1) {
+            best_corr = major_corr;
+            best_idx = root;
+        }
+
+        var minor_corr = dhvani_key_pearson_correlation(chroma_vals, minor_profile, root);
+        vec_set(correlations, 12 + root, minor_corr);
+        if (f64_gt(minor_corr, best_corr) == 1) {
+            best_corr = minor_corr;
+            best_idx = 12 + root;
+        }
+        root = root + 1;
+    }
+
+    var is_major = 0;
+    if (best_idx < 12) { is_major = 1; }
+    var root_out = best_idx % 12;
+    var key = dhvani_key_name(root_out, is_major);
+
+    # Confidence: how much better is the best match vs second-best?
+    var sorted = vec_new();
+    var si = 0;
+    while (si < 24) { vec_push(sorted, vec_get(correlations, si)); si = si + 1; }
+    dhvani_key_sort_desc(sorted);
+    var confidence = 0;
+    if (f64_gt(vec_get(sorted, 0), 0.0) == 1) {
+        var s0 = vec_get(sorted, 0);
+        var s1 = vec_get(sorted, 1);
+        var raw = f64_div(f64_sub(s0, s1), f64_max(f64_abs(s0), 0.001));
+        confidence = f64_clamp(raw, 0.0, 1.0);
+    }
+
+    var self = alloc(sizeof(DhKeyResult));
+    DhKeyResult_set_key(self, key);
+    DhKeyResult_set_root(self, root_out);
+    DhKeyResult_set_is_major(self, is_major);
+    DhKeyResult_set_confidence(self, confidence);
+    DhKeyResult_set_correlations(self, correlations);
+    return self;
+}
+
+# detect_key(buf, window_size) -- compute a chromagram, then detect the key.
+# Returns a KeyResult handle, or 0 if the chromagram computation fails.
+#must_use
+fn dhvani_key_detect(buf, window_size) {
+    var chroma = dhvani_chroma_chromagram(buf, window_size);
+    if (chroma == 0) { return 0; }
+    return dhvani_key_detect_from_chroma(chroma);
+}

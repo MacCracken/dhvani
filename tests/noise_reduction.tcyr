@@ -1,0 +1,102 @@
+# noise_reduction.tcyr -- parity tests for src/noise_reduction.cyr
+# Ported one-for-one from the 6 #[test] blocks in
+# rust-old/src/dsp/noise_reduction.rs. No serde/Display tests to drop.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
+include "src/noise_reduction.cyr"
+
+alloc_init();
+
+# amp * sin(2*PI*freq*i/sr), interleaved mono, `frames` samples.
+fn nr_make_sine(amp, freq, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        vec_push(v, f64_mul(amp, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr)))));
+        i = i + 1;
+    }
+    return v;
+}
+
+# 1 if every sample in the buffer is finite, else 0.
+fn nr_all_finite(buf) {
+    var s = DhAudioBuffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---- silence_unchanged ----
+test_group("silence_unchanged");
+var buf_s = dhvani_buffer_silence(1, 4096, 44100);
+dhvani_noise_reduce(buf_s, 0.5);
+assert(f64_lt(dhvani_buffer_peak(buf_s), DH_EPSILON) == 1, "silence peak < epsilon");
+
+# ---- loud_signal_preserved ----
+test_group("loud_signal_preserved");
+var samples_l = nr_make_sine(0.8, 440.0, 44100, 44100);
+var buf_l = dhvani_buffer_from_interleaved(samples_l, 1, 44100);
+var original_rms = dhvani_buffer_rms(buf_l);
+dhvani_noise_reduce(buf_l, 0.3);
+assert(f64_gt(dhvani_buffer_rms(buf_l), f64_mul(original_rms, 0.7)) == 1, "loud signal survives");
+
+# ---- noise_reduced ----
+test_group("noise_reduced");
+var samples_n = vec_new();
+var in1 = 0;
+while (in1 < 44100) {
+    var signal = f64_mul(0.5, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(in1)), f64_from(44100))));
+    var noise = f64_mul(0.02, f64_sin(f64_mul(f64_from(in1), 12345.679)));
+    vec_push(samples_n, f64_add(signal, noise));
+    in1 = in1 + 1;
+}
+var buf_n = dhvani_buffer_from_interleaved(samples_n, 1, 44100);
+dhvani_noise_reduce(buf_n, 0.5);
+assert_eq(nr_all_finite(buf_n), 1, "noise_reduced output all finite");
+assert(f64_gt(dhvani_buffer_rms(buf_n), 0.0) == 1, "noise_reduced signal survives");
+
+# ---- short_buffer_fallback ----
+test_group("short_buffer_fallback");
+var samples_sb = vec_new();
+var isb = 0;
+while (isb < 100) { vec_push(samples_sb, 0.01); isb = isb + 1; }
+var buf_sb = dhvani_buffer_from_interleaved(samples_sb, 1, 44100);
+dhvani_noise_reduce(buf_sb, 0.5);
+assert_eq(nr_all_finite(buf_sb), 1, "short buffer output all finite");
+
+# ---- stereo_processing ----
+test_group("stereo_processing");
+var samples_st = vec_new();
+var ist = 0;
+while (ist < 88200) {
+    vec_push(samples_st, f64_mul(0.5, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(ist / 2)), f64_from(44100)))));
+    ist = ist + 1;
+}
+var buf_st = dhvani_buffer_from_interleaved(samples_st, 2, 44100);
+dhvani_noise_reduce(buf_st, 0.3);
+assert_eq(nr_all_finite(buf_st), 1, "stereo output all finite");
+assert(f64_gt(dhvani_buffer_rms(buf_st), 0.0) == 1, "stereo signal survives");
+
+# ---- output_finite ----
+test_group("output_finite");
+var samples_of = vec_new();
+var iof = 0;
+while (iof < 44100) {
+    vec_push(samples_of, f64_sub(f64_mul(f64_div(f64_from(iof), f64_from(44100)), 2.0), 1.0));
+    iof = iof + 1;
+}
+var buf_of = dhvani_buffer_from_interleaved(samples_of, 1, 44100);
+dhvani_noise_reduce(buf_of, 1.0);
+assert_eq(nr_all_finite(buf_of), 1, "ramp output all finite");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,87 @@
+# key.tcyr -- parity tests for src/key.cyr (KeyResult + detect_key +
+# detect_key_from_chroma). Ported one-for-one from the #[test] blocks in
+# rust-old/src/analysis/key.rs.
+#
+# DROPPED: key_result_display -- a Display/string-content test (checks
+# result.key.contains("major"||"minor")); string formatting is out of parity
+# scope per the port rules.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
+include "src/chroma.cyr"
+include "src/key.cyr"
+
+alloc_init();
+
+# ---- helpers (near the top) ----
+
+# make_chroma12(fill) -- 12-slot chroma vec filled with `fill` (was [fill; 12]).
+fn make_chroma12(fill) {
+    var v = vec_new();
+    var i = 0;
+    while (i < 12) { vec_push(v, fill); i = i + 1; }
+    return v;
+}
+
+# make_sine(freq, sr, frames) -- mono sine buffer (matches oracle sample gen:
+# sin(2*PI*freq*i/sr) * 0.8).
+fn make_sine_amp(freq, sr, frames, amp) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var s = f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr)));
+        vec_push(v, f64_mul(s, amp));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+
+# ---- c_major_scale ----
+# Simulate a C major chromagram: strong C, E, G. Expect root 0, major.
+test_group("c_major_scale");
+var cm = make_chroma12(0.1);
+vec_set(cm, 0, 1.0);  # C
+vec_set(cm, 4, 0.8);  # E
+vec_set(cm, 7, 0.7);  # G
+vec_set(cm, 5, 0.4);  # F
+vec_set(cm, 2, 0.3);  # D
+var cm_chroma = dhvani_chromagram_from_array(cm);
+var cm_result = dhvani_key_detect_from_chroma(cm_chroma);
+assert_eq(dhvani_key_result_root(cm_result), 0, "c_major_scale: expected root C (0)");
+assert_eq(dhvani_key_result_is_major(cm_result), 1, "c_major_scale: expected major");
+assert(f64_gt(dhvani_key_result_confidence(cm_result), 0.0) == 1, "c_major_scale: confidence > 0");
+
+# ---- a_minor_scale ----
+# Simulate an A minor chromagram: strong A, C, E. Expect root 9, minor.
+test_group("a_minor_scale");
+var am = make_chroma12(0.1);
+vec_set(am, 9, 1.0);   # A
+vec_set(am, 0, 0.7);   # C
+vec_set(am, 4, 0.6);   # E
+vec_set(am, 7, 0.3);   # G
+vec_set(am, 2, 0.25);  # D
+var am_chroma = dhvani_chromagram_from_array(am);
+var am_result = dhvani_key_detect_from_chroma(am_chroma);
+assert_eq(dhvani_key_result_root(am_result), 9, "a_minor_scale: expected root A (9)");
+assert_eq(dhvani_key_result_is_major(am_result), 0, "a_minor_scale: expected minor");
+
+# ---- all_correlations_present ----
+# Chromagram of all 1.0 -> 24 correlations present.
+test_group("all_correlations_present");
+var ac_chroma = dhvani_chromagram_from_array(make_chroma12(1.0));
+var ac_result = dhvani_key_detect_from_chroma(ac_chroma);
+assert_eq(vec_len(dhvani_key_result_correlations(ac_result)), 24, "all_correlations_present: 24 correlations");
+
+# ---- detect_key_from_audio ----
+# A440 sine (44100 samples, 1ch, amp 0.8) -> A as root (index 9).
+test_group("detect_key_from_audio");
+var au_buf = make_sine_amp(440.0, 44100, 44100, 0.8);
+var au_result = dhvani_key_detect(au_buf, 8192);
+assert_eq(dhvani_key_result_root(au_result), 9, "detect_key_from_audio: A440 -> root A (9)");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,238 @@
+# beat.cyr -- Beat and tempo detection via autocorrelation of the onset
+# strength function. Ports rust-old/src/analysis/beat.rs. L1: deps error +
+# simd + buffer + abaco + analysis + fft + stft (dhvani_stft).
+#
+# BeatResult had bpm (f32), confidence (f32), beat_positions (Vec<usize>).
+# Here bpm/confidence are f64 slots and beat_positions is a `vec` of integer
+# sample offsets. detect_tempo is fallible in Rust: the < 1s guard is an Err ->
+# here returns 0 (null) so tests can check `!= 0`. STFT failure also -> 0. All
+# other early-return Ok(empty/zero) cases return a valid (non-null) handle with
+# bpm=0, confidence=0, empty beat_positions.
+#
+# The onset strength envelope here is spectral flux over EVERY STFT frame
+# (envelope[0] = 0), normalized by its peak -- distinct from onset.cyr's
+# peak-picked detect_onsets, so it is recomputed inline against dhvani_stft.
+
+#derive(accessors)
+struct DhBeatResult { bpm; confidence; beat_positions; }
+
+# ---- BeatResult accessors ----
+#inline
+#must_use
+fn dhvani_beat_bpm(self) { return DhBeatResult_bpm(self); }
+#inline
+#must_use
+fn dhvani_beat_confidence(self) { return DhBeatResult_confidence(self); }
+#inline
+#must_use
+fn dhvani_beat_positions(self) { return DhBeatResult_beat_positions(self); }
+#inline
+#must_use
+fn dhvani_beat_count(self) { return vec_len(DhBeatResult_beat_positions(self)); }
+#inline
+#must_use
+fn dhvani_beat_position(self, i) { return vec_get(DhBeatResult_beat_positions(self), i); }
+
+# build a BeatResult from bpm + confidence + beat_positions vec.
+#must_use
+fn dhvani_beat_make_result(bpm, confidence, beat_positions) {
+    var self = alloc(sizeof(DhBeatResult));
+    DhBeatResult_set_bpm(self, bpm);
+    DhBeatResult_set_confidence(self, confidence);
+    DhBeatResult_set_beat_positions(self, beat_positions);
+    return self;
+}
+
+# a zero result: bpm=0, confidence=0, empty beat_positions (the Ok(empty) cases).
+#must_use
+fn dhvani_beat_zero_result() {
+    return dhvani_beat_make_result(0, 0, vec_new());
+}
+
+# Compute onset strength envelope (spectral flux per STFT frame). Returns a
+# `vec` of f64 flux values (envelope[0] = 0), normalized by its peak; or 0
+# (null) on STFT error, or an empty vec (non-null) when < 2 frames.
+#must_use
+fn dhvani_beat_onset_strength_envelope(buf, window_size, hop_size) {
+    var sg = dhvani_stft(buf, window_size, hop_size);
+    if (sg == 0) { return 0; }
+
+    var num_frames = dhvani_spectrogram_num_frames(sg);
+    if (num_frames < 2) { return vec_new(); }
+
+    var num_bins = dhvani_spectrogram_num_bins(sg);
+
+    var envelope = vec_new();
+    vec_push(envelope, 0); # first frame has no previous
+
+    var i = 1;
+    while (i < num_frames) {
+        var flux = 0;
+        var cur = dhvani_spectrogram_frame(sg, i);
+        var prev = dhvani_spectrogram_frame(sg, i - 1);
+        var bin = 0;
+        while (bin < num_bins) {
+            var diff = f64_sub(vec_get(cur, bin), vec_get(prev, bin));
+            if (f64_gt(diff, 0) == 1) { flux = f64_add(flux, diff); }
+            bin = bin + 1;
+        }
+        vec_push(envelope, flux);
+        i = i + 1;
+    }
+
+    # Normalize by peak (fold over 0.0, so >= 0).
+    var env_len = vec_len(envelope);
+    var max_flux = 0;
+    var m = 0;
+    while (m < env_len) { max_flux = f64_max(max_flux, vec_get(envelope, m)); m = m + 1; }
+    if (f64_gt(max_flux, 0) == 1) {
+        var n = 0;
+        while (n < env_len) { vec_set(envelope, n, f64_div(vec_get(envelope, n), max_flux)); n = n + 1; }
+    }
+
+    return envelope;
+}
+
+# Autocorrelation of a signal over a lag range. result has length max_lag+1;
+# result[lag] = (sum_i signal[i]*signal[i+lag]) / (n - lag) for lag in
+# min_lag..=max_lag, zero elsewhere.
+#inline
+#must_use
+fn dhvani_beat_autocorrelation(signal, min_lag, max_lag) {
+    var n = vec_len(signal);
+    var result = dh_vec_zeros(max_lag + 1);
+
+    var lag = min_lag;
+    while (lag <= max_lag) {
+        var sum = 0;
+        var count = n - lag;
+        var i = 0;
+        while (i < count) {
+            sum = f64_add(sum, f64_mul(vec_get(signal, i), vec_get(signal, i + lag)));
+            i = i + 1;
+        }
+        vec_set(result, lag, f64_div(sum, f64_from(count)));
+        lag = lag + 1;
+    }
+
+    return result;
+}
+
+# Find the peak in the autocorrelation result. Writes best_lag, best_val,
+# max_val via out-pointers (Rust returned a 3-tuple). Iterates lag from min_lag
+# to len-1 (autocorr.iter().enumerate().skip(min_lag)).
+fn dhvani_beat_find_peak(autocorr, min_lag, out_best_lag, out_best_val, out_max_val) {
+    var best_lag = min_lag;
+    var best_val = 0;
+    var max_val = 0;
+
+    var len = vec_len(autocorr);
+    var lag = min_lag;
+    while (lag < len) {
+        var val = vec_get(autocorr, lag);
+        if (f64_gt(val, max_val) == 1) { max_val = val; }
+        if (f64_gt(val, best_val) == 1) { best_val = val; best_lag = lag; }
+        lag = lag + 1;
+    }
+
+    store64(out_best_lag, best_lag);
+    store64(out_best_val, best_val);
+    store64(out_max_val, max_val);
+    return 0;
+}
+
+# Extract beat positions from the onset envelope using the detected period.
+# Returns a `vec` of integer sample offsets.
+#must_use
+fn dhvani_beat_extract_beats(buf, onset_env, hop_size, period_frames) {
+    var beats = vec_new();
+    var env_len = vec_len(onset_env);
+    if (period_frames == 0) { return beats; }
+    if (env_len == 0) { return beats; }
+
+    var half_window = period_frames / 4;
+    var total = f64_to(f64_mul(f64_from(DhAudioBuffer_frames(buf)), f64_from(DhAudioBuffer_channels(buf))));
+
+    var pos = 0;
+    while (pos < env_len) {
+        # start = pos.saturating_sub(half_window)
+        var start = 0;
+        if (pos > half_window) { start = pos - half_window; }
+        # end = (pos + half_window).min(env_len)
+        var end = pos + half_window;
+        if (end > env_len) { end = env_len; }
+
+        # Find strongest onset in window; default best_idx = min(pos, env_len-1).
+        var best_idx = pos;
+        if (best_idx > env_len - 1) { best_idx = env_len - 1; }
+        var best_strength = 0;
+        var i = start;
+        while (i < end) {
+            var strength = vec_get(onset_env, i);
+            if (f64_gt(strength, best_strength) == 1) {
+                best_strength = strength;
+                best_idx = i;
+            }
+            i = i + 1;
+        }
+
+        var sample_pos = best_idx * hop_size;
+        if (sample_pos < total) { vec_push(beats, sample_pos); }
+
+        pos = pos + period_frames;
+    }
+
+    return beats;
+}
+
+# detect_tempo(buf, min_bpm, max_bpm) -- tempo + beat positions.
+# Returns a BeatResult handle, or 0 (null) if the buffer is < 1 second (Err)
+# or on STFT failure. min_bpm/max_bpm are f64.
+#must_use
+fn dhvani_detect_tempo(buf, min_bpm, max_bpm) {
+    var duration_s = f64_div(f64_from(DhAudioBuffer_frames(buf)), f64_from(DhAudioBuffer_sample_rate(buf)));
+    if (f64_lt(duration_s, 1.0) == 1) { return 0; }
+
+    # Step 1: onset strength envelope via spectral flux.
+    var window_size = 2048;
+    var hop_size = 512;
+    var onset_env = dhvani_beat_onset_strength_envelope(buf, window_size, hop_size);
+    if (onset_env == 0) { return 0; }
+
+    if (vec_len(onset_env) < 4) { return dhvani_beat_zero_result(); }
+
+    # Step 2: autocorrelation of the onset envelope.
+    # onset_sr = sample_rate / hop_size (frames per second)
+    var onset_sr = f64_div(f64_from(DhAudioBuffer_sample_rate(buf)), f64_from(hop_size));
+    # min_lag = (onset_sr * 60 / max_bpm) as usize
+    var min_lag = f64_to(f64_trunc(f64_div(f64_mul(onset_sr, 60.0), max_bpm)));
+    # max_lag = (onset_sr * 60 / min_bpm) as usize
+    var max_lag = f64_to(f64_trunc(f64_div(f64_mul(onset_sr, 60.0), min_bpm)));
+    # max_lag = max_lag.min(onset_env.len() / 2)
+    var half_env = vec_len(onset_env) / 2;
+    if (max_lag > half_env) { max_lag = half_env; }
+
+    if (min_lag >= max_lag) { return dhvani_beat_zero_result(); }
+    if (max_lag == 0) { return dhvani_beat_zero_result(); }
+
+    var autocorr = dhvani_beat_autocorrelation(onset_env, min_lag, max_lag);
+
+    # Step 3: find peak -> dominant tempo.
+    var best_lag_p = alloc(8);
+    var best_val_p = alloc(8);
+    var max_val_p = alloc(8);
+    dhvani_beat_find_peak(autocorr, min_lag, best_lag_p, best_val_p, max_val_p);
+    var best_lag = load64(best_lag_p);
+    var best_val = load64(best_val_p);
+    var max_val = load64(max_val_p);
+
+    if (f64_le(max_val, 0) == 1) { return dhvani_beat_zero_result(); }
+
+    var bpm = f64_div(f64_mul(onset_sr, 60.0), f64_from(best_lag));
+    var confidence = f64_clamp(f64_div(best_val, max_val), 0, 1.0);
+
+    # Step 4: extract beat positions using the detected period.
+    var beat_positions = dhvani_beat_extract_beats(buf, onset_env, hop_size, best_lag);
+
+    return dhvani_beat_make_result(bpm, confidence, beat_positions);
+}

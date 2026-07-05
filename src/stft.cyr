@@ -1,0 +1,171 @@
+# stft.cyr -- Short-Time Fourier Transform for spectrogram generation.
+# Ports rust-old/src/analysis/stft.rs. L1: deps error + simd + buffer + analysis
+# + fft (dhvani_fft_in_place). Hann-windowed overlapping frames -> per-frame
+# magnitude spectra. Spectrogram + StftProcessor.
+#
+# Spectrogram.frames was Vec<Vec<f32>>: here a `vec` of frame handles, each a
+# `vec` of f64 magnitudes (window_size/2 bins). num_bins/sample_rate are integer
+# counts; freq_resolution/time_resolution are f64. Fallible stft()/new()/compute()
+# return a valid handle, or 0 (null) on error (empty buffer / bad window / hop=0).
+
+#derive(accessors)
+struct DhSpectrogram { frames; num_bins; freq_resolution; time_resolution; sample_rate; }
+
+# ---- Spectrogram accessors / methods ----
+#inline
+#must_use
+fn dhvani_spectrogram_frames(self) { return DhSpectrogram_frames(self); }
+#inline
+#must_use
+fn dhvani_spectrogram_num_bins(self) { return DhSpectrogram_num_bins(self); }
+#inline
+#must_use
+fn dhvani_spectrogram_freq_resolution(self) { return DhSpectrogram_freq_resolution(self); }
+#inline
+#must_use
+fn dhvani_spectrogram_time_resolution(self) { return DhSpectrogram_time_resolution(self); }
+#inline
+#must_use
+fn dhvani_spectrogram_sample_rate(self) { return DhSpectrogram_sample_rate(self); }
+
+# number of time frames.
+#inline
+#must_use
+fn dhvani_spectrogram_num_frames(self) { return vec_len(DhSpectrogram_frames(self)); }
+
+# frequency of a bin index (Hz).
+#must_use
+fn dhvani_spectrogram_bin_frequency(self, bin) {
+    return f64_mul(f64_from(bin), DhSpectrogram_freq_resolution(self));
+}
+
+# time in seconds of a frame index.
+#must_use
+fn dhvani_spectrogram_frame_time(self, frame) {
+    return f64_mul(f64_from(frame), DhSpectrogram_time_resolution(self));
+}
+
+# the magnitude `vec` for one frame index.
+#inline
+#must_use
+fn dhvani_spectrogram_frame(self, frame) {
+    return vec_get(DhSpectrogram_frames(self), frame);
+}
+
+# ---- Hann window builder: 0.5 * (1 - cos(2*pi*i/(window_size-1))) ----
+#must_use
+fn dhvani_stft_hann_window(window_size) {
+    var window = dh_vec_zeros(window_size);
+    var denom = f64_from(window_size - 1);
+    var i = 0;
+    while (i < window_size) {
+        var w = f64_mul(0.5, f64_sub(1.0, f64_cos(f64_div(f64_mul(f64_mul(2.0, F64_PI), f64_from(i)), denom))));
+        vec_set(window, i, w);
+        i = i + 1;
+    }
+    return window;
+}
+
+# shared STFT core: given a precomputed window (len window_size), a buffer, and a
+# hop_size, build the frames vec. Preallocates real/imag scratch ONCE.
+#must_use
+fn dhvani_stft_run(window, window_size, buf, hop_size) {
+    var num_bins = window_size / 2;
+    var samples = DhAudioBuffer_samples(buf);
+    var ch = DhAudioBuffer_channels(buf);
+    var total_mono_frames = DhAudioBuffer_frames(buf);
+
+    var frames = vec_new();
+    var pos = 0;
+    # Pre-allocate scratch buffers ONCE to avoid per-frame heap allocation.
+    var real = dh_vec_zeros(window_size);
+    var imag = dh_vec_zeros(window_size);
+
+    while ((pos + window_size) <= total_mono_frames) {
+        # zero the scratch (real.fill(0.0); imag.fill(0.0))
+        var z = 0;
+        while (z < window_size) { vec_set(real, z, 0); vec_set(imag, z, 0); z = z + 1; }
+
+        var i = 0;
+        while (i < window_size) {
+            vec_set(real, i, f64_mul(vec_get(samples, (pos + i) * ch), vec_get(window, i)));
+            i = i + 1;
+        }
+
+        if (dhvani_fft_in_place(real, imag) == 0) {
+            vec_push(frames, dh_vec_zeros(num_bins));
+            pos = pos + hop_size;
+        } else {
+            var magnitudes = dh_vec_zeros(num_bins);
+            var k = 0;
+            while (k < num_bins) {
+                var re = vec_get(real, k);
+                var im = vec_get(imag, k);
+                var mag = f64_div(f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im))), f64_from(window_size));
+                vec_set(magnitudes, k, mag);
+                k = k + 1;
+            }
+            vec_push(frames, magnitudes);
+            pos = pos + hop_size;
+        }
+    }
+    return frames;
+}
+
+# build the Spectrogram result struct from computed frames + metadata.
+#must_use
+fn dhvani_stft_make_spectrogram(frames, num_bins, sample_rate, window_size, hop_size) {
+    var self = alloc(sizeof(DhSpectrogram));
+    DhSpectrogram_set_frames(self, frames);
+    DhSpectrogram_set_num_bins(self, num_bins);
+    DhSpectrogram_set_freq_resolution(self, f64_div(f64_from(sample_rate), f64_from(window_size)));
+    DhSpectrogram_set_time_resolution(self, f64_div(f64_from(hop_size), f64_from(sample_rate)));
+    DhSpectrogram_set_sample_rate(self, sample_rate);
+    return self;
+}
+
+# stft(buf, window_size, hop_size) -- Hann-windowed spectrogram, or 0 on error.
+# Errors: empty buffer, window_size not a power of two, window_size < 4, hop_size == 0.
+#must_use
+fn dhvani_stft(buf, window_size, hop_size) {
+    if (vec_len(DhAudioBuffer_samples(buf)) == 0) { return 0; }
+    if (dh_is_pow2(window_size) == 0) { return 0; }
+    if (window_size < 4) { return 0; }
+    if (hop_size == 0) { return 0; }
+    var num_bins = window_size / 2;
+    var window = dhvani_stft_hann_window(window_size);
+    var frames = dhvani_stft_run(window, window_size, buf, hop_size);
+    return dhvani_stft_make_spectrogram(frames, num_bins, DhAudioBuffer_sample_rate(buf), window_size, hop_size);
+}
+
+# ---- StftProcessor: cached Hann window ----
+#derive(accessors)
+struct DhStftProcessor { window; window_size; }
+
+# new(window_size) -- precompute the Hann window; 0 if window not pow2 or < 4.
+#must_use
+fn dhvani_stftproc_new(window_size) {
+    if (dh_is_pow2(window_size) == 0) { return 0; }
+    if (window_size < 4) { return 0; }
+    var self = alloc(sizeof(DhStftProcessor));
+    DhStftProcessor_set_window(self, dhvani_stft_hann_window(window_size));
+    DhStftProcessor_set_window_size(self, window_size);
+    return self;
+}
+
+# compute(self, buf, hop_size) -- spectrogram using the cached window, or 0 on error.
+# Errors: empty buffer, hop_size == 0.
+#must_use
+fn dhvani_stftproc_compute(self, buf, hop_size) {
+    if (vec_len(DhAudioBuffer_samples(buf)) == 0) { return 0; }
+    if (hop_size == 0) { return 0; }
+    var window_size = DhStftProcessor_window_size(self);
+    var num_bins = window_size / 2;
+    var frames = dhvani_stft_run(DhStftProcessor_window(self), window_size, buf, hop_size);
+    return dhvani_stft_make_spectrogram(frames, num_bins, DhAudioBuffer_sample_rate(buf), window_size, hop_size);
+}
+
+# window size.
+#inline
+#must_use
+fn dhvani_stftproc_window_size(self) { return DhStftProcessor_window_size(self); }

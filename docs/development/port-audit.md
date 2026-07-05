@@ -305,10 +305,21 @@ independently reviewed (hex constants, dry/wet blend, reduction formula) — par
   centroid/rolloff + loudness_lufs/is_silent/suggest_gain (`log10`=ln/F64_LN10). **19 green**.
 - ✅ `fft` → `src/fft.cyr` — radix-2 Cooley-Tukey `fft_in_place` + Hann-windowed
   `spectrum_fft` (pow2 helpers; rounds window down). **6 green**.
-- ⬜ Next: `dynamics`, `loudness` (R128, needs biquad), `stft`/`chroma`
-  (need FFT), `convolution`/`noise_reduction` (need fft_in_place), `key` (chroma),
-  `onset`, `beat`. Then the deferred `buffer/ops::normalize_to_lufs` +
-  `resample` spectrum test unblock (fft/loudness now available).
+- ✅ `dynamics`(30), `loudness`(5), `stft`(7), `chroma`(6), `convolution`(10),
+  `noise_reduction`(8), `key`(7), `onset`(14), `beat`(7) — ported via a 10-agent
+  workflow (6 parallel → key+onset → beat → verify). Independently reviewed:
+  loudness K-weighting coeffs (`HighShelf 4dB/1681/0.707` + `HighPass 38/0.5`),
+  convolution IFFT (conjugate trick, `real/N`), chroma pitch-mapping — parity holds.
+
+**Waves A+B+C+D COMPLETE — DSP + analysis ported (38/64, 547 assertions).**
+
+Now-unblocked (fft/loudness available), to re-enable during Wave G assembly:
+`buffer/ops::normalize_to_lufs` (needs loudness `measure_r128`) + `resample`
+`sine_frequency_preserved` (needs `spectrum_dft`).
+
+Next: **Wave E** — MIDI (`midi/{mod,voice,routing,v2,translate}`), `meter`
+(lock-free peak metering), `graph` (RT-safe node graph, 1174 LOC — largest
+module), and `capture/{mod,record}` (portable; `capture/pw` stays platform-blocked).
 
 ### Cyrius idioms confirmed (this port)
 

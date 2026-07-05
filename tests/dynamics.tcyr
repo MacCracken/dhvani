@@ -1,0 +1,126 @@
+# dynamics.tcyr -- parity tests for src/dynamics.cyr.
+# Ported one-for-one from the #[test] blocks in rust-old/src/analysis/dynamics.rs.
+# No serde / Display tests exist in the oracle, so none dropped.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/dynamics.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+
+# make_sine(amplitude, freq, frames) -- mono buffer at 44100, sin(2*PI*f*i/44100).
+fn make_sine(amplitude, freq, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var phase = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(44100));
+        vec_push(v, f64_mul(amplitude, f64_sin(phase)));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, 44100);
+}
+
+# ---- silence_dynamics ----
+test_group("silence_dynamics");
+var d_sil = dhvani_analyze_dynamics(dhvani_buffer_silence(1, 4096, 44100));
+assert_eq(vec_get(dhvani_dynamics_peak(d_sil), 0), 0, "peak[0] == 0.0");
+# peak_db[0] is infinite (-inf).
+assert_eq(dhvani_is_finite(vec_get(dhvani_dynamics_peak_db(d_sil), 0)), 0, "peak_db[0] infinite");
+assert_eq(vec_get(dhvani_dynamics_rms(d_sil), 0), 0, "rms[0] == 0.0");
+assert_eq(dhvani_dynamics_frame_count(d_sil), 4096, "frame_count == 4096");
+assert_eq(dhvani_dynamics_channel_count(d_sil), 1, "channel_count == 1");
+
+# ---- sine_dynamics ----
+test_group("sine_dynamics");
+var d_sine = dhvani_analyze_dynamics(make_sine(0.8, 440.0, 44100));
+assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_peak(d_sine), 0), 0.8)), 0.01), "peak ~ 0.8");
+assert(f64_gt(vec_get(dhvani_dynamics_rms(d_sine), 0), 0.5), "rms > 0.5");
+assert(f64_gt(vec_get(dhvani_dynamics_crest_factor_db(d_sine), 0), 0), "crest factor > 0");
+assert(f64_gt(dhvani_dynamics_dynamic_range_db(d_sine), 0), "dynamic range > 0");
+
+# ---- true_peak_exceeds_sample_peak ----
+test_group("true_peak_exceeds_sample_peak");
+var tp_samples = vec_new();
+vec_push(tp_samples, 0.9);
+vec_push(tp_samples, f64_neg(0.9));
+vec_push(tp_samples, 0.9);
+vec_push(tp_samples, f64_neg(0.9));
+vec_push(tp_samples, 0.9);
+vec_push(tp_samples, f64_neg(0.9));
+vec_push(tp_samples, 0.9);
+vec_push(tp_samples, f64_neg(0.9));
+var d_tp = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(tp_samples, 1, 44100));
+assert(f64_ge(vec_get(dhvani_dynamics_true_peak(d_tp), 0), f64_sub(vec_get(dhvani_dynamics_peak(d_tp), 0), 0.01)), "true_peak >= peak - 0.01");
+
+# ---- crest_factor_positive_for_sine ----
+test_group("crest_factor_positive_for_sine");
+var d_cf = dhvani_analyze_dynamics(make_sine(1.0, 1000.0, 44100));
+assert(f64_gt(vec_get(dhvani_dynamics_crest_factor_db(d_cf), 0), 2.0), "crest factor > 2.0");
+assert(f64_lt(vec_get(dhvani_dynamics_crest_factor_db(d_cf), 0), 4.0), "crest factor < 4.0");
+
+# ---- dynamics_all_finite ----
+test_group("dynamics_all_finite");
+var d_fin = dhvani_analyze_dynamics(make_sine(0.5, 440.0, 4096));
+assert_eq(dhvani_is_finite(vec_get(dhvani_dynamics_peak_db(d_fin), 0)), 1, "peak_db finite");
+assert_eq(dhvani_is_finite(vec_get(dhvani_dynamics_true_peak_db(d_fin), 0)), 1, "true_peak_db finite");
+assert_eq(dhvani_is_finite(vec_get(dhvani_dynamics_rms_db(d_fin), 0)), 1, "rms_db finite");
+assert_eq(dhvani_is_finite(vec_get(dhvani_dynamics_crest_factor_db(d_fin), 0)), 1, "crest_factor_db finite");
+
+# ---- stereo_independent_channels ----
+test_group("stereo_independent_channels");
+var st_frames = 1024;
+var st_data = vec_new();
+var si = 0;
+while (si < st_frames) {
+    vec_push(st_data, 0.8);    # left = loud
+    vec_push(st_data, 0.1);    # right = quiet
+    si = si + 1;
+}
+var d_st = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(st_data, 2, 44100));
+assert_eq(dhvani_dynamics_channel_count(d_st), 2, "channel_count == 2");
+assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_peak(d_st), 0), 0.8)), 0.001), "peak[0] ~ 0.8");
+assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_peak(d_st), 1), 0.1)), 0.001), "peak[1] ~ 0.1");
+assert(f64_gt(vec_get(dhvani_dynamics_peak_db(d_st), 0), vec_get(dhvani_dynamics_peak_db(d_st), 1)), "peak_db[0] > peak_db[1]");
+assert(f64_gt(vec_get(dhvani_dynamics_rms(d_st), 0), vec_get(dhvani_dynamics_rms(d_st), 1)), "rms[0] > rms[1]");
+
+# ---- max_peak_across_channels ----
+test_group("max_peak_across_channels");
+var mp_frames = 256;
+var mp_data = vec_new();
+var mpi = 0;
+while (mpi < mp_frames) {
+    vec_push(mp_data, 0.3);
+    vec_push(mp_data, 0.7);
+    mpi = mpi + 1;
+}
+var d_mp = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(mp_data, 2, 44100));
+assert(f64_lt(f64_abs(f64_sub(dhvani_dynamics_max_peak(d_mp), 0.7)), 0.001), "max_peak ~ 0.7");
+
+# ---- lufs_finite_for_signal ----
+test_group("lufs_finite_for_signal");
+var d_lufs = dhvani_analyze_dynamics(make_sine(0.5, 1000.0, 44100));
+assert_eq(dhvani_is_finite(dhvani_dynamics_lufs(d_lufs)), 1, "lufs finite");
+assert(f64_lt(dhvani_dynamics_lufs(d_lufs), 0), "lufs < 0.0");
+
+# ---- empty_buffer ----
+test_group("empty_buffer");
+var d_empty = dhvani_analyze_dynamics(dhvani_buffer_silence(1, 0, 44100));
+assert_eq(dhvani_dynamics_frame_count(d_empty), 0, "frame_count == 0");
+assert_eq(vec_get(dhvani_dynamics_peak(d_empty), 0), 0, "peak[0] == 0.0");
+assert_eq(vec_get(dhvani_dynamics_rms(d_empty), 0), 0, "rms[0] == 0.0");
+
+# ---- single_frame ----
+test_group("single_frame");
+var sf_data = vec_new();
+vec_push(sf_data, 0.75);
+var d_sf = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(sf_data, 1, 44100));
+assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_peak(d_sf), 0), 0.75)), 0.001), "peak ~ 0.75");
+assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_rms(d_sf), 0), 0.75)), 0.001), "rms ~ 0.75");
+assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_true_peak(d_sf), 0), 0.75)), 0.001), "true_peak ~ 0.75");
+
+var rc = assert_summary();
+syscall(60, rc);

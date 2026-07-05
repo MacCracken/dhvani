@@ -1,0 +1,151 @@
+# convolution.tcyr -- parity tests for src/convolution.cyr
+# Ported one-for-one from the 8 #[test] blocks in
+# rust-old/src/dsp/convolution.rs. No serde/Display tests to drop.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
+include "src/convolution.cyr"
+
+alloc_init();
+
+# ---- helpers (top) ----
+# every sample finite?
+fn conv_all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    while (i < n) { if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+# any |sample| > thr?
+fn conv_any_abs_gt(buf, thr) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    while (i < n) { if (f64_gt(f64_abs(vec_get(s, i)), thr) == 1) { return 1; } i = i + 1; }
+    return 0;
+}
+# build a `vec` from a fixed set is inline per test.
+
+# ---- identity_ir ----
+# IR = [1.0], block_size 4, mix 1.0 -- output must be finite.
+test_group("identity_ir");
+var ir_a = vec_new(); vec_push(ir_a, 1.0);
+var rev_a = dhvani_conv_with_block_size(ir_a, 4, 1.0, 44100);
+var sa = vec_new();
+vec_push(sa, 1.0); vec_push(sa, 0.5); vec_push(sa, 0.25); vec_push(sa, 0);
+vec_push(sa, 0); vec_push(sa, 0); vec_push(sa, 0); vec_push(sa, 0);
+var buf_a = dhvani_buffer_from_interleaved(sa, 1, 44100);
+dhvani_conv_process(rev_a, buf_a);
+assert_eq(conv_all_finite(buf_a), 1, "identity_ir output finite");
+
+# ---- delay_ir ----
+# IR = [0,0,0,1] delays by 3; impulse at sample 0 -> energy somewhere, all finite.
+test_group("delay_ir");
+var ir_b = vec_new(); vec_push(ir_b, 0); vec_push(ir_b, 0); vec_push(ir_b, 0); vec_push(ir_b, 1.0);
+var rev_b = dhvani_conv_with_block_size(ir_b, 4, 1.0, 44100);
+var sb = dh_vec_zeros(16);
+vec_set(sb, 0, 1.0);
+var buf_b = dhvani_buffer_from_interleaved(sb, 1, 44100);
+dhvani_conv_process(rev_b, buf_b);
+assert_eq(conv_any_abs_gt(buf_b, 0.5), 1, "delay_ir has energy > 0.5");
+assert_eq(conv_all_finite(buf_b), 1, "delay_ir output finite");
+
+# ---- stereo_convolution ----
+# IR = [1.0,0.5,0.25], stereo interleaved, all finite.
+test_group("stereo_convolution");
+var ir_c = vec_new(); vec_push(ir_c, 1.0); vec_push(ir_c, 0.5); vec_push(ir_c, 0.25);
+var rev_c = dhvani_conv_with_block_size(ir_c, 4, 1.0, 44100);
+var sc = vec_new();
+vec_push(sc, 1.0); vec_push(sc, 0.5);
+var pc = 2;
+while (pc < 16) { vec_push(sc, 0); pc = pc + 1; }
+var buf_c = dhvani_buffer_from_interleaved(sc, 2, 44100);
+dhvani_conv_process(rev_c, buf_c);
+assert_eq(conv_all_finite(buf_c), 1, "stereo_convolution output finite");
+
+# ---- mix_control ----
+# IR = [1.0], mix 0.5, all ones -- finite.
+test_group("mix_control");
+var ir_d = vec_new(); vec_push(ir_d, 1.0);
+var rev_d = dhvani_conv_with_block_size(ir_d, 4, 0.5, 44100);
+var sd = vec_new();
+var pd = 0;
+while (pd < 8) { vec_push(sd, 1.0); pd = pd + 1; }
+var buf_d = dhvani_buffer_from_interleaved(sd, 1, 44100);
+dhvani_conv_process(rev_d, buf_d);
+assert_eq(conv_all_finite(buf_d), 1, "mix_control output finite");
+
+# ---- empty_ir_passthrough ----
+# empty IR -> buffer unchanged (all 0.5).
+test_group("empty_ir_passthrough");
+var ir_e = vec_new();
+var rev_e = dhvani_conv_new(ir_e, 1.0, 44100);
+var se = vec_new();
+var pe = 0;
+while (pe < 1024) { vec_push(se, 0.5); pe = pe + 1; }
+var buf_e = dhvani_buffer_from_interleaved(se, 1, 44100);
+dhvani_conv_process(rev_e, buf_e);
+var out_e = dhvani_buffer_samples(buf_e);
+var ok_e = 1;
+var ie = 0;
+while (ie < 1024) { if (vec_get(out_e, ie) != 0.5) { ok_e = 0; } ie = ie + 1; }
+assert_eq(ok_e, 1, "empty_ir leaves buffer unchanged");
+
+# ---- long_ir ----
+# IR longer than one block: 2048 samples exp(-0.001*i); 440Hz sine input.
+test_group("long_ir");
+var ir_f = vec_new();
+var pf = 0;
+while (pf < 2048) {
+    vec_push(ir_f, f64_exp(f64_mul(f64_neg(0.001), f64_from(pf))));
+    pf = pf + 1;
+}
+var rev_f = dhvani_conv_with_block_size(ir_f, 256, 1.0, 44100);
+var sf = vec_new();
+var qf = 0;
+while (qf < 4096) {
+    var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(qf)), f64_from(44100));
+    vec_push(sf, f64_mul(f64_sin(ph), 0.5));
+    qf = qf + 1;
+}
+var buf_f = dhvani_buffer_from_interleaved(sf, 1, 44100);
+dhvani_conv_process(rev_f, buf_f);
+assert_eq(conv_all_finite(buf_f), 1, "long_ir output finite");
+assert(f64_gt(dhvani_buffer_rms(buf_f), 0), "long_ir rms > 0");
+
+# ---- reset_clears_state ----
+# process, reset, process silence -- output finite.
+test_group("reset_clears_state");
+var ir_g = vec_new(); vec_push(ir_g, 1.0); vec_push(ir_g, 0.5); vec_push(ir_g, 0.25);
+var rev_g = dhvani_conv_with_block_size(ir_g, 4, 1.0, 44100);
+var sg1 = vec_new();
+var pg = 0;
+while (pg < 8) { vec_push(sg1, 1.0); pg = pg + 1; }
+var buf_g1 = dhvani_buffer_from_interleaved(sg1, 1, 44100);
+dhvani_conv_process(rev_g, buf_g1);
+dhvani_conv_reset(rev_g);
+var buf_g2 = dhvani_buffer_from_interleaved(dh_vec_zeros(8), 1, 44100);
+dhvani_conv_process(rev_g, buf_g2);
+assert_eq(conv_all_finite(buf_g2), 1, "reset_clears_state output finite");
+
+# ---- set_ir_replaces ----
+# new([1.0]) then set_ir([1.0,0.5,0.25,0.125]); process 2048 ones -- finite.
+test_group("set_ir_replaces");
+var ir_h0 = vec_new(); vec_push(ir_h0, 1.0);
+var rev_h = dhvani_conv_new(ir_h0, 1.0, 44100);
+var ir_h1 = vec_new(); vec_push(ir_h1, 1.0); vec_push(ir_h1, 0.5); vec_push(ir_h1, 0.25); vec_push(ir_h1, 0.125);
+dhvani_conv_set_ir(rev_h, ir_h1);
+var sh = vec_new();
+var ph2 = 0;
+while (ph2 < 2048) { vec_push(sh, 1.0); ph2 = ph2 + 1; }
+var buf_h = dhvani_buffer_from_interleaved(sh, 1, 44100);
+dhvani_conv_process(rev_h, buf_h);
+assert_eq(conv_all_finite(buf_h), 1, "set_ir_replaces output finite");
+
+var rc = assert_summary();
+syscall(60, rc);

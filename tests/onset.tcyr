@@ -1,0 +1,117 @@
+# onset.tcyr -- parity tests for src/onset.cyr
+# Ported one-for-one from the 5 #[test] blocks in rust-old/src/analysis/onset.rs:
+#   silence_no_onsets, impulse_detected, multiple_onsets,
+#   strengths_match_positions, high_threshold_fewer_onsets.
+# (No serde / Display tests to drop.)
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
+include "src/stft.cyr"
+include "src/onset.cyr"
+
+alloc_init();
+
+# integer absolute value (no stdlib int-abs).
+fn iabs(x) {
+    if (x < 0) { return 0 - x; }
+    return x;
+}
+
+# a `vec` of `n` zeros with samples[lo..hi] set to `val` (fill range).
+fn make_impulse(n, lo, hi, val) {
+    var v = dh_vec_zeros(n);
+    var i = lo;
+    while (i < hi) { vec_set(v, i, val); i = i + 1; }
+    return v;
+}
+
+# ---- silence_no_onsets ----
+# let buf = AudioBuffer::silence(1, 44100, 44100);
+# let result = detect_onsets(&buf, 2048, 512, 0.3).unwrap();
+# assert!(result.positions().is_empty()); assert_eq!(result.count(), 0);
+test_group("silence_no_onsets");
+var r1 = dhvani_detect_onsets(dhvani_buffer_silence(1, 44100, 44100), 2048, 512, 0.3);
+assert(r1 != 0, "silence: non-null result");
+assert_eq(vec_len(dhvani_onset_positions(r1)), 0, "silence: positions empty");
+assert_eq(dhvani_onset_count(r1), 0, "silence: count == 0");
+
+# ---- impulse_detected ----
+# samples[22050..22150].fill(0.9); from_interleaved(_, 1, 44100);
+# detect_onsets(&buf, 2048, 512, 0.2). positions non-empty, nearest to 22050
+# is within 2048 samples.
+test_group("impulse_detected");
+var imp = make_impulse(44100, 22050, 22150, 0.9);
+var r2 = dhvani_detect_onsets(dhvani_buffer_from_interleaved(imp, 1, 44100), 2048, 512, 0.2);
+assert(r2 != 0, "impulse: non-null result");
+var pos2 = dhvani_onset_positions(r2);
+assert(vec_len(pos2) > 0, "impulse: positions non-empty");
+# min_by_key(|&&p| (p - 22050).unsigned_abs()): earliest index wins ties.
+var np2 = vec_len(pos2);
+var nearest = vec_get(pos2, 0);
+var best = iabs(vec_get(pos2, 0) - 22050);
+var k2 = 1;
+while (k2 < np2) {
+    var pk = vec_get(pos2, k2);
+    var dk = iabs(pk - 22050);
+    if (dk < best) { best = dk; nearest = pk; }
+    k2 = k2 + 1;
+}
+assert(iabs(nearest - 22050) < 2048, "impulse: onset near 22050");
+
+# ---- multiple_onsets ----
+# samples[10000..10100].fill(0.8); samples[30000..30100].fill(0.8);
+# detect_onsets(&buf, 2048, 512, 0.2). positions.len() >= 2.
+test_group("multiple_onsets");
+var mv = dh_vec_zeros(44100);
+var a = 10000;
+while (a < 10100) { vec_set(mv, a, 0.8); a = a + 1; }
+var b = 30000;
+while (b < 30100) { vec_set(mv, b, 0.8); b = b + 1; }
+var r3 = dhvani_detect_onsets(dhvani_buffer_from_interleaved(mv, 1, 44100), 2048, 512, 0.2);
+assert(r3 != 0, "multiple: non-null result");
+assert(vec_len(dhvani_onset_positions(r3)) >= 2, "multiple: >= 2 onsets");
+
+# ---- strengths_match_positions ----
+# samples[22050..22150].fill(0.9); detect_onsets(&buf, 2048, 512, 0.2).
+# positions.len() == strengths.len(); each strength in (0.0, 1.0].
+test_group("strengths_match_positions");
+var imp4 = make_impulse(44100, 22050, 22150, 0.9);
+var r4 = dhvani_detect_onsets(dhvani_buffer_from_interleaved(imp4, 1, 44100), 2048, 512, 0.2);
+assert(r4 != 0, "strengths: non-null result");
+var pos4 = dhvani_onset_positions(r4);
+var str4 = dhvani_onset_strengths(r4);
+assert_eq(vec_len(pos4), vec_len(str4), "strengths: len matches positions");
+var ns4 = vec_len(str4);
+var s4 = 0;
+var ok4 = 1;
+while (s4 < ns4) {
+    var sv4 = vec_get(str4, s4);
+    if (f64_gt(sv4, 0) == 0) { ok4 = 0; }
+    if (f64_le(sv4, 1.0) == 0) { ok4 = 0; }
+    s4 = s4 + 1;
+}
+assert_eq(ok4, 1, "strengths: each in (0, 1]");
+
+# ---- high_threshold_fewer_onsets ----
+# samples[10000..10050].fill(0.3); samples[30000..30050].fill(0.9);
+# sensitive = detect_onsets(_, 2048, 512, 0.1); strict = detect_onsets(_, 2048, 512, 0.5);
+# assert!(sensitive.positions.len() >= strict.positions.len());
+test_group("high_threshold_fewer_onsets");
+var hv = dh_vec_zeros(44100);
+var c = 10000;
+while (c < 10050) { vec_set(hv, c, 0.3); c = c + 1; }
+var d = 30000;
+while (d < 30050) { vec_set(hv, d, 0.9); d = d + 1; }
+var hbuf = dhvani_buffer_from_interleaved(hv, 1, 44100);
+var sensitive = dhvani_detect_onsets(hbuf, 2048, 512, 0.1);
+var strict = dhvani_detect_onsets(hbuf, 2048, 512, 0.5);
+assert(sensitive != 0, "threshold: sensitive non-null");
+assert(strict != 0, "threshold: strict non-null");
+assert(vec_len(dhvani_onset_positions(sensitive)) >= vec_len(dhvani_onset_positions(strict)), "sensitive >= strict onset count");
+
+var rc = assert_summary();
+syscall(60, rc);

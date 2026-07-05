@@ -1,0 +1,82 @@
+# stft.tcyr -- parity tests for src/stft.cyr
+# Ported one-for-one from the 4 #[test] blocks in rust-old/src/analysis/stft.rs:
+#   silence_spectrogram, sine_spectrogram_has_energy, time_resolution, freq_resolution.
+# (No serde / Display tests to drop.)
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
+include "src/stft.cyr"
+
+alloc_init();
+
+fn near(a, b, tol) { return f64_lt(f64_abs(f64_sub(a, b)), tol); }
+fn make_sine(freq, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        vec_push(v, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr))));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+
+# ---- silence_spectrogram ----
+# let buf = AudioBuffer::silence(1, 4096, 44100);
+# let sg = stft(&buf, 1024, 512).unwrap();
+# assert!(sg.num_frames() > 0); assert_eq!(sg.num_bins, 512);
+# all magnitudes zero
+test_group("silence_spectrogram");
+var sg1 = dhvani_stft(dhvani_buffer_silence(1, 4096, 44100), 1024, 512);
+assert(dhvani_spectrogram_num_frames(sg1) > 0, "num_frames > 0");
+assert_eq(dhvani_spectrogram_num_bins(sg1), 512, "num_bins == 512");
+var nf1 = dhvani_spectrogram_num_frames(sg1);
+var fi1 = 0;
+var allzero = 1;
+while (fi1 < nf1) {
+    var frame1 = dhvani_spectrogram_frame(sg1, fi1);
+    var b1 = 0;
+    while (b1 < 512) { if (vec_get(frame1, b1) != 0) { allzero = 0; } b1 = b1 + 1; }
+    fi1 = fi1 + 1;
+}
+assert_eq(allzero, 1, "silence mags all 0");
+
+# ---- sine_spectrogram_has_energy ----
+# 44100 samples of a 440 Hz sine, stft(2048, 1024).
+# assert!(sg.num_frames() > 10); each frame total > 0.
+test_group("sine_spectrogram_has_energy");
+var sg2 = dhvani_stft(make_sine(440.0, 44100, 44100), 2048, 1024);
+assert(dhvani_spectrogram_num_frames(sg2) > 10, "num_frames > 10");
+var nf2 = dhvani_spectrogram_num_frames(sg2);
+var fi2 = 0;
+var all_pos = 1;
+while (fi2 < nf2) {
+    var frame2 = dhvani_spectrogram_frame(sg2, fi2);
+    var nb2 = vec_len(frame2);
+    var total2 = 0;
+    var b2 = 0;
+    while (b2 < nb2) { total2 = f64_add(total2, vec_get(frame2, b2)); b2 = b2 + 1; }
+    if (f64_gt(total2, 0) == 0) { all_pos = 0; }
+    fi2 = fi2 + 1;
+}
+assert_eq(all_pos, 1, "each frame total > 0");
+
+# ---- time_resolution ----
+# silence(1, 44100, 44100); stft(2048, 1024);
+# (sg.time_resolution - 1024.0/44100.0).abs() < 0.001
+test_group("time_resolution");
+var sg3 = dhvani_stft(dhvani_buffer_silence(1, 44100, 44100), 2048, 1024);
+assert(near(dhvani_spectrogram_time_resolution(sg3), f64_div(f64_from(1024), f64_from(44100)), 0.001), "time_resolution ~ 1024/44100");
+
+# ---- freq_resolution ----
+# silence(1, 4096, 48000); stft(2048, 1024);
+# (sg.freq_resolution - 48000.0/2048.0).abs() < 0.1
+test_group("freq_resolution");
+var sg4 = dhvani_stft(dhvani_buffer_silence(1, 4096, 48000), 2048, 1024);
+assert(near(dhvani_spectrogram_freq_resolution(sg4), f64_div(f64_from(48000), f64_from(2048)), 0.1), "freq_resolution ~ 48000/2048");
+
+var rc = assert_summary();
+syscall(60, rc);

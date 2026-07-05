@@ -1,0 +1,267 @@
+# dynamics.cyr -- Dynamics analysis: per-channel peak, RMS, true peak, crest
+# factor, dynamic range, LUFS. Ports rust-old/src/analysis/dynamics.rs.
+# L1: deps error + simd + buffer + abaco (amplitude_to_db). Does not use Spectrum.
+#
+# DynamicsAnalysis result -> a struct handle with vec fields (peak/peak_db/
+# true_peak/true_peak_db/rms/rms_db/crest_factor_db) and scalar fields
+# (lufs, dynamic_range_db, frame_count, channel_count). #[must_use] fns ->
+# plain fns; the analyze entry point returns a valid handle. serde/Display N/A.
+
+#derive(accessors)
+struct DhDynamicsAnalysis {
+    peak;
+    peak_db;
+    true_peak;
+    true_peak_db;
+    rms;
+    rms_db;
+    crest_factor_db;
+    lufs;
+    dynamic_range_db;
+    frame_count;
+    channel_count;
+}
+
+# --- accessors (return the whole per-channel vec / scalar) ---
+#inline
+#must_use
+fn dhvani_dynamics_peak(self) { return DhDynamicsAnalysis_peak(self); }
+#inline
+#must_use
+fn dhvani_dynamics_peak_db(self) { return DhDynamicsAnalysis_peak_db(self); }
+#inline
+#must_use
+fn dhvani_dynamics_true_peak(self) { return DhDynamicsAnalysis_true_peak(self); }
+#inline
+#must_use
+fn dhvani_dynamics_true_peak_db(self) { return DhDynamicsAnalysis_true_peak_db(self); }
+#inline
+#must_use
+fn dhvani_dynamics_rms(self) { return DhDynamicsAnalysis_rms(self); }
+#inline
+#must_use
+fn dhvani_dynamics_rms_db(self) { return DhDynamicsAnalysis_rms_db(self); }
+#inline
+#must_use
+fn dhvani_dynamics_crest_factor_db(self) { return DhDynamicsAnalysis_crest_factor_db(self); }
+#inline
+#must_use
+fn dhvani_dynamics_lufs(self) { return DhDynamicsAnalysis_lufs(self); }
+#inline
+#must_use
+fn dhvani_dynamics_dynamic_range_db(self) { return DhDynamicsAnalysis_dynamic_range_db(self); }
+#inline
+#must_use
+fn dhvani_dynamics_frame_count(self) { return DhDynamicsAnalysis_frame_count(self); }
+#inline
+#must_use
+fn dhvani_dynamics_channel_count(self) { return DhDynamicsAnalysis_channel_count(self); }
+
+# max_peak() -- max peak across channels (linear), folded from 0.0.
+#must_use
+fn dhvani_dynamics_max_peak(self) {
+    var peak = DhDynamicsAnalysis_peak(self);
+    var n = vec_len(peak);
+    var acc = 0;
+    var i = 0;
+    while (i < n) { acc = f64_max(acc, vec_get(peak, i)); i = i + 1; }
+    return acc;
+}
+
+# max_peak_db() -- max peak dB across channels, folded from -inf.
+#must_use
+fn dhvani_dynamics_max_peak_db(self) {
+    var pdb = DhDynamicsAnalysis_peak_db(self);
+    var n = vec_len(pdb);
+    var acc = DH_NEG_INF;
+    var i = 0;
+    while (i < n) { acc = f64_max(acc, vec_get(pdb, i)); i = i + 1; }
+    return acc;
+}
+
+# max_true_peak() -- max true peak across channels (linear), folded from 0.0.
+#must_use
+fn dhvani_dynamics_max_true_peak(self) {
+    var tp = DhDynamicsAnalysis_true_peak(self);
+    var n = vec_len(tp);
+    var acc = 0;
+    var i = 0;
+    while (i < n) { acc = f64_max(acc, vec_get(tp, i)); i = i + 1; }
+    return acc;
+}
+
+# max_true_peak_db() -- max true peak dB across channels, folded from -inf.
+#must_use
+fn dhvani_dynamics_max_true_peak_db(self) {
+    var tpdb = DhDynamicsAnalysis_true_peak_db(self);
+    var n = vec_len(tpdb);
+    var acc = DH_NEG_INF;
+    var i = 0;
+    while (i < n) { acc = f64_max(acc, vec_get(tpdb, i)); i = i + 1; }
+    return acc;
+}
+
+# mean_rms() -- mean of per-channel rms (linear); 0.0 for empty.
+#must_use
+fn dhvani_dynamics_mean_rms(self) {
+    var rms = DhDynamicsAnalysis_rms(self);
+    var n = vec_len(rms);
+    if (n == 0) { return 0; }
+    var sum = 0;
+    var i = 0;
+    while (i < n) { sum = f64_add(sum, vec_get(rms, i)); i = i + 1; }
+    return f64_div(sum, f64_from(n));
+}
+
+# mean_crest_factor_db() -- mean of per-channel crest factor dB; 0.0 for empty.
+#must_use
+fn dhvani_dynamics_mean_crest_factor_db(self) {
+    var cf = DhDynamicsAnalysis_crest_factor_db(self);
+    var n = vec_len(cf);
+    if (n == 0) { return 0; }
+    var sum = 0;
+    var i = 0;
+    while (i < n) { sum = f64_add(sum, vec_get(cf, i)); i = i + 1; }
+    return f64_div(sum, f64_from(n));
+}
+
+# analyze_dynamics(buf) -- comprehensive per-channel dynamics analysis.
+#must_use
+fn dhvani_analyze_dynamics(buf) {
+    var ch = DhAudioBuffer_channels(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var samples = DhAudioBuffer_samples(buf);
+
+    var peak = dh_vec_zeros(ch);
+    var rms_sum = dh_vec_zeros(ch);
+    var true_peak = dh_vec_zeros(ch);
+
+    # Per-channel peak and RMS accumulation.
+    var c = 0;
+    while (c < ch) {
+        var frame = 0;
+        while (frame < frames) {
+            var s = vec_get(samples, frame * ch + c);
+            var absv = f64_abs(s);
+            if (f64_gt(absv, vec_get(peak, c)) == 1) { vec_set(peak, c, absv); }
+            vec_set(rms_sum, c, f64_add(vec_get(rms_sum, c), f64_mul(s, s)));
+            frame = frame + 1;
+        }
+
+        # True peak: 4x oversampled inter-sample detection using 4-point cubic
+        # Hermite (Catmull-Rom) interpolation.
+        if (frames > 1) {
+            var tp = vec_get(peak, c);
+            var f2 = 0;
+            var last = frames - 1;
+            while (f2 < last) {
+                var s0 = vec_get(samples, f2 * ch + c);
+                var s1 = vec_get(samples, (f2 + 1) * ch + c);
+                var sm1 = s0;
+                if (f2 > 0) { sm1 = vec_get(samples, (f2 - 1) * ch + c); }
+                var s2 = s1;
+                if ((f2 + 2) < frames) { s2 = vec_get(samples, (f2 + 2) * ch + c); }
+                var k = 1;
+                while (k < 4) {
+                    var t = f64_div(f64_from(k), 4.0);
+                    var t2 = f64_mul(t, t);
+                    var t3 = f64_mul(t2, t);
+                    # 0.5 * (2*s0 + (-sm1 + s1)*t
+                    #        + (2*sm1 - 5*s0 + 4*s1 - s2)*t2
+                    #        + (-sm1 + 3*s0 - 3*s1 + s2)*t3)
+                    var c0 = f64_mul(2.0, s0);
+                    var c1 = f64_mul(f64_add(f64_neg(sm1), s1), t);
+                    var c2quad = f64_sub(f64_add(f64_sub(f64_mul(2.0, sm1), f64_mul(5.0, s0)), f64_mul(4.0, s1)), s2);
+                    var c2t = f64_mul(c2quad, t2);
+                    var c3cub = f64_add(f64_sub(f64_add(f64_neg(sm1), f64_mul(3.0, s0)), f64_mul(3.0, s1)), s2);
+                    var c3t = f64_mul(c3cub, t3);
+                    var interp = f64_mul(0.5, f64_add(f64_add(f64_add(c0, c1), c2t), c3t));
+                    tp = f64_max(tp, f64_abs(interp));
+                    k = k + 1;
+                }
+                f2 = f2 + 1;
+            }
+            vec_set(true_peak, c, tp);
+        }
+        elif (frames == 1) {
+            vec_set(true_peak, c, vec_get(peak, c));
+        }
+
+        c = c + 1;
+    }
+
+    # rms per channel: sqrt(sum / frames), or 0.0 when frames == 0.
+    var rms = dh_vec_zeros(ch);
+    var ri = 0;
+    while (ri < ch) {
+        if (frames > 0) {
+            vec_set(rms, ri, f64_sqrt(f64_div(vec_get(rms_sum, ri), f64_from(frames))));
+        }
+        ri = ri + 1;
+    }
+
+    # dB conversions per channel.
+    var peak_db = dh_vec_zeros(ch);
+    var rms_db = dh_vec_zeros(ch);
+    var true_peak_db = dh_vec_zeros(ch);
+    var di = 0;
+    while (di < ch) {
+        vec_set(peak_db, di, amplitude_to_db(vec_get(peak, di)));
+        vec_set(rms_db, di, amplitude_to_db(vec_get(rms, di)));
+        vec_set(true_peak_db, di, amplitude_to_db(vec_get(true_peak, di)));
+        di = di + 1;
+    }
+
+    # crest factor: p - r if r > -inf, else 0.0.
+    var crest_factor_db = dh_vec_zeros(ch);
+    var ci = 0;
+    while (ci < ch) {
+        var pval = vec_get(peak_db, ci);
+        var rval = vec_get(rms_db, ci);
+        if (f64_gt(rval, DH_NEG_INF) == 1) {
+            vec_set(crest_factor_db, ci, f64_sub(pval, rval));
+        }
+        ci = ci + 1;
+    }
+
+    # Simplified LUFS: mean RMS-squared across channels in LUFS scale.
+    var total_sq_sum = 0;
+    var ti = 0;
+    while (ti < ch) { total_sq_sum = f64_add(total_sq_sum, vec_get(rms_sum, ti)); ti = ti + 1; }
+    var frames_denom = frames;
+    if (frames_denom < 1) { frames_denom = 1; }
+    var total_rms_sq = f64_div(total_sq_sum, f64_mul(f64_from(ch), f64_from(frames_denom)));
+    var lufs = DH_NEG_INF;
+    # 1e-20 threshold. log10(x) = ln(x)/ln(10) (no f64_log10 in stdlib).
+    if (f64_gt(total_rms_sq, 0x3BC79CA10C924223) == 1) {
+        var log10_rms = f64_div(f64_ln(total_rms_sq), F64_LN10);
+        lufs = f64_add(f64_neg(0.691), f64_mul(10.0, log10_rms));
+    }
+
+    # dynamic range: max peak dB - mean RMS dB.
+    var max_peak_db = DH_NEG_INF;
+    var mi = 0;
+    while (mi < ch) { max_peak_db = f64_max(max_peak_db, vec_get(peak_db, mi)); mi = mi + 1; }
+    var mean_rms_db = DH_NEG_INF;
+    if (ch > 0) {
+        var sum_rms_db = 0;
+        var mj = 0;
+        while (mj < ch) { sum_rms_db = f64_add(sum_rms_db, vec_get(rms_db, mj)); mj = mj + 1; }
+        mean_rms_db = f64_div(sum_rms_db, f64_from(ch));
+    }
+    var dynamic_range_db = f64_sub(max_peak_db, mean_rms_db);
+
+    var self = alloc(sizeof(DhDynamicsAnalysis));
+    DhDynamicsAnalysis_set_peak(self, peak);
+    DhDynamicsAnalysis_set_peak_db(self, peak_db);
+    DhDynamicsAnalysis_set_true_peak(self, true_peak);
+    DhDynamicsAnalysis_set_true_peak_db(self, true_peak_db);
+    DhDynamicsAnalysis_set_rms(self, rms);
+    DhDynamicsAnalysis_set_rms_db(self, rms_db);
+    DhDynamicsAnalysis_set_crest_factor_db(self, crest_factor_db);
+    DhDynamicsAnalysis_set_lufs(self, lufs);
+    DhDynamicsAnalysis_set_dynamic_range_db(self, dynamic_range_db);
+    DhDynamicsAnalysis_set_frame_count(self, frames);
+    DhDynamicsAnalysis_set_channel_count(self, ch);
+    return self;
+}

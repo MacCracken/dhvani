@@ -1,0 +1,99 @@
+# chroma.cyr -- Chromagram: 12 pitch-class energies from the FFT spectrum.
+# Ports rust-old/src/analysis/chroma.rs. L1: deps error + simd + buffer +
+# abaco + analysis (Spectrum) + fft (spectrum_fft). Maps each FFT bin frequency
+# to a pitch class (round(12 * log2(freq / C0)) mod 12), accumulates squared
+# magnitude (energy) per class, normalizes to 0..1. serde + Display dropped.
+
+# ---- PITCH_CLASSES lookup (was [&str; 12]) ----
+#must_use
+fn dhvani_chroma_pitch_class_name(idx) {
+    if (idx == 0)  { return "C"; }
+    if (idx == 1)  { return "C#"; }
+    if (idx == 2)  { return "D"; }
+    if (idx == 3)  { return "D#"; }
+    if (idx == 4)  { return "E"; }
+    if (idx == 5)  { return "F"; }
+    if (idx == 6)  { return "F#"; }
+    if (idx == 7)  { return "G"; }
+    if (idx == 8)  { return "G#"; }
+    if (idx == 9)  { return "A"; }
+    if (idx == 10) { return "A#"; }
+    if (idx == 11) { return "B"; }
+    return "unknown";
+}
+
+#derive(accessors)
+struct DhChromagram { chroma; }
+
+# from_array(chroma) -- wrap a 12-slot `vec` of pitch-class energies.
+#must_use
+fn dhvani_chromagram_from_array(chroma) {
+    var self = alloc(sizeof(DhChromagram));
+    DhChromagram_set_chroma(self, chroma);
+    return self;
+}
+
+# chroma() -- energy per pitch class (0=C, ..., 11=B). Normalized 0..1.
+#inline
+#must_use
+fn dhvani_chromagram_chroma(self) { return DhChromagram_chroma(self); }
+
+# dominant_class() -- index of the dominant (max-energy) pitch class.
+# argmax with partial_cmp: first index reached whose value is strictly greater
+# than the running best wins (ties keep the earlier index), starting from 0.
+#must_use
+fn dhvani_chromagram_dominant_class(self) {
+    var chroma = DhChromagram_chroma(self);
+    var best_idx = 0;
+    var best_val = vec_get(chroma, 0);
+    var i = 1;
+    while (i < 12) {
+        var v = vec_get(chroma, i);
+        if (f64_gt(v, best_val) == 1) { best_val = v; best_idx = i; }
+        i = i + 1;
+    }
+    return best_idx;
+}
+
+# dominant_name() -- name of the dominant pitch class.
+#must_use
+fn dhvani_chromagram_dominant_name(self) {
+    return dhvani_chroma_pitch_class_name(dhvani_chromagram_dominant_class(self));
+}
+
+# chromagram(buf, window_size) -- compute a chromagram from an audio buffer.
+# Maps FFT bin freqs to 12 pitch classes: class = round(12*log2(freq/C0)) mod 12
+# with C0 = 16.3516 Hz. Bins below C0 or below 1 Hz are skipped. 0 on FFT error.
+#must_use
+fn dhvani_chroma_chromagram(buf, window_size) {
+    var spec = dhvani_fft_spectrum(buf, window_size);
+    if (spec == 0) { return 0; }
+    var chroma = dh_vec_zeros(12);
+    var c0 = 16.3516;
+    var mags = dhvani_spectrum_magnitudes(spec);
+    var num_bins = vec_len(mags);
+    var bin = 0;
+    while (bin < num_bins) {
+        var mag = vec_get(mags, bin);
+        var freq = dhvani_spectrum_bin_frequency(spec, bin);
+        if (f64_lt(freq, c0) == 1) { bin = bin + 1; }
+        elif (f64_lt(freq, 1.0) == 1) { bin = bin + 1; }
+        else {
+            var semitones = f64_mul(12.0, f64_log2(f64_div(freq, c0)));
+            var rounded = f64_to(f64_round(semitones));
+            # rem_euclid(12): always in [0, 11].
+            var class = ((rounded % 12) + 12) % 12;
+            vec_set(chroma, class, f64_add(vec_get(chroma, class), f64_mul(mag, mag)));
+            bin = bin + 1;
+        }
+    }
+    # Normalize to 0..1 by the peak.
+    var max = 0;
+    var m = 0;
+    while (m < 12) { max = f64_max(max, vec_get(chroma, m)); m = m + 1; }
+    if (f64_gt(max, 0) == 1) {
+        var p = 0;
+        while (p < 12) { vec_set(chroma, p, f64_div(vec_get(chroma, p), max)); p = p + 1; }
+    }
+    return dhvani_chromagram_from_array(chroma);
+}

@@ -1,0 +1,223 @@
+# noise_reduction.cyr -- spectral noise reduction (STFT soft gating).
+# Ports rust-old/src/dsp/noise_reduction.rs. L1: deps error + simd + buffer +
+# analysis + fft (dhvani_fft_in_place). NoiseReducer preallocates window/real/
+# imag/avg_magnitude scratch once in `new`; `process` reuses them across calls.
+#
+# Two-pass per channel: pass 1 estimates the average magnitude spectrum (noise
+# floor); pass 2 soft-gates bins below threshold and rebuilds via overlap-add.
+# IFFT via conjugate: IFFT(X) = conj(FFT(conj(X))) / N. Rust stored f32 samples
+# (cast `as f64` before windowing) -- the Cyrius port is f64 throughout, so the
+# window multiply is direct. serde/Debug/Clone/Default dropped.
+
+var DH_NR_WINDOW_SIZE = 2048;
+var DH_NR_HOP_SIZE    = 1024;   # WINDOW_SIZE / 2 -- 50% overlap
+var DH_NR_NUM_BINS    = 1024;   # WINDOW_SIZE / 2
+
+#derive(accessors)
+struct DhNoiseReducer { window; real; imag; avg_magnitude; }
+
+# new() -- allocate scratch: Hann window + zeroed real/imag (WINDOW_SIZE) +
+# zeroed avg_magnitude (NUM_BINS).
+#must_use
+fn dhvani_noise_reducer_new() {
+    var window = vec_new();
+    var denom = DH_NR_WINDOW_SIZE - 1;
+    var i = 0;
+    while (i < DH_NR_WINDOW_SIZE) {
+        var w = f64_mul(0.5, f64_sub(1.0, f64_cos(f64_div(f64_mul(f64_mul(2.0, F64_PI), f64_from(i)), f64_from(denom)))));
+        vec_push(window, w);
+        i = i + 1;
+    }
+    var self = alloc(sizeof(DhNoiseReducer));
+    DhNoiseReducer_set_window(self, window);
+    DhNoiseReducer_set_real(self, dh_vec_zeros(DH_NR_WINDOW_SIZE));
+    DhNoiseReducer_set_imag(self, dh_vec_zeros(DH_NR_WINDOW_SIZE));
+    DhNoiseReducer_set_avg_magnitude(self, dh_vec_zeros(DH_NR_NUM_BINS));
+    return self;
+}
+
+# fill a vec's first `n` slots with 0.
+fn dh_nr_fill_zero(v, n) {
+    var i = 0;
+    while (i < n) { vec_set(v, i, 0); i = i + 1; }
+    return 0;
+}
+
+# process_channel(self, samples, strength) -- gate one mono `vec` in place.
+fn dhvani_noise_reducer_process_channel(self, samples, strength) {
+    var n = vec_len(samples);
+    if (n < DH_NR_WINDOW_SIZE) { return 0; }
+
+    var window = DhNoiseReducer_window(self);
+    var real = DhNoiseReducer_real(self);
+    var imag = DhNoiseReducer_imag(self);
+    var avg = DhNoiseReducer_avg_magnitude(self);
+
+    # Pass 1: estimate average magnitude spectrum (noise floor)
+    dh_nr_fill_zero(avg, DH_NR_NUM_BINS);
+    var frame_count = 0;
+    var pos = 0;
+    while (pos + DH_NR_WINDOW_SIZE <= n) {
+        dh_nr_fill_zero(real, DH_NR_WINDOW_SIZE);
+        dh_nr_fill_zero(imag, DH_NR_WINDOW_SIZE);
+        var i1 = 0;
+        while (i1 < DH_NR_WINDOW_SIZE) {
+            vec_set(real, i1, f64_mul(vec_get(samples, pos + i1), vec_get(window, i1)));
+            i1 = i1 + 1;
+        }
+        if (dhvani_fft_in_place(real, imag) == 0) {
+            pos = pos + DH_NR_HOP_SIZE;
+        } else {
+            var k1 = 0;
+            while (k1 < DH_NR_NUM_BINS) {
+                var re1 = vec_get(real, k1);
+                var im1 = vec_get(imag, k1);
+                vec_set(avg, k1, f64_add(vec_get(avg, k1), f64_sqrt(f64_add(f64_mul(re1, re1), f64_mul(im1, im1)))));
+                k1 = k1 + 1;
+            }
+            frame_count = frame_count + 1;
+            pos = pos + DH_NR_HOP_SIZE;
+        }
+    }
+
+    if (frame_count == 0) { return 0; }
+    var fc = f64_from(frame_count);
+    var mi = 0;
+    while (mi < DH_NR_NUM_BINS) {
+        vec_set(avg, mi, f64_div(vec_get(avg, mi), fc));
+        mi = mi + 1;
+    }
+
+    # Pass 2: gate + reconstruct via overlap-add. Per-channel length buffers.
+    var output = dh_vec_zeros(n);
+    var window_sum = dh_vec_zeros(n);
+    pos = 0;
+    while (pos + DH_NR_WINDOW_SIZE <= n) {
+        dh_nr_fill_zero(real, DH_NR_WINDOW_SIZE);
+        dh_nr_fill_zero(imag, DH_NR_WINDOW_SIZE);
+        var i2 = 0;
+        while (i2 < DH_NR_WINDOW_SIZE) {
+            vec_set(real, i2, f64_mul(vec_get(samples, pos + i2), vec_get(window, i2)));
+            i2 = i2 + 1;
+        }
+        if (dhvani_fft_in_place(real, imag) == 0) {
+            pos = pos + DH_NR_HOP_SIZE;
+        } else {
+            # Soft gate: attenuate bins below threshold
+            var gate_factor = f64_mul(strength, 1.5);
+            var k2 = 0;
+            while (k2 < DH_NR_NUM_BINS) {
+                var re2 = vec_get(real, k2);
+                var im2 = vec_get(imag, k2);
+                var mag = f64_sqrt(f64_add(f64_mul(re2, re2), f64_mul(im2, im2)));
+                var threshold = f64_mul(vec_get(avg, k2), gate_factor);
+                if (f64_lt(mag, threshold) == 1) {
+                    if (f64_gt(threshold, 0.0) == 1) {
+                        var attenuation = f64_div(mag, threshold);
+                        vec_set(real, k2, f64_mul(re2, attenuation));
+                        vec_set(imag, k2, f64_mul(im2, attenuation));
+                        # Mirror for negative frequencies
+                        if (k2 > 0) {
+                            if (k2 < DH_NR_NUM_BINS) {
+                                var mirror = DH_NR_WINDOW_SIZE - k2;
+                                vec_set(real, mirror, f64_mul(vec_get(real, mirror), attenuation));
+                                vec_set(imag, mirror, f64_mul(vec_get(imag, mirror), attenuation));
+                            }
+                        }
+                    }
+                }
+                k2 = k2 + 1;
+            }
+
+            # Inverse FFT (conjugate: negate imag, forward FFT, divide by N)
+            var ci = 0;
+            while (ci < DH_NR_WINDOW_SIZE) {
+                vec_set(imag, ci, f64_neg(vec_get(imag, ci)));
+                ci = ci + 1;
+            }
+            if (dhvani_fft_in_place(real, imag) == 0) {
+                pos = pos + DH_NR_HOP_SIZE;
+            } else {
+                var scale = f64_div(1.0, f64_from(DH_NR_WINDOW_SIZE));
+                var ri = 0;
+                while (ri < DH_NR_WINDOW_SIZE) {
+                    vec_set(real, ri, f64_mul(vec_get(real, ri), scale));
+                    ri = ri + 1;
+                }
+                # Overlap-add with window
+                var oi = 0;
+                while (oi < DH_NR_WINDOW_SIZE) {
+                    var wv = vec_get(window, oi);
+                    var op = pos + oi;
+                    vec_set(output, op, f64_add(vec_get(output, op), f64_mul(vec_get(real, oi), wv)));
+                    vec_set(window_sum, op, f64_add(vec_get(window_sum, op), f64_mul(wv, wv)));
+                    oi = oi + 1;
+                }
+                pos = pos + DH_NR_HOP_SIZE;
+            }
+        }
+    }
+
+    # Normalize by window sum and write back
+    var ni = 0;
+    while (ni < n) {
+        if (f64_gt(vec_get(window_sum, ni), 0.0000000001) == 1) {
+            vec_set(samples, ni, f64_div(vec_get(output, ni), vec_get(window_sum, ni)));
+        }
+        if (dhvani_is_finite(vec_get(samples, ni)) == 0) {
+            vec_set(samples, ni, 0);
+        }
+        ni = ni + 1;
+    }
+    return 0;
+}
+
+# process(self, buf, strength) -- apply spectral noise reduction in place.
+fn dhvani_noise_reducer_process(self, buf, strength) {
+    var s = f64_clamp(strength, 0.0, 1.0);
+    var frames = DhAudioBuffer_frames(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    if (frames < DH_NR_WINDOW_SIZE) {
+        # Too short for STFT -- fall back to a simple amplitude gate.
+        var threshold = f64_mul(s, 0.05);
+        var slen = vec_len(samples);
+        var si = 0;
+        while (si < slen) {
+            if (f64_lt(f64_abs(vec_get(samples, si)), threshold) == 1) {
+                vec_set(samples, si, 0);
+            }
+            si = si + 1;
+        }
+        return 0;
+    }
+
+    var ch = DhAudioBuffer_channels(buf);
+
+    # Process each channel independently
+    var c = 0;
+    while (c < ch) {
+        # Extract mono channel
+        var mono = vec_new();
+        var f = 0;
+        while (f < frames) {
+            vec_push(mono, vec_get(samples, f * ch + c));
+            f = f + 1;
+        }
+        dhvani_noise_reducer_process_channel(self, mono, s);
+        # Write back
+        var fw = 0;
+        while (fw < frames) {
+            vec_set(samples, fw * ch + c, vec_get(mono, fw));
+            fw = fw + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# noise_reduce(buf, strength) -- one-shot spectral noise reduction in place.
+fn dhvani_noise_reduce(buf, strength) {
+    var reducer = dhvani_noise_reducer_new();
+    dhvani_noise_reducer_process(reducer, buf, strength);
+    return 0;
+}

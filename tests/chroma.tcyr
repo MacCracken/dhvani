@@ -1,0 +1,55 @@
+# chroma.tcyr -- parity tests for src/chroma.cyr (Chromagram + chromagram()).
+# Ported one-for-one from the #[test] blocks in rust-old/src/analysis/chroma.rs.
+# No serde/Display tests present to drop.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
+include "src/chroma.cyr"
+
+alloc_init();
+
+# make_sine(freq, sr, frames) -- mono sine buffer (matches oracle sample gen).
+fn make_sine(freq, sr, frames) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        vec_push(v, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr))));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+# all chroma slots exactly zero?
+fn chroma_all_zero(c) {
+    var chroma = dhvani_chromagram_chroma(c);
+    var i = 0;
+    while (i < 12) { if (vec_get(chroma, i) != 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# ---- a440_dominant_class ----
+test_group("a440_dominant_class");
+var c_a = dhvani_chroma_chromagram(make_sine(440.0, 44100, 8192), 4096);
+assert_streq(dhvani_chromagram_dominant_name(c_a), "A", "A440 -> dominant pitch class A");
+
+# ---- c_note_dominant ----
+test_group("c_note_dominant");
+var c_c = dhvani_chroma_chromagram(make_sine(261.63, 44100, 8192), 4096);
+assert_streq(dhvani_chromagram_dominant_name(c_c), "C", "C4 261.63 -> dominant pitch class C");
+
+# ---- silence_chromagram ----
+test_group("silence_chromagram");
+var c_s = dhvani_chroma_chromagram(dhvani_buffer_silence(1, 4096, 44100), 4096);
+assert_eq(chroma_all_zero(c_s), 1, "silence chromagram all zeros");
+
+# ---- pitch_class_names ----
+test_group("pitch_class_names");
+assert_streq(dhvani_chroma_pitch_class_name(0), "C", "PITCH_CLASSES[0] = C");
+assert_streq(dhvani_chroma_pitch_class_name(9), "A", "PITCH_CLASSES[9] = A");
+assert_streq(dhvani_chroma_pitch_class_name(11), "B", "PITCH_CLASSES[11] = B");
+
+var rc = assert_summary();
+syscall(60, rc);

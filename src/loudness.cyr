@@ -1,0 +1,221 @@
+# loudness.cyr -- EBU R128 loudness: K-weighting + gated LUFS.
+# Ports rust-old/src/analysis/loudness.rs. L2: deps error + simd + buffer +
+# biquad + abaco. K-weighting = HighShelf(1681Hz,+4dB,Q0.707) cascaded with
+# HighPass(38Hz,Q0.5), built via dhvani_biquad_new. measure_r128 -> a
+# R128Loudness handle, or 0 (null) on error (empty buffer / zero channels).
+#
+# FLOAT NOTES: negative float constants (-70, -10, -0.691) go through f64_neg.
+# The Rust f32::NEG_INFINITY sentinel maps to DH_NEG_INF (error.cyr).
+# 10.0.powf(lufs/10) has a positive base so f64_pow is safe. log10 via dh_log10
+# (analysis.cyr). The 400ms block / 100ms hop counts are integer sample counts.
+
+#derive(accessors)
+struct DhR128Loudness { integrated_lufs; range_lu; short_term_lufs; momentary_lufs; }
+
+# --- R128Loudness accessors (was impl getters) ---
+#inline
+#must_use
+fn dhvani_r128_integrated_lufs(self) { return DhR128Loudness_integrated_lufs(self); }
+#inline
+#must_use
+fn dhvani_r128_range_lu(self) { return DhR128Loudness_range_lu(self); }
+#inline
+#must_use
+fn dhvani_r128_short_term_lufs(self) { return DhR128Loudness_short_term_lufs(self); }
+#inline
+#must_use
+fn dhvani_r128_momentary_lufs(self) { return DhR128Loudness_momentary_lufs(self); }
+
+# construct an R128Loudness handle.
+#must_use
+fn dhvani_r128_new(integrated_lufs, range_lu, short_term_lufs, momentary_lufs) {
+    var self = alloc(sizeof(DhR128Loudness));
+    DhR128Loudness_set_integrated_lufs(self, integrated_lufs);
+    DhR128Loudness_set_range_lu(self, range_lu);
+    DhR128Loudness_set_short_term_lufs(self, short_term_lufs);
+    DhR128Loudness_set_momentary_lufs(self, momentary_lufs);
+    return self;
+}
+
+# Apply K-weighting filter -- returns a new `vec` of filtered samples.
+# Stage 1: HighShelf at 1681 Hz, +4 dB, Q=0.707. Stage 2: HighPass at 38 Hz,
+# Q=0.5. The oracle applies both per-sample (shelf then HP) with per-channel
+# state; a cascade of two LTI biquads is order-invariant across the pass, so we
+# process the whole buffer through the shelf then through the HP (identical
+# output). Works on a cloned buffer so the input is untouched.
+#must_use
+fn dhvani_loudness_apply_k_weighting(buf) {
+    var sr = DhAudioBuffer_sample_rate(buf);
+    var ch = DhAudioBuffer_channels(buf);
+    var work = dhvani_buffer_clone(buf);
+    # Stage 1: High shelf at ~1681 Hz, +4 dB (pre-emphasis for head acoustics)
+    var shelf = dhvani_biquad_new(DH_BQ_HIGHSHELF, 4.0, 1681.0, 0.707, sr, ch);
+    dhvani_biquad_process(shelf, work);
+    # Stage 2: High pass at ~38 Hz (remove DC and sub-bass)
+    var hp = dhvani_biquad_new(DH_BQ_HIGHPASS, 0, 38.0, 0.5, sr, ch);
+    dhvani_biquad_process(hp, work);
+    return DhAudioBuffer_samples(work);
+}
+
+# Average block LUFS values in the linear power domain per EBU R128.
+# mean_power = mean(10^(lufs/10)); -inf if empty or non-positive power.
+#must_use
+fn dhvani_loudness_lufs_from_blocks(blocks) {
+    var n = vec_len(blocks);
+    if (n == 0) { return DH_NEG_INF; }
+    var sum = 0;
+    var i = 0;
+    while (i < n) {
+        var lufs = vec_get(blocks, i);
+        sum = f64_add(sum, f64_pow(10.0, f64_div(lufs, 10.0)));
+        i = i + 1;
+    }
+    var mean_power = f64_div(sum, f64_from(n));
+    if (f64_gt(mean_power, 0) == 1) {
+        return f64_add(f64_neg(0.691), f64_mul(10.0, dh_log10(mean_power)));
+    }
+    return DH_NEG_INF;
+}
+
+# ascending in-place insertion sort of a `vec` of f64 (mirrors partial_cmp with
+# NaN treated as Equal -- our block loudness values are finite or -inf, both of
+# which f64_gt orders correctly).
+fn dhvani_loudness_sort_asc(v) {
+    var n = vec_len(v);
+    var i = 1;
+    while (i < n) {
+        var key = vec_get(v, i);
+        var j = i - 1;
+        var cont = 1;
+        while (cont == 1) {
+            if (j < 0) { cont = 0; }
+            elif (f64_gt(vec_get(v, j), key) == 1) {
+                vec_set(v, j + 1, vec_get(v, j));
+                j = j - 1;
+            } else { cont = 0; }
+        }
+        vec_set(v, j + 1, key);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Compute Loudness Range (LRA): p95 - p10 of sorted gated blocks. 0.0 if <2.
+#must_use
+fn dhvani_loudness_compute_lra(blocks) {
+    var n = vec_len(blocks);
+    if (n < 2) { return 0; }
+    var sorted = vec_new();
+    var s = 0;
+    while (s < n) { vec_push(sorted, vec_get(blocks, s)); s = s + 1; }
+    dhvani_loudness_sort_asc(sorted);
+    var nf = f64_from(n);
+    var idx10 = f64_to(f64_mul(nf, 0.1));
+    var idx95 = f64_to(f64_min(f64_mul(nf, 0.95), f64_sub(nf, 1.0)));
+    var p10 = vec_get(sorted, idx10);
+    var p95 = vec_get(sorted, idx95);
+    return f64_sub(p95, p10);
+}
+
+# Measure EBU R128 integrated loudness. Returns an R128Loudness handle, or 0
+# (null) on error (empty buffer / zero channels).
+#must_use
+fn dhvani_loudness_measure_r128(buf) {
+    var samples = DhAudioBuffer_samples(buf);
+    if (vec_len(samples) == 0) { return 0; }
+    if (DhAudioBuffer_channels(buf) == 0) { return 0; }
+
+    var sr = DhAudioBuffer_sample_rate(buf);
+    var ch = DhAudioBuffer_channels(buf);
+
+    # Step 1: Apply K-weighting filter
+    var filtered = dhvani_loudness_apply_k_weighting(buf);
+
+    # Step 2: mean square per 400ms block (75% overlap = 100ms hop)
+    var block_samples = f64_to(f64_mul(f64_from(sr), 0.4));
+    var hop_samples = f64_to(f64_mul(f64_from(sr), 0.1));
+    if (block_samples < 1) { block_samples = 1; }
+    if (hop_samples < 1) { hop_samples = 1; }
+
+    var block_loudness = vec_new();
+    var frames = DhAudioBuffer_frames(buf);
+    var pos = 0;
+    while ((pos + block_samples) <= frames) {
+        var mean_sq = 0;
+        var count = 0;
+        var frame = pos;
+        while (frame < (pos + block_samples)) {
+            var c = 0;
+            while (c < ch) {
+                var sv = vec_get(filtered, frame * ch + c);
+                mean_sq = f64_add(mean_sq, f64_mul(sv, sv));
+                count = count + 1;
+                c = c + 1;
+            }
+            frame = frame + 1;
+        }
+        if (count > 0) { mean_sq = f64_div(mean_sq, f64_from(count)); }
+        var lufs = DH_NEG_INF;
+        if (f64_gt(mean_sq, 0) == 1) {
+            lufs = f64_add(f64_neg(0.691), f64_mul(10.0, dh_log10(mean_sq)));
+        }
+        vec_push(block_loudness, lufs);
+        pos = pos + hop_samples;
+    }
+
+    var nblocks = vec_len(block_loudness);
+    if (nblocks == 0) {
+        return dhvani_r128_new(DH_NEG_INF, 0, DH_NEG_INF, DH_NEG_INF);
+    }
+
+    # Step 3: Absolute gate at -70 LUFS
+    var neg70 = f64_neg(70.0);
+    var above_abs_gate = vec_new();
+    var a = 0;
+    while (a < nblocks) {
+        var la = vec_get(block_loudness, a);
+        if (f64_gt(la, neg70) == 1) { vec_push(above_abs_gate, la); }
+        a = a + 1;
+    }
+
+    var last_block = vec_get(block_loudness, nblocks - 1);
+    if (vec_len(above_abs_gate) == 0) {
+        return dhvani_r128_new(DH_NEG_INF, 0, last_block, last_block);
+    }
+
+    # Ungated loudness (above absolute gate) -- linear power domain mean.
+    var ungated_lufs = dhvani_loudness_lufs_from_blocks(above_abs_gate);
+
+    # Step 4: Relative gate at ungated - 10 LU
+    var relative_threshold = f64_sub(ungated_lufs, 10.0);
+    var above_rel_gate = vec_new();
+    var r = 0;
+    var nabs = vec_len(above_abs_gate);
+    while (r < nabs) {
+        var lr = vec_get(above_abs_gate, r);
+        if (f64_gt(lr, relative_threshold) == 1) { vec_push(above_rel_gate, lr); }
+        r = r + 1;
+    }
+
+    var integrated_lufs = ungated_lufs;
+    if (vec_len(above_rel_gate) > 0) {
+        integrated_lufs = dhvani_loudness_lufs_from_blocks(above_rel_gate);
+    }
+
+    # Momentary = last 400ms block
+    var momentary_lufs = last_block;
+
+    # Short-term = mean of last ~3s (30 blocks) in linear power domain
+    var short_term_blocks = 30;
+    if (nblocks < 30) { short_term_blocks = nblocks; }
+    var st_slice = vec_new();
+    var st_start = nblocks - short_term_blocks;
+    var st = st_start;
+    while (st < nblocks) { vec_push(st_slice, vec_get(block_loudness, st)); st = st + 1; }
+    var short_term_lufs = dhvani_loudness_lufs_from_blocks(st_slice);
+
+    # LRA: 95th - 10th percentile of relatively-gated blocks
+    var range_lu = dhvani_loudness_compute_lra(above_rel_gate);
+
+    return dhvani_r128_new(integrated_lufs, range_lu, short_term_lufs, momentary_lufs);
+}

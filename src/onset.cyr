@@ -1,0 +1,115 @@
+# onset.cyr -- Onset detection via spectral flux.
+# Ports rust-old/src/analysis/onset.rs. L1: deps error + simd + buffer +
+# abaco + analysis + fft + stft (dhvani_stft). Frames the signal, computes the
+# per-frame spectral difference (sum of positive bin-to-bin increases), normalizes
+# the flux by its peak, and peak-picks local maxima above a threshold.
+#
+# OnsetResult.positions was Vec<usize> (sample positions), strengths Vec<f32>.
+# Here each is a `vec`: positions holds integer sample offsets, strengths holds
+# f64 flux values. detect_onsets is fallible in Rust (STFT can fail) -> returns a
+# valid result handle, or 0 (null) on STFT error. On < 2 frames it returns an
+# empty (but non-null) result, matching the Rust Ok(empty).
+
+#derive(accessors)
+struct DhOnsetResult { positions; strengths; }
+
+# frame positions (in samples) of detected onsets.
+#inline
+#must_use
+fn dhvani_onset_positions(self) { return DhOnsetResult_positions(self); }
+
+# spectral flux values at each onset.
+#inline
+#must_use
+fn dhvani_onset_strengths(self) { return DhOnsetResult_strengths(self); }
+
+# number of detected onsets.
+#inline
+#must_use
+fn dhvani_onset_count(self) { return vec_len(DhOnsetResult_positions(self)); }
+
+# position (sample offset) of onset index i.
+#inline
+#must_use
+fn dhvani_onset_position(self, i) { return vec_get(DhOnsetResult_positions(self), i); }
+
+# strength (flux) of onset index i.
+#inline
+#must_use
+fn dhvani_onset_strength(self, i) { return vec_get(DhOnsetResult_strengths(self), i); }
+
+# build an OnsetResult from positions + strengths vecs.
+#must_use
+fn dhvani_onset_make_result(positions, strengths) {
+    var self = alloc(sizeof(DhOnsetResult));
+    DhOnsetResult_set_positions(self, positions);
+    DhOnsetResult_set_strengths(self, strengths);
+    return self;
+}
+
+# detect_onsets(buf, window_size, hop_size, threshold) -- spectral-flux onsets.
+# Returns a result handle, or 0 on STFT error. With < 2 STFT frames returns an
+# empty result. threshold is an f64 sensitivity (lower = more sensitive).
+#must_use
+fn dhvani_detect_onsets(buf, window_size, hop_size, threshold) {
+    var sg = dhvani_stft(buf, window_size, hop_size);
+    if (sg == 0) { return 0; }
+
+    var num_frames = dhvani_spectrogram_num_frames(sg);
+    if (num_frames < 2) {
+        return dhvani_onset_make_result(vec_new(), vec_new());
+    }
+
+    var num_bins = dhvani_spectrogram_num_bins(sg);
+
+    # Compute spectral flux: sum of positive differences between consecutive frames.
+    var flux = vec_new();
+    vec_push(flux, 0); # First frame has no predecessor.
+
+    var i = 1;
+    while (i < num_frames) {
+        var diff_sum = 0;
+        var cur = dhvani_spectrogram_frame(sg, i);
+        var prev = dhvani_spectrogram_frame(sg, i - 1);
+        var bin = 0;
+        while (bin < num_bins) {
+            var diff = f64_sub(vec_get(cur, bin), vec_get(prev, bin));
+            if (f64_gt(diff, 0) == 1) { diff_sum = f64_add(diff_sum, diff); }
+            bin = bin + 1;
+        }
+        vec_push(flux, diff_sum);
+        i = i + 1;
+    }
+
+    # Normalize flux by its peak (fold over 0.0, so >= 0).
+    var flux_len = vec_len(flux);
+    var max_flux = 0;
+    var m = 0;
+    while (m < flux_len) { max_flux = f64_max(max_flux, vec_get(flux, m)); m = m + 1; }
+    if (f64_gt(max_flux, 0) == 1) {
+        var n = 0;
+        while (n < flux_len) { vec_set(flux, n, f64_div(vec_get(flux, n), max_flux)); n = n + 1; }
+    }
+
+    # Peak-pick: flux values above threshold that are local maxima.
+    var positions = vec_new();
+    var strengths = vec_new();
+
+    # flux.len().saturating_sub(1); num_frames >= 2 so flux_len >= 2.
+    var upper = flux_len - 1;
+    var p = 1;
+    while (p < upper) {
+        var fp = vec_get(flux, p);
+        if (f64_gt(fp, threshold) == 1) {
+            if (f64_gt(fp, vec_get(flux, p - 1)) == 1) {
+                if (f64_ge(fp, vec_get(flux, p + 1)) == 1) {
+                    vec_push(positions, p * hop_size);
+                    vec_push(strengths, fp);
+                }
+            }
+        }
+        p = p + 1;
+    }
+
+    return dhvani_onset_make_result(positions, strengths);
+}

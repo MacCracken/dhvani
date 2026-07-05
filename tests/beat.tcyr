@@ -1,0 +1,110 @@
+# beat.tcyr -- parity tests for src/beat.cyr
+# Ported one-for-one from the 4 #[test] blocks in rust-old/src/analysis/beat.rs:
+#   silence_no_beats, click_track_120bpm, too_short_buffer, beat_positions_ordered.
+# (No serde / Display tests to drop.)
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/analysis.cyr"
+include "src/fft.cyr"
+include "src/stft.cyr"
+include "src/onset.cyr"
+include "src/beat.cyr"
+
+alloc_init();
+
+# a `vec` of `n` values equal to `val`.
+fn make_filled(n, val) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, val); i = i + 1; }
+    return v;
+}
+
+# ---- silence_no_beats ----
+# let buf = AudioBuffer::silence(1, 44100 * 2, 44100);
+# let result = detect_tempo(&buf, 60.0, 200.0).unwrap();
+# assert!(result.beat_positions.is_empty() || result.confidence < 0.1);
+test_group("silence_no_beats");
+var r1 = dhvani_detect_tempo(dhvani_buffer_silence(1, 88200, 44100), 60.0, 200.0);
+assert(r1 != 0, "silence: non-null result (unwrap ok)");
+var empty1 = 0;
+if (vec_len(dhvani_beat_positions(r1)) == 0) { empty1 = 1; }
+var lowconf1 = 0;
+if (f64_lt(dhvani_beat_confidence(r1), 0.1) == 1) { lowconf1 = 1; }
+assert((empty1 == 1) | (lowconf1 == 1), "silence: no beats or low confidence");
+
+# ---- click_track_120bpm ----
+# Click track at 120 BPM (one click every 0.5s), 4 seconds @ 44100.
+# 8 beats, each a 10ms 1000 Hz sine burst at 0.9 amplitude.
+# detect_tempo(&buf, 60, 200): abs(bpm - 120) < 15.
+test_group("click_track_120bpm");
+var sr = 44100;
+var duration = 4;
+var total_samples = sr * duration;
+var samples2 = make_filled(total_samples, 0);
+var click_interval = sr / 2; # 0.5s = 120 BPM
+var click_len = sr / 100;    # 10ms
+var beat2 = 0;
+while (beat2 < 8) {
+    var start2 = beat2 * click_interval;
+    # for i in 0..click_len.min(total_samples - start)
+    var lim2 = click_len;
+    if ((total_samples - start2) < lim2) { lim2 = total_samples - start2; }
+    var i2 = 0;
+    while (i2 < lim2) {
+        # 0.9 * sin(2*PI*1000*i/sr)
+        var phase2 = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 1000.0), f64_from(i2)), f64_from(sr));
+        vec_set(samples2, start2 + i2, f64_mul(0.9, f64_sin(phase2)));
+        i2 = i2 + 1;
+    }
+    beat2 = beat2 + 1;
+}
+var buf2 = dhvani_buffer_from_interleaved(samples2, 1, 44100);
+var r2 = dhvani_detect_tempo(buf2, 60.0, 200.0);
+assert(r2 != 0, "click120: non-null result (unwrap ok)");
+var bpm2 = dhvani_beat_bpm(r2);
+assert(f64_lt(f64_abs(f64_sub(bpm2, 120.0)), 15.0) == 1, "click120: bpm within 15 of 120");
+
+# ---- too_short_buffer ----
+# from_interleaved(vec![0.5; 22050], 1, 44100); detect_tempo(...).is_err().
+test_group("too_short_buffer");
+var short_samples = make_filled(22050, 0.5);
+var short_buf = dhvani_buffer_from_interleaved(short_samples, 1, 44100);
+var r3 = dhvani_detect_tempo(short_buf, 60.0, 200.0);
+assert(r3 == 0, "too_short: detect_tempo is_err (null handle)");
+
+# ---- beat_positions_ordered ----
+# 3 seconds @ 44100; 6 clicks (0.9 flat fill, 100 samples) every 0.5s.
+# detect_tempo(&buf, 60, 200): beat_positions strictly increasing.
+test_group("beat_positions_ordered");
+var total4 = 44100 * 3;
+var samples4 = make_filled(total4, 0);
+var interval4 = 44100 / 2;
+var clen4 = 44100 / 100;
+var beat4 = 0;
+while (beat4 < 6) {
+    var start4 = beat4 * interval4;
+    var lim4 = clen4;
+    if ((total4 - start4) < lim4) { lim4 = total4 - start4; }
+    var i4 = 0;
+    while (i4 < lim4) { vec_set(samples4, start4 + i4, 0.9); i4 = i4 + 1; }
+    beat4 = beat4 + 1;
+}
+var buf4 = dhvani_buffer_from_interleaved(samples4, 1, 44100);
+var r4 = dhvani_detect_tempo(buf4, 60.0, 200.0);
+assert(r4 != 0, "ordered: non-null result (unwrap ok)");
+var pos4 = dhvani_beat_positions(r4);
+var np4 = vec_len(pos4);
+var ordered4 = 1;
+var w4 = 1;
+while (w4 < np4) {
+    if (vec_get(pos4, w4 - 1) >= vec_get(pos4, w4)) { ordered4 = 0; }
+    w4 = w4 + 1;
+}
+assert_eq(ordered4, 1, "ordered: beat positions strictly increasing");
+
+var rc = assert_summary();
+syscall(60, rc);
