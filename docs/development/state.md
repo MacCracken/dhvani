@@ -53,9 +53,10 @@ kiran) migrate up the stack after the port is green (post-2.0.0).
 **54 / 64 modules ported** — **Waves A–F COMPLETE**; **Wave G assembly nearly done**:
 deferred tests re-enabled, `dist/dhvani.cyr` bundle built & validated, and the
 integration + dsp-reference + proptest suites ported (67 tests / 414 assertions
-against the assembled bundle) + hot-path `.bcyr` benches captured. **1625 parity
-assertions across 61 suites** (+ 1 scaffold smoke). Remaining Wave G: finalize the
-CHANGELOG, then tag 2.0.0. Deferred: 9 (blocked deps + platform).
+against the assembled bundle) + hot-path benches + a Rust-vs-Cyrius comparison.
+**1625 parity assertions across 61 suites** (+ 1 scaffold smoke). **2.0.0 is
+release-ready** — CHANGELOG finalized, `VERSION` = 2.0.0, deps pinned; only the git
+tag remains (user handles git). Deferred: 9 (blocked deps + platform).
 
 **abaco 2.3.2** (dep bump): the numerical dsp-reference port caught abaco's dB
 constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.04%/dB
@@ -100,11 +101,13 @@ the serde_tests suite and the blocked/platform modules).
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). **Wave G — assembly** (remaining): finalize the
-CHANGELOG `[2.0.0]`, then **tag 2.0.0** (`VERSION`=2.0.0 ✅, deps pinned ✅). Done:
-✅ deferred analysis-gated tests, ✅ `dist/dhvani.cyr` bundle + validation,
-✅ integration/dsp-reference/proptest suites, ✅ abaco 2.3.2 dB-constant fix,
-✅ hot-path benches + `BENCHMARKS.md`.
+See [`roadmap.md`](roadmap.md). **The port is complete and release-ready** — Waves
+A–G all done: ✅ deferred analysis-gated tests, ✅ `dist/dhvani.cyr` bundle +
+validation, ✅ integration/dsp-reference/proptest suites, ✅ abaco 2.3.2 dB fix,
+✅ hot-path benches + `BENCHMARKS.md` + `docs/benchmarks-rust-v-cyrius.md`,
+✅ CHANGELOG `[2.0.0]` finalized. **Only the git tag remains** (user). Post-2.0.0:
+the blocked modules (g2p/bhava-voice on shabda/bhava; ffi/simd-intrinsics/pipewire
+on platform) unblock as their deps/toolchain land.
 `voice_synth/bhava_bridge` + `g2p` stay dep-blocked (bhava/shabda); `ffi`,
 `simd/{x86,aarch64}`, `capture/pw` stay platform-blocked.
 Then **Wave G** — lib facade + `dist/dhvani.cyr` bundle + integration tests, and

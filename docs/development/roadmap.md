@@ -82,7 +82,7 @@
 - Gate: `synthesis`, `voice`, `creature`, `environment`, `mechanical`,
   `sampler`, `acoustics`.
 
-### M6 — Assembly & release (Wave G) — 2.0.0 tag — 🟡 IN FLIGHT
+### M6 — Assembly & release (Wave G) — 2.0.0 tag — ✅ READY (awaiting git tag)
 
 - ✅ Re-enabled the two Wave-D-deferred analysis-gated tests (normalize_to_lufs,
   sine_frequency_preserved).
@@ -95,8 +95,10 @@
   (wrong `ln(10)`); re-vendored, ripple-free.
 - ✅ Hot-path `.bcyr` benches (`tests/hotpath.bcyr` + `BENCHMARKS.md`): 2.0.0
   baseline for osc/biquad/svf (per-sample), SIMD kernels + FFT (per-block), scalar.
-- ⬜ Finalize CHANGELOG `[2.0.0]`; confirm deps pinned git+tag & `VERSION` = 2.0.0
-  (both ✅ set); then **tag 2.0.0**.
+- ✅ Rust-vs-Cyrius comparison (`tests/bench_compare.bcyr` +
+  `docs/benchmarks-rust-v-cyrius.md`): scalar-f64 runs 6–250× the Rust f32-SIMD.
+- ✅ CHANGELOG `[2.0.0]` finalized; `VERSION` = 2.0.0, deps pinned git+tag.
+- ⬜ **Tag 2.0.0** (user handles git) — everything else is release-ready.
 
 ## Blocked from porting — deferred past 2.0.0
 

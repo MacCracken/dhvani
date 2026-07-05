@@ -5,32 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] — Cyrius port (in progress)
+## [2.0.0] — Cyrius port — 2026-07-05
 
 Complete rewrite from Rust to **Cyrius**. dhvani's Rust line shipped through
 1.1.0; the language port is a major break, so it lands as 2.0.0. The
 23,695-line Rust source (64 modules, ~660 tests) is frozen at `rust-old/` as the
-parity oracle — every Cyrius module is cross-checked against it
-function-for-function. Per-module ledger in
-[`docs/development/port-audit.md`](docs/development/port-audit.md); wave
-sequencing in [`docs/development/roadmap.md`](docs/development/roadmap.md).
+parity oracle — every Cyrius module cross-checked against it function-for-function.
+**54 of 64 modules ported** (the remainder dependency- or platform-blocked, below);
+**1625 parity assertions across 61 test suites, all green.** Per-module ledger in
+[`docs/development/port-audit.md`](docs/development/port-audit.md); wave sequencing
+in [`docs/development/roadmap.md`](docs/development/roadmap.md); throughput vs the
+Rust oracle in [`docs/benchmarks-rust-v-cyrius.md`](docs/benchmarks-rust-v-cyrius.md).
+
+### Added
+
+- **The full portable engine, in Cyrius** — core (buffer/convert/resample/dither/
+  ops), the DSP surface (oscillator/biquad/svf/eq/compressor/limiter/delay/reverb/
+  deesser/graphic_eq/pan/lfo/envelope/automation/…), analysis (fft/stft/chroma/key/
+  onset/beat/loudness/dynamics/convolution/noise_reduction/waveform/zcr), MIDI
+  (v1/v2/voice/routing/translate), the RT-safe processing `graph` + `meter`,
+  `capture`/`record`, and the feature-gated synthesis stack (synthesis/sampler/
+  voice_synth/creature/environment/mechanical/acoustics) wrapping the ported siblings.
+- **`dist/dhvani.cyr`** — the consumer distlib bundle (`cyrius distlib`): dhvani's
+  own modules in dependency order, externalizing abaco + the synthesis siblings so
+  the shipped surface stays auditable (consumers link siblings per feature).
+- **Benchmarks** — `tests/hotpath.bcyr`, `tests/bench_compare.bcyr`, `BENCHMARKS.md`,
+  and a Rust-vs-Cyrius comparison: scalar-f64 runs 6–250× the Rust f32-SIMD depending
+  on vectorizability (per-sample DSP ~6×; flat SIMD reductions worst).
 
 ### Changed
 
-- **Language**: Rust → Cyrius (`.cyr`). Toolchain pinned via
-  `cyrius.cyml [package].cyrius` (6.4.3). Build with
-  `cyrius build src/main.cyr build/dhvani`; test a suite with
-  `cyrius test tests/<mod>.tcyr`.
-- **Scaffold landed** (`cyrius port`, 2026-07-04): Rust frozen at `rust-old/`,
-  `cyrius.cyml`/`src/main.cyr`/CI regenerated, `VERSION` → 2.0.0, smoke binary
-  builds. Module reimplementation proceeds in dependency-ordered waves (A–G).
+- **Language**: Rust → Cyrius (`.cyr`). Toolchain pinned via `cyrius.cyml` (6.4.3).
+  Build `cyrius build src/main.cyr build/dhvani`; test `cyrius test tests/<mod>.tcyr`.
 - **f32 → f64** throughout (the audio-stack math is f64-only); **enums → integer
-  codes**, **`Result`/`Option` → sentinel/error-code returns**, **closures →
-  fn-ptr**, **tuples → out-params**. No serde, no unwinding/panic.
-- **Dependencies**: the synthesis stack (naad/svara/prani/nidhi/garjan/ghurni/
-  goonj) consumed as Cyrius distlib bundles; `serde`/`thiserror`/`tracing`/
-  `criterion`/`rayon`/`proptest` dropped. Math (`abaco` vs `hisab`) decision
-  pending an ADR.
+  codes**, **`Result`/`Option` → sentinel/error-code returns**, **closures + generic
+  traits → fn-ptr**, **tuples → out-params**. No serde, no unwinding/panic.
+- **Math**: kept **abaco** (2.3.2) for dhvani's DSP helpers — the numerical
+  dsp-reference port caught and fixed abaco's dB constants (a wrong `ln(10)`)
+  upstream. The synthesis siblings (naad 2.1.1, svara 3.0.1, prani, nidhi, garjan,
+  ghurni, goonj + sakshi/hisab/shravan) are vendored and included in dependency
+  order rather than wired as `[deps]`. `serde`/`thiserror`/`tracing`/`criterion`/
+  `rayon`/`proptest` dropped.
 
 ### Removed / deferred
 

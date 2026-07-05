@@ -1,0 +1,76 @@
+# bench_compare.bcyr -- Cyrius-side numbers at the SAME sizes the Rust criterion
+# benches used (stereo_1s = 44100 stereo frames = 88200 samples; 4096-mono FFT),
+# so docs/benchmarks-rust-v-cyrius.md is apples-to-apples. Run:
+#   cyrius bench tests/bench_compare.bcyr
+# Inputs are 440 Hz sines in-passband so the mutating in-place ops stay bounded
+# (no denormal skew) across iterations. Links abaco + the assembled bundle.
+
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+fn bench_block(name, fp, n) {
+    var b = bench_new(name);
+    bench_run(b, fp, n);
+    bench_report(b);
+    return 0;
+}
+
+var _s1s = 0;     # 1s stereo 440Hz sine
+var _m1s = 0;     # 1s mono 440Hz sine
+var _m4096 = 0;   # 4096-frame mono sine
+var _bq = 0;
+var _comp = 0;
+var _lim = 0;
+
+fn b_gain() { return dhvani_buffer_apply_gain(_s1s, F64_ONE); }
+fn b_peak() { return dhvani_buffer_peak(_s1s); }
+fn b_bq()   { return dhvani_biquad_process(_bq, _s1s); }
+fn b_comp() { return dhvani_comp_process(_comp, _s1s); }
+fn b_lim()  { return dhvani_lim_process(_lim, _s1s); }
+fn b_fft()  { return dhvani_fft_spectrum(_m4096, 4096); }
+fn b_r128() { return dhvani_loudness_measure_r128(_s1s); }
+fn b_dyn()  { return dhvani_analyze_dynamics(_m1s); }
+
+fn stereo_sine(frames, freq, sr) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var s = f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, freq), f64_from(i)), f64_from(sr)));
+        vec_push(v, s);
+        vec_push(v, s);
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, sr);
+}
+fn mono_sine(frames, freq, sr) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        vec_push(v, f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, freq), f64_from(i)), f64_from(sr))));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 1, sr);
+}
+
+fn main() {
+    alloc_init();
+    _s1s   = stereo_sine(44100, f64_from(440), 44100);
+    _m1s   = mono_sine(44100, f64_from(440), 44100);
+    _m4096 = mono_sine(4096, f64_from(440), 44100);
+    _bq   = dhvani_biquad_new(DH_BQ_LOWPASS, 0, f64_from(1000), 0.707106781, f64_from(44100), 2);
+    _comp = dhvani_comp_new(dhvani_compparams_new(f64_neg(20.0), 4.0, 5.0, 50.0, 0, 2.0, 1.0), 44100);
+    _lim  = dhvani_lim_new(dhvani_limparams_default(), 44100);
+
+    bench_block("gain stereo_1s      ", &b_gain, 500);
+    bench_block("peak stereo_1s      ", &b_peak, 500);
+    bench_block("biquad_lp stereo_1s ", &b_bq,   300);
+    bench_block("compressor stereo_1s", &b_comp, 200);
+    bench_block("limiter stereo_1s   ", &b_lim,  200);
+    bench_block("r128 stereo_1s      ", &b_r128, 100);
+    bench_block("dynamics mono_1s    ", &b_dyn,  100);
+    bench_block("fft 4096 mono       ", &b_fft,  500);
+    return 0;
+}
+
+var r = main();
+syscall(60, r);
