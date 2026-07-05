@@ -24,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   yukti's PCM discovery (udevadm subprocess + sysfs), which pulls yukti's
   `freelist`/`process`/`fs`/`patra` deps (vendored) — so it's a separate module,
   NOT in the core dist (it references yukti direction consts + the heavier stack;
-  the bundle stays device-agnostic). Tested against the machine's real endpoints.
+  the bundle stays device-agnostic). Tested against real endpoints via
+  `tests/hw/device.tcyr` — a **hardware test excluded from CI** (bare `cyrius test`
+  only discovers top-level `tests/*.tcyr`; `tests/hw/` runs locally by explicit path).
 
 ## [2.1.1] — real-time playback path
 

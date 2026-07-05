@@ -1,9 +1,13 @@
-# device.tcyr -- tests for src/device.cyr (audio device enumeration, 2.1.2).
-# Enumerates the machine's real PCM endpoints (yukti shells out to udevadm + reads
-# sysfs), so it asserts the invariants on whatever hardware is present. It does
-# NOT open a device (that would grab the real PCM). Full chain: yukti's deps
-# (freelist -> process -> fs -> patra) then yukti -> sakshi -> vani, then dhvani
-# error -> simd -> buffer -> playback -> device.
+# tests/hw/device.tcyr -- HARDWARE test for src/device.cyr (audio enumeration).
+#
+# NOT run by CI: bare `cyrius test` only auto-discovers tests/*.tcyr (top level),
+# so this tests/hw/ subdirectory is skipped. Run it locally on a machine that has
+# audio hardware:
+#     cyrius test tests/hw/device.tcyr
+# It enumerates the machine's real PCM endpoints and REQUIRES at least one
+# (asserts n > 0) — a check that only holds with a sound card present, hence
+# local-only. Full chain: freelist -> process -> fs -> patra -> yukti -> sakshi ->
+# vani, then dhvani error -> simd -> buffer -> playback -> device.
 
 include "lib/freelist.cyr"
 include "lib/process.cyr"
@@ -20,7 +24,7 @@ include "src/device.cyr"
 
 alloc_init();
 
-# ---- enumeration lists real endpoints; each obeys the direction/card invariant ----
+# ---- enumerate real endpoints; each obeys the direction/card invariant ----
 test_group("device_list");
 var devs = dhvani_devices_list();
 var n = 0;

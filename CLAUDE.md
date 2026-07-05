@@ -44,8 +44,14 @@ Project was scaffolded with `cyrius port`. Original Rust at `rust-old/` is the r
 ```sh
 cyrius deps                              # resolve dependencies
 cyrius build src/main.cyr build/dhvani    # compile
-cyrius test                              # run tests/*.tcyr
+cyrius test                              # run tests/*.tcyr (CI does this)
+cyrius test tests/hw/device.tcyr         # HARDWARE tests — local only, explicit path
 ```
+
+**Hardware tests live in `tests/hw/`.** Bare `cyrius test` (what CI runs) only
+auto-discovers top-level `tests/*.tcyr`, so `tests/hw/` is skipped in CI — those
+suites need real audio hardware (`/dev/snd`, e.g. device enumeration) and would
+fail headless. Run them locally by explicit path.
 
 ## Key Principles
 
