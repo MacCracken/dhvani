@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — g2p (grapheme-to-phoneme) + toolchain/dep refresh (in progress)
+
+### Added
+
+- **`g2p` feature** (`src/g2p.cyr`) — grapheme-to-phoneme: text → phoneme
+  sequences → speech, over the newly-ported **shabda 3.0.0**. Two bridges:
+  `dhvani_g2p_text_to_phonemes(engine, text)` (→ vec of svara `PhonemeEvent`
+  handles, or null on invalid input) and `dhvani_g2p_speak(engine, text, voice,
+  sample_rate)` (→ mono `AudioBuffer`, G2P + voice synthesis in one call). The
+  rest of the Rust `g2p` module was `pub use shabda::*` / `pub use
+  svara::sequence::*` re-exports — no-ops in Cyrius's flat namespace, where a
+  consumer calls the bare `shabda_*` / `svara_*` symbols directly. This unblocks
+  the last dep-blocked module from the 2.0.0 port audit (only `bhava-voice`
+  remains, on bhava). Parity: `tests/g2p.tcyr` (the 14 oracle `#[test]` blocks,
+  one-for-one) + `tests/bundle_g2p.tcyr` (dist externalization).
+- **shabda 3.0.0 + subtree vendored** — `lib/shabda.cyr` (G2P engine, rules,
+  normalize, syllabify, prosody, SSML subset, heteronyms), plus its deps
+  `lib/shabdakosh.cyr` (3.0.1, pronunciation dictionary) and `lib/varna.cyr`
+  (2.0.0, phoneme inventories). Included in dependency order after the naad/svara
+  chain and **externalized** from `dist/dhvani.cyr` like every Wave F sibling
+  (unused refs DCE-prune for non-g2p consumers). Added one stdlib leaf, `hashmap`
+  (the dictionary `map_*`); `mmap`/`bayan` stay out (unreachable — DCE-prune).
+
+### Changed
+
+- **Toolchain pin `6.4.3` → `6.4.11`** (`cyrius.cyml [package].cyrius`). The full
+  suite (64 suites / 1692 assertions) is green on 6.4.11.
+- **hisab `2.6.7` → `2.6.8`** (re-vendored) — upstream "collision hardening for
+  co-compilation": the float-render scratch moved off an enum-sized stack array,
+  and hisab's bare `ERR_*` error constants are now namespaced `HSB_ERR_*` (values
+  unchanged). Both changes are transparent to dhvani (dhvani/goonj/naad keep their
+  own `ERR_NONE == 0`; hisab simply exits that harmless collision).
+- **vani `0.9.9` → `1.0.0`** (re-vendored) — vani's first stable release; a
+  drop-in for `src/playback.cyr` (vani 1.0.0 certifies the full 106-symbol
+  `vani_*` surface against dhvani 2.1.2's playback path). No consumer-facing
+  breaking changes.
+
 ## [2.1.2] — capture ring path (in progress)
 
 ### Added

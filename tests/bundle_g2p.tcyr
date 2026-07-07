@@ -1,0 +1,34 @@
+# bundle_g2p.tcyr -- validates dist/dhvani.cyr for a G2P-feature consumer:
+# the shabda dependency chain (svara + varna + shabdakosh + shabda) + abaco,
+# then the bundled dhvani distlib. Proves the bundle's g2p wrapper
+# (dhvani_g2p_text_to_phonemes / dhvani_g2p_speak) links against the externalized
+# shabda symbols (shabda_g2p_new / shabda_convert / shabda_speak) the consumer
+# supplies. (Core-only linking is covered by bundle.tcyr; the synthesis feature by
+# bundle_synth.tcyr; per-feature logic by the module suites.)
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "lib/varna.cyr"
+include "lib/shabdakosh.cyr"
+include "lib/shabda.cyr"
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+alloc_init();
+
+test_group("bundle_g2p_over_shabda");
+var eng = shabda_g2p_new(SHABDA_LANG_ENGLISH);
+var buf = dhvani_g2p_speak(eng, "hello", svara_voice_new_female(), 44100);
+assert(buf != 0, "bundled g2p speak over shabda ok");
+assert(dhvani_buffer_frames(buf) > 0, "rendered frames > 0");
+assert(f64_gt(dhvani_buffer_rms(buf), 0) == 1, "bundled g2p speech audible (rms > 0)");
+
+var ph = dhvani_g2p_text_to_phonemes(eng, "world");
+assert(ph != 0, "bundled text_to_phonemes ok");
+assert(vec_len(ph) > 0, "phonemes non-empty");
+
+var rc = assert_summary();
+syscall(60, rc);

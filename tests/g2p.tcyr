@@ -1,0 +1,158 @@
+# g2p.tcyr -- parity tests for src/g2p.cyr.
+# Ported one-for-one from the 14 #[test] blocks in rust-old/src/g2p/mod.rs
+# (no serde/Display tests to drop). Drives shabda's G2P engine + svara vocal
+# synthesis through dhvani's bridges. Sibling + G2P bundles are included in
+# dependency order -- shabda's own main.cyr chain (sakshi -> hisab -> goonj ->
+# naad -> svara -> varna -> shabdakosh -> shabda), then dhvani's error -> simd ->
+# buffer -> voice_synth (test #3 renders via dhvani_vsynth_render_sequence) ->
+# g2p. See the Wave F note in port-audit.md.
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "lib/varna.cyr"
+include "lib/shabdakosh.cyr"
+include "lib/shabda.cyr"
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "src/voice_synth.cyr"
+include "src/g2p.cyr"
+
+# all samples of an AudioBuffer finite? (mirror of voice_synth.tcyr vs_all_finite)
+fn g2p_all_finite(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (dhvani_is_finite(vec_get(s, i)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+# |a - b| < 1e-4 ? 1 : 0. The Rust oracle compared f32 fields against f32::EPSILON;
+# the port stores f64, so we use a loosened absolute tolerance (per port-audit:
+# loosen f32-oracle tolerances where bit-exactness isn't meaningful).
+fn g2p_near(a, b) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), 0.0001) == 1) { return 1; }
+    return 0;
+}
+
+# build a vec of two cstr context words (heteronym preceding-word list).
+fn g2p_words2(a, b) {
+    var v = vec_new();
+    vec_push(v, a);
+    vec_push(v, b);
+    return v;
+}
+
+alloc_init();
+
+# ---- english_g2p ----
+test_group("english_g2p");
+var g = shabda_g2p_new(SHABDA_LANG_ENGLISH);
+var ph = dhvani_g2p_text_to_phonemes(g, "hello");
+assert(ph != 0, "convert ok");
+assert(vec_len(ph) > 0, "phonemes non-empty");
+
+# ---- speak_hello ----
+test_group("speak_hello");
+var voice_f = svara_voice_new_female();
+var buf = dhvani_g2p_speak(g, "hello", voice_f, 44100);
+assert(buf != 0, "speak ok");
+assert(dhvani_buffer_frames(buf) > 0, "frames > 0");
+assert(f64_gt(dhvani_buffer_rms(buf), 0) == 1, "rms > 0");
+assert_eq(g2p_all_finite(buf), 1, "all samples finite");
+
+# ---- phonemes_to_sequence ----
+test_group("phonemes_to_sequence");
+var ph2 = dhvani_g2p_text_to_phonemes(g, "test");
+assert(ph2 != 0, "convert test ok");
+var seq = svara_sequence_new();
+var pi = 0;
+while (pi < vec_len(ph2)) {
+    svara_sequence_push(seq, vec_get(ph2, pi));
+    pi = pi + 1;
+}
+var voice_m = svara_voice_new_male();
+var buf_seq = dhvani_vsynth_render_sequence(seq, voice_m, 44100);
+assert(buf_seq != 0, "render sequence ok");
+assert(dhvani_buffer_frames(buf_seq) > 0, "seq frames > 0");
+
+# ---- convert_options_builder ----
+test_group("convert_options_builder");
+var opts = shabda_convert_options_with_speaking_rate(
+    shabda_convert_options_with_emphasis(shabda_convert_options_new(), 1), f64_from(120));
+assert_eq(shabda_convert_options_emphasis(opts), 1, "emphasis true");
+assert_eq(shabda_convert_options_has_rate(opts), 1, "speaking_rate is Some");
+assert_eq(shabda_convert_options_rate_wpm(opts), f64_from(120), "speaking_rate_wpm 120");
+
+# ---- timing_profile_creation ----
+test_group("timing_profile_creation");
+var profile = shabda_timing_new(1.3, 1.0, 1.5);
+assert_eq(g2p_near(shabda_timing_vowel_scale(profile), 1.3), 1, "vowel_scale ~ 1.3");
+assert_eq(g2p_near(shabda_timing_pause_scale(profile), 1.5), 1, "pause_scale ~ 1.5");
+var tp_default = shabda_timing_default();
+assert_eq(g2p_near(shabda_timing_vowel_scale(tp_default), 1.0), 1, "default vowel_scale ~ 1.0");
+
+# ---- heteronym_lookup ----
+test_group("heteronym_lookup");
+var rule = shabda_heteronym_lookup("read");
+assert(rule != 0, "read is some");
+assert_eq(streq(shabda_heteronym_rule_word(rule), "read"), 1, "word == read");
+assert(vec_len(shabda_heteronym_rule_triggers(rule)) != 0, "triggers non-empty");
+
+# ---- heteronym_select_variant_default ----
+test_group("heteronym_select_variant_default");
+var rule_d = shabda_heteronym_lookup("read");
+# no trigger words -> default variant (0)
+assert_eq(shabda_select_variant(rule_d, g2p_words2("the", "book")), 0, "default variant");
+
+# ---- heteronym_select_variant_triggered ----
+test_group("heteronym_select_variant_triggered");
+var rule_t = shabda_heteronym_lookup("read");
+# "to" triggers non-default variant (1)
+assert_eq(shabda_select_variant(rule_t, g2p_words2("want", "to")), 1, "triggered variant");
+
+# ---- heteronym_unknown_word ----
+test_group("heteronym_unknown_word");
+assert_eq(shabda_heteronym_lookup("hello"), 0, "hello is none");
+
+# ---- ssml_parse_plain_text ----
+test_group("ssml_parse_plain_text");
+var n1 = shabda_ssml_parse("hello world");
+assert_eq(vec_len(n1), 1, "one node");
+assert_eq(shabda_ssml_node_tag(vec_get(n1, 0)), SHABDA_SSML_TEXT, "node[0] is Text");
+assert_eq(str_eq_cstr(shabda_ssml_node_text(vec_get(n1, 0)), "hello world"), 1, "text == hello world");
+
+# ---- ssml_parse_break ----
+test_group("ssml_parse_break");
+var n2 = shabda_ssml_parse("hello <break time=\"500ms\"/> world");
+assert_eq(vec_len(n2), 3, "three nodes");
+assert_eq(shabda_ssml_node_tag(vec_get(n2, 1)), SHABDA_SSML_BREAK, "node[1] is Break");
+assert_eq(shabda_ssml_node_duration(vec_get(n2, 1)), 500, "duration_ms == 500");
+
+# ---- ssml_parse_emphasis ----
+test_group("ssml_parse_emphasis");
+var n5 = shabda_ssml_parse("<emphasis level=\"strong\">important</emphasis>");
+assert_eq(vec_len(n5), 1, "one node");
+assert_eq(shabda_ssml_node_tag(vec_get(n5, 0)), SHABDA_SSML_EMPHASIS, "node[0] is Emphasis");
+assert_eq(shabda_ssml_node_level(vec_get(n5, 0)), SHABDA_EMPH_STRONG, "level == Strong");
+
+# ---- ssml_parse_prosody ----
+test_group("ssml_parse_prosody");
+var n7 = shabda_ssml_parse("<prosody rate=\"fast\">quick</prosody>");
+assert_eq(vec_len(n7), 1, "one node");
+assert_eq(shabda_ssml_node_tag(vec_get(n7, 0)), SHABDA_SSML_PROSODY, "node[0] is Prosody");
+assert_eq(shabda_ssml_node_rate(vec_get(n7, 0)), SHABDA_RATE_FAST, "rate == Some(Fast)");
+
+# ---- ssml_speaking_rate_wpm ----
+test_group("ssml_speaking_rate_wpm");
+assert_eq(shabda_speaking_rate_wpm(SHABDA_RATE_MEDIUM), f64_from(150), "Medium.wpm() == 150");
+
+var rc = assert_summary();
+syscall(60, rc);

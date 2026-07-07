@@ -4,9 +4,9 @@
 
 ### Toolchain pin drift
 ```
-error: cyrius toolchain 6.4.x does not match pinned 6.4.3
+error: cyrius toolchain 6.4.x does not match pinned 6.4.11
 ```
-The toolchain is pinned in `cyrius.cyml [package].cyrius` (currently `6.4.3`) —
+The toolchain is pinned in `cyrius.cyml [package].cyrius` (currently `6.4.11`) —
 that manifest is the source of truth, not a CI YAML or an env override. Install
 or select the pinned toolchain rather than editing the pin:
 ```bash

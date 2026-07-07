@@ -5,7 +5,9 @@
 
 ## Version
 
-**2.1.2** (in progress) — capture ring path. **2.0.0** (Rust→Cyrius parity port),
+**2.2.0** (in progress) — **g2p** (grapheme-to-phoneme over the newly-ported shabda
+3.0.0) + toolchain bump to **6.4.11** + dep refresh (hisab 2.6.8, vani 1.0.0).
+**2.1.2** — capture ring path. **2.0.0** (Rust→Cyrius parity port),
 **2.1.0** (vani device I/O), **2.1.1** (RT ring player + multi-format S16/S24/S32)
 released. The `playback` module (`src/playback.cyr`) bridges `AudioBuffer` ↔ vani
 ALSA PCM; 2.1.2 adds the recorder (`dhvani_recorder_*` over `vani_record_to_ring`), the
@@ -17,7 +19,7 @@ zero per-block allocation, as the free-less bump allocator requires.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.4.3` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.4.11` (in `cyrius.cyml [package].cyrius`).
 - Build: `cyrius build src/main.cyr build/dhvani` (smoke binary — builds green).
 - Test ONE suite: `cyrius test tests/<mod>.tcyr` (explicit path — no discovery).
 - **Parallel-porting concurrency**: every `cyrius …` call re-resolves deps and
@@ -37,16 +39,22 @@ zero per-block allocation, as the free-less bump allocator requires.
 Direct (declared/planned in `cyrius.cyml`):
 
 - **stdlib** — base set + the DSP-math set (`math`, `ganita`, `tagged`,
-  `fnptr`, `callback`, `bench`).
-- **Math**: ✅ **abaco 2.3.1 wired** (`[deps.abaco]`, `path=../abaco` local +
+  `fnptr`, `callback`, `bench`) + the g2p set (`hashmap`, `atomic`, `mmap` — for
+  shabdakosh's dictionary; **not** `bayan`, 0 reachable calls).
+- **Math**: ✅ **abaco 2.3.2 wired** (`[deps.abaco]`, `path=../abaco` local +
   git/tag for CI; vendored `lib/abaco.cyr`, `cyrius.lock` written). DSP helpers
   verified (poly_blep/amplitude_to_db/constant_power_pan/…). abaco's unused
   json/http/net helpers DCE-prune (benign warnings).
 - **Synthesis stack** (Wave F): naad 2.1.1, svara 3.0.1, prani 2.0.1,
   nidhi 2.0.0, garjan 2.0.0, ghurni 2.0.0, goonj 2.0.0 + sakshi 2.4.4 (logging)
-  + hisab 2.6.7 (HVec3 for goonj) + shravan 2.x (WAV codec for nidhi) —
+  + hisab **2.6.8** (HVec3 for goonj) + shravan 2.6.7 (WAV codec for nidhi) —
   **vendored into `lib/` (committed), included in dependency order**, NOT `[deps]`.
-- **Blocked** (not ported): shabda (→ g2p), bhava (→ bhava-voice).
+- **g2p stack** (2.2.0): **shabda 3.0.0** (G2P engine) + shabdakosh 3.0.1
+  (dictionary) + varna 2.0.0 (phoneme inventories) — same vendored-include pattern
+  as Wave F (`… svara → varna → shabdakosh → shabda`), externalized from the dist.
+- **Device I/O**: vani **1.0.0** (ALSA PCM, re-vendored — first stable) + yukti
+  2.2.8 (device enumeration, separate module — not in the dist).
+- **Blocked** (not ported): bhava (→ bhava-voice). shabda is now ported ✅.
 
 ## Consumers
 
@@ -64,8 +72,16 @@ little-endian PCM (**S16/S24/S32**) + device glue (open/write/close/capture) + t
 alloc-free RT ring **player** (`dhvani_player_*`, 2.1.1) and **recorder**
 (`dhvani_recorder_*`, 2.1.2); bundled into the dist (DCE-prunes for vani-free
 consumers). **Device enumeration** (`src/device.cyr`, 2.1.2) over yukti — separate
-module, not in the dist, tested against real HW. **1656 assertions across 63
-suites** (+ 1 scaffold smoke).
+module, not in the dist, tested against real HW.
+
+**g2p (2.2.0):** `src/g2p.cyr` bridges text → phonemes → speech over shabda 3.0.0
+(`dhvani_g2p_text_to_phonemes` → svara `PhonemeEvent` vec; `dhvani_g2p_speak` →
+`AudioBuffer`). The Rust module was otherwise `pub use` re-exports (no-ops in the
+flat namespace). shabda 3.0.0 + shabdakosh 3.0.1 + varna 2.0.0 vendored and
+externalized from the dist like the Wave F siblings; stdlib gained only `hashmap`
+(the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
+`tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
+suites, all green on 6.4.11** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
 
 **abaco 2.3.2** (dep bump): the numerical dsp-reference port caught abaco's dB
 constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.04%/dB
@@ -95,7 +111,8 @@ See the manifest and [`port-audit.md`](port-audit.md).
 | E — MIDI/meter/capture/graph | ✅ midi, voice, midi_routing, midi_v2, translate, meter, capture, record, graph | ✅ |
 | F — Synthesis stack | ✅ synthesis(naad), sampler(nidhi), voice_synth(svara), creature(prani), environment(garjan), mechanical(ghurni), acoustics(goonj) | ✅ |
 | G — Assembly | lib facade, dist/dhvani.cyr bundle, tests/{mod,proptest}, benches | ⬜ |
-| ⛔ Blocked (dep) | g2p (shabda), voice_synth/bhava_bridge (bhava) | deferred |
+| g2p (2.2.0) | g2p (shabda 3.0.0 + shabdakosh + varna) | ✅ ported |
+| ⛔ Blocked (dep) | voice_synth/bhava_bridge (bhava) | deferred |
 | ⛔ Blocked (platform) | simd/{x86,aarch64}, ffi, capture/pw | deferred |
 | ✂ Dropped | tests/serde_tests (no serde) | n/a |
 

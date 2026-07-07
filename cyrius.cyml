@@ -5,7 +5,7 @@ description = "dhvani — core audio engine (buffers, format conversion, mixing,
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/dhvani"
 language = "cyrius"
-cyrius = "6.4.3"
+cyrius = "6.4.11"
 
 [build]
 entry = "src/main.cyr"
@@ -76,6 +76,7 @@ modules = [
     "src/synthesis.cyr",
     "src/sampler.cyr",
     "src/voice_synth.cyr",
+    "src/g2p.cyr",              # g2p feature — externalizes shabda/shabdakosh/varna (over voice)
     "src/creature.cyr",
     "src/environment.cyr",
     "src/mechanical.cyr",
@@ -88,7 +89,12 @@ modules = [
 # clamp/min/max/lerp/sign + F64_* constants; `ganita` the transcendentals
 # dhvani's DSP leans on (sin/cos/exp/ln/pow/sqrt/tanh/…); `tagged` for the
 # Option-shaped payload returns; `fnptr`/`callback` for the closure→fn-ptr
-# port pattern; `bench` for `.bcyr` harnesses.
+# port pattern; `bench` for `.bcyr` harnesses. `hashmap` is the SOLE g2p (shabda)
+# addition: shabdakosh's pronunciation dictionary is a string→phoneme `map_*`,
+# reachable via shabda_convert. Deliberately NOT added: `atomic` (alloc.cyr already
+# self-includes it), `mmap` (its only shabdakosh caller shbdk_lazy_open is itself
+# uncalled — DCE-prunes like the json_*/http_* refs), `bayan` (0 reachable calls;
+# the 136 KB fold would overflow the compiler's LEXID cap).
 [deps]
 stdlib = [
     "syscalls",
@@ -105,6 +111,7 @@ stdlib = [
     "tagged",
     "fnptr",
     "callback",
+    "hashmap",
     "bench",
 ]
 
@@ -138,6 +145,17 @@ modules = ["dist/abaco.cyr"]
 #    (naad 2.1.1 removed its own amplitude_to_db/db_to_amplitude — the former
 #    abaco↔naad duplicate-symbol warning is gone; only abaco defines them now.)
 #
+# ── g2p (shabda) — ported 2026-07-06, same vendored-include pattern as Wave F. ──
+#    shabda 3.0.0 + its subtree (shabdakosh 3.0.1 pronunciation dictionary, varna
+#    2.0.0 phoneme inventories) are vendored into lib/ and included in dependency
+#    order AFTER the naad/svara chain (shabda's own main.cyr order):
+#        … svara → varna → shabdakosh → shabda
+#    The g2p wrapper (src/g2p.cyr) EXTERNALIZES them from the dist like every Wave
+#    F wrapper — a consumer links the shabda chain to use g2p (unused refs
+#    DCE-prune). shabda/shabdakosh both fold hisab/goonj/naad (already present).
+#    Reachable stdlib leaf: `hashmap` (the dictionary map_*). `mmap` (dead lazy
+#    loader shbdk_lazy_open) and `bayan` (0 calls) stay OUT — they DCE-prune like
+#    the json_*/http_* refs. Validated by tests/g2p.tcyr + tests/bundle_g2p.tcyr.
+#
 # ── BLOCKED — dependency not yet ported to Cyrius (still Rust) ──────────────
-#    shabda → `g2p` feature                     (port shabda first)
 #    bhava  → `bhava-voice` / voice_synth/bhava_bridge  (port bhava first)

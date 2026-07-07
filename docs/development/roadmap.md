@@ -109,12 +109,13 @@ now. Two kinds:
 
 | Feature | Module(s) | Blocks on | Unblocks when |
 |---------|-----------|-----------|---------------|
-| `g2p` | `g2p/mod` (269 LOC, 14 tests) | **shabda** (still Rust) | shabda ports to Cyrius |
 | `bhava-voice` | `voice_synth/bhava_bridge` (881 LOC, 38 tests) | **bhava** (still Rust) | bhava ports to Cyrius |
 
+> ✅ **`g2p` unblocked + ported in 2.2.0** (2026-07-06) once **shabda 3.0.0** landed —
+> `g2p/mod` (269 LOC, 14 tests) → `src/g2p.cyr` over vendored shabda + shabdakosh 3.0.1
+> + varna 2.0.0. **bhava** is now the only unported-dep holdout (for `bhava-voice`).
 > All *other* dhvani deps are already ported (abaco, naad, svara, prani, nidhi,
-> garjan, ghurni, goonj). shabda and bhava are the only two holdouts — porting
-> them upstream is the prerequisite for these two dhvani features.
+> garjan, ghurni, goonj, shabda).
 
 ### Waiting on a Cyrius platform primitive (no equivalent yet)
 
