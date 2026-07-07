@@ -5,7 +5,7 @@ description = "dhvani — core audio engine (buffers, format conversion, mixing,
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/dhvani"
 language = "cyrius"
-cyrius = "6.4.11"
+cyrius = "6.4.12"
 
 [build]
 entry = "src/main.cyr"
@@ -146,7 +146,7 @@ modules = ["dist/abaco.cyr"]
 #    abaco↔naad duplicate-symbol warning is gone; only abaco defines them now.)
 #
 # ── g2p (shabda) — ported 2026-07-06, same vendored-include pattern as Wave F. ──
-#    shabda 3.0.0 + its subtree (shabdakosh 3.0.1 pronunciation dictionary, varna
+#    shabda 3.0.1 + its subtree (shabdakosh 3.0.2 pronunciation dictionary, varna
 #    2.0.0 phoneme inventories) are vendored into lib/ and included in dependency
 #    order AFTER the naad/svara chain (shabda's own main.cyr order):
 #        … svara → varna → shabdakosh → shabda

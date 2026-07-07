@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — toolchain 6.4.12 + svara 3.1.0 refresh (in progress)
+
+### Changed
+
+- **Toolchain pin `6.4.11` → `6.4.12`** (`cyrius.cyml [package].cyrius`) — current
+  release; aligns dhvani with the shabda/shabdakosh/svara chain on one toolchain.
+- **svara `3.0.1` → `3.1.0`** (re-vendored) — control-rate glide synthesis: diphthong
+  formant coefficients recompute at a 64-sample control rate instead of per-sample
+  (~5.8× faster diphthong synth), perceptually identical. Pure drop-in for dhvani
+  (identical 246-symbol surface); voice_synth / creature / synthesis / g2p unchanged.
+- **shabda `3.0.0` → `3.0.1`** (re-vendored) — dep/toolchain pin refresh (no shabda
+  API change): picks up svara 3.1.0 + shabdakosh 3.0.2 end to end, so `dhvani_g2p_speak`
+  of a diphthong word gets svara's faster render.
+- **shabdakosh `3.0.1` → `3.0.2`** (re-vendored) — dictionary re-pinned to svara 3.1.0,
+  keeping the vendored g2p chain consistent with what shabda 3.0.1 ships.
+
+Full suite (64 suites / 1692 assertions) green on 6.4.12; drop-in surfaces confirmed
+(zero public symbols removed across svara / shabda / shabdakosh).
+
 ## [2.2.0] — g2p (grapheme-to-phoneme) + toolchain/dep refresh (in progress)
 
 ### Added

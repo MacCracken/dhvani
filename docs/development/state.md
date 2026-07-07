@@ -5,8 +5,9 @@
 
 ## Version
 
-**2.2.0** (in progress) — **g2p** (grapheme-to-phoneme over the newly-ported shabda
-3.0.0) + toolchain bump to **6.4.11** + dep refresh (hisab 2.6.8, vani 1.0.0).
+**2.2.1** (in progress) — toolchain **6.4.12** + **svara 3.1.0** (control-rate glide
+synthesis) + shabda **3.0.1** / shabdakosh **3.0.2** refresh. **2.2.0** — **g2p**
+(grapheme-to-phoneme over shabda) + hisab 2.6.8 / vani 1.0.0.
 **2.1.2** — capture ring path. **2.0.0** (Rust→Cyrius parity port),
 **2.1.0** (vani device I/O), **2.1.1** (RT ring player + multi-format S16/S24/S32)
 released. The `playback` module (`src/playback.cyr`) bridges `AudioBuffer` ↔ vani
@@ -19,7 +20,7 @@ zero per-block allocation, as the free-less bump allocator requires.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.4.11` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.4.12` (in `cyrius.cyml [package].cyrius`).
 - Build: `cyrius build src/main.cyr build/dhvani` (smoke binary — builds green).
 - Test ONE suite: `cyrius test tests/<mod>.tcyr` (explicit path — no discovery).
 - **Parallel-porting concurrency**: every `cyrius …` call re-resolves deps and
@@ -45,11 +46,11 @@ Direct (declared/planned in `cyrius.cyml`):
   git/tag for CI; vendored `lib/abaco.cyr`, `cyrius.lock` written). DSP helpers
   verified (poly_blep/amplitude_to_db/constant_power_pan/…). abaco's unused
   json/http/net helpers DCE-prune (benign warnings).
-- **Synthesis stack** (Wave F): naad 2.1.1, svara 3.0.1, prani 2.0.1,
+- **Synthesis stack** (Wave F): naad 2.1.1, svara 3.1.0, prani 2.0.1,
   nidhi 2.0.0, garjan 2.0.0, ghurni 2.0.0, goonj 2.0.0 + sakshi 2.4.4 (logging)
   + hisab **2.6.8** (HVec3 for goonj) + shravan 2.6.7 (WAV codec for nidhi) —
   **vendored into `lib/` (committed), included in dependency order**, NOT `[deps]`.
-- **g2p stack** (2.2.0): **shabda 3.0.0** (G2P engine) + shabdakosh 3.0.1
+- **g2p stack**: **shabda 3.0.1** (G2P engine, ported 2.2.0) + shabdakosh 3.0.2
   (dictionary) + varna 2.0.0 (phoneme inventories) — same vendored-include pattern
   as Wave F (`… svara → varna → shabdakosh → shabda`), externalized from the dist.
 - **Device I/O**: vani **1.0.0** (ALSA PCM, re-vendored — first stable) + yukti
@@ -74,14 +75,14 @@ alloc-free RT ring **player** (`dhvani_player_*`, 2.1.1) and **recorder**
 consumers). **Device enumeration** (`src/device.cyr`, 2.1.2) over yukti — separate
 module, not in the dist, tested against real HW.
 
-**g2p (2.2.0):** `src/g2p.cyr` bridges text → phonemes → speech over shabda 3.0.0
+**g2p (2.2.0; deps refreshed 2.2.1):** `src/g2p.cyr` bridges text → phonemes → speech over shabda 3.0.1
 (`dhvani_g2p_text_to_phonemes` → svara `PhonemeEvent` vec; `dhvani_g2p_speak` →
 `AudioBuffer`). The Rust module was otherwise `pub use` re-exports (no-ops in the
 flat namespace). shabda 3.0.0 + shabdakosh 3.0.1 + varna 2.0.0 vendored and
 externalized from the dist like the Wave F siblings; stdlib gained only `hashmap`
 (the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
 `tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
-suites, all green on 6.4.11** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
+suites, all green on 6.4.12** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
 
 **abaco 2.3.2** (dep bump): the numerical dsp-reference port caught abaco's dB
 constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.04%/dB
@@ -111,7 +112,7 @@ See the manifest and [`port-audit.md`](port-audit.md).
 | E — MIDI/meter/capture/graph | ✅ midi, voice, midi_routing, midi_v2, translate, meter, capture, record, graph | ✅ |
 | F — Synthesis stack | ✅ synthesis(naad), sampler(nidhi), voice_synth(svara), creature(prani), environment(garjan), mechanical(ghurni), acoustics(goonj) | ✅ |
 | G — Assembly | lib facade, dist/dhvani.cyr bundle, tests/{mod,proptest}, benches | ⬜ |
-| g2p (2.2.0) | g2p (shabda 3.0.0 + shabdakosh + varna) | ✅ ported |
+| g2p (2.2.0) | g2p (shabda 3.0.1 + shabdakosh 3.0.2 + varna 2.0.0) | ✅ ported |
 | ⛔ Blocked (dep) | voice_synth/bhava_bridge (bhava) | deferred |
 | ⛔ Blocked (platform) | simd/{x86,aarch64}, ffi, capture/pw | deferred |
 | ✂ Dropped | tests/serde_tests (no serde) | n/a |

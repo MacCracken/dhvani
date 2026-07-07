@@ -84,7 +84,7 @@ pre-sized arena; port it early and make it the universal convention.
 
 ## Toolchain & commands
 
-- cycc pin: **6.4.11** (`cyrius.cyml [package].cyrius`).
+- cycc pin: **6.4.12** (`cyrius.cyml [package].cyrius`).
 - Build: `cyrius build src/main.cyr build/dhvani`
 - Test ONE suite: `cyrius test tests/<mod>.tcyr` (explicit path — no discovery).
 - **Concurrency**: `cyrius build/test/deps` re-resolve deps and race on
@@ -213,7 +213,7 @@ Port bhava to Cyrius first; then this lands in a follow-up wave. Its upstream de
 **✅ `g2p/mod` (269 LOC, 14 tests) — UNBLOCKED + ported 2.2.0** (2026-07-06), once
 **shabda 3.0.0** landed. `src/g2p.cyr` = the two `dhvani_g2p_text_to_phonemes` /
 `dhvani_g2p_speak` bridges (the Rust module is otherwise `pub use` re-exports —
-no-ops in Cyrius's flat namespace). shabda 3.0.0 + its subtree (shabdakosh 3.0.1
+no-ops in Cyrius's flat namespace). shabda 3.0.1 + its subtree (shabdakosh 3.0.2
 dictionary, varna 2.0.0 phoneme inventories) are vendored into `lib/` and included
 in dependency order (`… svara → varna → shabdakosh → shabda`), like the Wave F
 siblings — the wrapper externalizes them from the dist (unused refs DCE-prune).

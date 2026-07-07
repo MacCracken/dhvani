@@ -112,7 +112,7 @@ now. Two kinds:
 | `bhava-voice` | `voice_synth/bhava_bridge` (881 LOC, 38 tests) | **bhava** (still Rust) | bhava ports to Cyrius |
 
 > ✅ **`g2p` unblocked + ported in 2.2.0** (2026-07-06) once **shabda 3.0.0** landed —
-> `g2p/mod` (269 LOC, 14 tests) → `src/g2p.cyr` over vendored shabda + shabdakosh 3.0.1
+> `g2p/mod` (269 LOC, 14 tests) → `src/g2p.cyr` over vendored shabda 3.0.1 + shabdakosh 3.0.2
 > + varna 2.0.0. **bhava** is now the only unported-dep holdout (for `bhava-voice`).
 > All *other* dhvani deps are already ported (abaco, naad, svara, prani, nidhi,
 > garjan, ghurni, goonj, shabda).
