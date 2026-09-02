@@ -2,9 +2,12 @@
 # Covers the hardware-free format bridge (AudioBuffer f64 <-> S16_LE PCM bytes):
 # exact byte packing + round-trip within i16 quantization. The device glue
 # (open/write/close/capture over vani) needs /dev/snd and is validated on real
-# hardware (see programs / play_tone), not here. Chain: yukti -> sakshi -> vani
-# (vani's externalized deps) then dhvani error -> simd -> buffer -> playback.
+# hardware (see programs / play_tone), not here. Chain: patra -> yukti -> sakshi
+# -> vani (vani's externalized deps) then dhvani error -> simd -> buffer -> playback.
+# patra leads the chain as of yukti 2.3.8, which routes device discovery through
+# patra_result_get_str_len (read_procfs_text) instead of raw sys_open/sys_read.
 
+include "lib/patra.cyr"
 include "lib/yukti.cyr"
 include "lib/sakshi.cyr"
 include "lib/vani.cyr"

@@ -5,8 +5,12 @@
 
 ## Version
 
-**2.2.1** (in progress) — toolchain **6.4.12** + **svara 3.1.0** (control-rate glide
-synthesis) + shabda **3.0.1** / shabdakosh **3.0.2** refresh. **2.2.0** — **g2p**
+**2.2.2** (in progress) — toolchain **6.5.41** + a **full 17-bundle dependency
+sweep** (naad 2.2.2 / svara 3.5.4 / hisab 2.11.2 / vani 1.2.2 / …), the
+`f64_round` → `f64_round_half_away` **rounding-parity fix**, and a self-gating
+`tests/hw/device.tcyr` (6.5.x made test discovery recursive). **2.2.1** —
+toolchain 6.4.12 + svara 3.1.0 (control-rate glide synthesis) + shabda 3.0.1 /
+shabdakosh 3.0.2 refresh. **2.2.0** — **g2p**
 (grapheme-to-phoneme over shabda) + hisab 2.6.8 / vani 1.0.0.
 **2.1.2** — capture ring path. **2.0.0** (Rust→Cyrius parity port),
 **2.1.0** (vani device I/O), **2.1.1** (RT ring player + multi-format S16/S24/S32)
@@ -20,9 +24,12 @@ zero per-block allocation, as the free-less bump allocator requires.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.4.12` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.5.41` (in `cyrius.cyml [package].cyrius`).
 - Build: `cyrius build src/main.cyr build/dhvani` (smoke binary — builds green).
 - Test ONE suite: `cyrius test tests/<mod>.tcyr` (explicit path — no discovery).
+- ⚠ **`cyrius test` discovery is RECURSIVE as of 6.5.x** — it walks `tests/`
+  subdirectories, so `tests/hw/` is no longer invisible to CI. `tests/hw/device.tcyr`
+  self-gates instead: no PCM endpoints → named SKIP, exit 0.
 - **Parallel-porting concurrency**: every `cyrius …` call re-resolves deps and
   races on `cyrius.lock` (concurrent runs corrupt it). Serialize toolchain calls
   behind `flock <scratch>/dhvani-build.lock cyrius …`.
@@ -42,19 +49,23 @@ Direct (declared/planned in `cyrius.cyml`):
 - **stdlib** — base set + the DSP-math set (`math`, `ganita`, `tagged`,
   `fnptr`, `callback`, `bench`) + the g2p set (`hashmap`, `atomic`, `mmap` — for
   shabdakosh's dictionary; **not** `bayan`, 0 reachable calls).
-- **Math**: ✅ **abaco 2.3.2 wired** (`[deps.abaco]`, `path=../abaco` local +
+- **Math**: ✅ **abaco 2.4.5 wired** (`[deps.abaco]`, `path=../abaco` local +
   git/tag for CI; vendored `lib/abaco.cyr`, `cyrius.lock` written). DSP helpers
   verified (poly_blep/amplitude_to_db/constant_power_pan/…). abaco's unused
   json/http/net helpers DCE-prune (benign warnings).
-- **Synthesis stack** (Wave F): naad 2.1.1, svara 3.1.0, prani 2.0.1,
-  nidhi 2.0.0, garjan 2.0.0, ghurni 2.0.0, goonj 2.0.0 + sakshi 2.4.4 (logging)
-  + hisab **2.6.8** (HVec3 for goonj) + shravan 2.6.7 (WAV codec for nidhi) —
+- **Synthesis stack** (Wave F): naad **2.2.2**, svara **3.5.4**, prani **2.0.12**,
+  nidhi **2.1.1**, garjan **2.5.1**, ghurni **2.6.0**, goonj **2.0.4** + sakshi
+  **2.4.12** (logging) + hisab **2.11.2** (HVec3 for goonj) + shravan **2.8.0**
+  (WAV codec for nidhi) —
   **vendored into `lib/` (committed), included in dependency order**, NOT `[deps]`.
-- **g2p stack**: **shabda 3.0.1** (G2P engine, ported 2.2.0) + shabdakosh 3.0.2
-  (dictionary) + varna 2.0.0 (phoneme inventories) — same vendored-include pattern
+- **g2p stack**: **shabda 3.0.4** (G2P engine, ported 2.2.0) + shabdakosh **3.0.6**
+  (dictionary) + varna **2.4.1** (phoneme inventories) — same vendored-include pattern
   as Wave F (`… svara → varna → shabdakosh → shabda`), externalized from the dist.
-- **Device I/O**: vani **1.0.0** (ALSA PCM, re-vendored — first stable) + yukti
-  2.2.8 (device enumeration, separate module — not in the dist).
+- **Device I/O**: vani **1.2.2** (ALSA PCM; 1.2.x dropped the per-call scratch
+  `alloc()` in the ring paths — an unbounded leak under the bump allocator) + yukti
+  **2.3.8** (device enumeration, separate module — not in the dist) + patra
+  **1.13.11** (yukti 2.3.8 reads `/proc/asound` through patra's `read_procfs_text`,
+  so patra now leads the include chain in `tests/playback.tcyr` too).
 - **Blocked** (not ported): bhava (→ bhava-voice). shabda is now ported ✅.
 
 ## Consumers
@@ -83,6 +94,9 @@ externalized from the dist like the Wave F siblings; stdlib gained only `hashmap
 (the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
 `tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
 suites, all green on 6.4.12** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
+**As of 2.2.2: 65 suites / 1,695 assertions green on 6.5.41** — `tests/hw/device.tcyr`
+is now discovered (recursive runner) and contributes its 3 assertions, skipping
+cleanly where there is no audio hardware.
 
 **abaco 2.3.2** (dep bump): the numerical dsp-reference port caught abaco's dB
 constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.04%/dB

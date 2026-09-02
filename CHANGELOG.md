@@ -5,6 +5,124 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] — toolchain 6.5.41 + full dependency sweep
+
+### Fixed
+
+- **Rounding parity break (`f64_round` → `f64_round_half_away`)** — abaco 2.4.x
+  **deleted** `f64_round`, renaming it to `f64_round_half_away`. dhvani's three
+  call sites kept compiling because the bare name silently rebound to the **cycc
+  builtin `f64_round`**, which rounds **ties-to-even** where abaco's (and Rust's)
+  rounds **half away from zero**. Measured divergence: `0.5 → 0` (was 1),
+  `2.5 → 2` (was 3), `4.5 → 4` (was 5). All three oracle sites use Rust
+  `f32::round()` (half-away), so this was a silent parity regression against
+  `rust-old/`:
+  - `src/reverb.cyr:46` — comb/allpass delay length
+    (`rust-old/src/dsp/reverb.rs:160`); ties are reachable at 22050 Hz, where
+    `base * 0.5` lands on an exact `.5` for every odd `base`.
+  - `src/dither.cyr:65` — quantization step
+    (`rust-old/src/buffer/dither.rs:58`).
+  - `src/chroma.cyr:83` — semitone → pitch-class
+    (`rust-old/src/analysis/chroma.rs:72`); an exact `.5` is a quarter-tone.
+
+  All three now call `f64_round_half_away` explicitly. The oracle has exactly
+  three `.round()` calls and dhvani exactly three `f64_round` calls — a 1:1 map.
+
+- **`tests/hw/device.tcyr` no longer breaks CI.** As of 6.5.x `cyrius test`
+  auto-discovery **recurses into `tests/` subdirectories**, so the bare
+  `cyrius test` CI runs now pick up the hardware suite that the old top-level-only
+  discovery excluded (verified: 65 suites with `tests/hw/`, 64 without). The test
+  now **gates itself at runtime** — when enumeration returns no PCM endpoints it
+  prints a named SKIP and exits 0, so a headless runner stays green while a box
+  with a sound card still gets the full `n > 0` assertion. Mutation-proven in both
+  directions. The gate is deliberately a runtime check on the enumeration result,
+  not a compile-time `#ifdef`/CI flag, matching the toolchain's own idiom for
+  capability-gated tests (cyrius 6.5.27).
+
+### Changed
+
+- **Toolchain pin `6.4.12` → `6.5.41`** (`cyrius.cyml [package].cyrius`) — ~120
+  releases. No source change was required to compile. The one broad-reach codegen
+  change is **6.4.56 SESTYPE normalization**, which retypes `f64_lt(..)`-style
+  builtin results as i64-boolean; dhvani uses the `if (f64_gt(x, y) == 1)` idiom
+  at 40+ DSP sites, so every one of those comparisons changed emitted code.
+  Re-benched to prove it cost nothing — see `BENCHMARKS.md`.
+- **All 17 vendored bundles re-vendored** to current releases:
+
+  | bundle | from | to | | bundle | from | to |
+  |--------|------|----|-|--------|------|----|
+  | abaco | 2.3.2 | **2.4.5** | | shabda | 3.0.1 | **3.0.4** |
+  | naad | 2.1.1 | **2.2.2** | | shabdakosh | 3.0.2 | **3.0.6** |
+  | svara | 3.1.0 | **3.5.4** | | varna | 2.0.0 | **2.4.1** |
+  | prani | 2.0.1 | **2.0.12** | | hisab | 2.6.8 | **2.11.2** |
+  | nidhi | 2.0.0 | **2.1.1** | | shravan | 2.6.7 | **2.8.0** |
+  | garjan | 2.0.0 | **2.5.1** | | sakshi | 2.4.4 | **2.4.12** |
+  | ghurni | 2.0.0 | **2.6.0** | | vani | 1.0.0 | **1.2.2** |
+  | goonj | 2.0.0 | **2.0.4** | | yukti | 2.2.8 | **2.3.8** |
+  | | | | | patra | 1.12.8 | **1.13.11** |
+
+- **`FILTER_*` → `NAAD_FILTER_*` (naad 2.2.0) forced a coordinated bump.** naad's
+  biquad filter-type constants were renamed, and garjan / ghurni / prani / svara
+  all absorbed the rename upstream. naad, svara, prani, ghurni and garjan therefore
+  had to move **together** — bumping any one alone leaves undefined constants. The
+  already-published dists are all naad-2.2-ready, so no shim was needed. The bump
+  also clears a latent duplicate-symbol hazard in `tests/sampler.tcyr`, which
+  includes both `lib/naad.cyr` and `lib/nidhi.cyr` — both previously defined
+  `FILTER_LOWPASS..NOTCH` at identical values.
+- **stdlib gained `unicode`** (`cyrius.cyml [deps].stdlib`) — shabda 3.0.2's
+  Unicode rewrite routes `is_alphabetic` / `to_lowercase` / `is_whitespace`
+  through real Unicode tables (`unicode_category`, `unicode_to_lower`,
+  `GC_LU`/`GC_LO`/`GC_NL`) instead of ASCII-only checks. It vendors as a
+  **directory** (`lib/unicode/`, 7 files), unlike every other flat `lib/*.cyr`.
+  `hashmap` is consequently no longer "the sole g2p addition"; the manifest
+  comment was corrected.
+- **`[deps.abaco] tag` `2.3.2` → `2.4.5`** — the tag had drifted out of sync with
+  the vendored bundle. Because `path = "../abaco"` wins for local dev, `cyrius
+  deps` had already resolved 2.4.5 into `lib/` while CI would still have fetched
+  the 2.3.2 tag — the skew that hid the `f64_round` break above.
+- **stdlib re-synced to the 6.5.41 snapshot** (19 files) plus the new
+  `lib/hashseed.cyr` leaf (per-process hash seed shared by the hashmap variants).
+  6.4.63's `./lib/ shadows version-pinned …` warning — which named sakshi / yukti
+  / patra / vani skew on every invocation — is now silent.
+- **`tests/playback.tcyr` include chain gained `lib/patra.cyr`** ahead of yukti:
+  yukti 2.3.8 rewrote `_audio_load_drivers` to read `/proc/asound` via patra's
+  `read_procfs_text` instead of raw `sys_open`/`sys_read`, newly externalizing
+  `patra_result_get_str_len`.
+- **`tests/sampler.tcyr` binds `n_engine_note_on`'s result** at three sites —
+  nidhi 2.1.1 marked it `#must_use`.
+- **`dist/dhvani.cyr` rebuilt** at 2.2.2 (9,538 lines), now emitted alongside a
+  `dist/dhvani.deps` stdlib sidecar (`cyrius distlib` generates it; `cyrius deps`
+  consumes it).
+- `.gitignore` now excludes `lib/*.cyr.f` / `lib/*.cyr.syms`, the per-dep
+  resolution caches `cyrius deps` writes next to each vendored bundle.
+
+### Notable upstream behavior changes (no dhvani code change)
+
+- **vani 1.2.x removed the per-call `alloc()`** in `vani_play_from_ring` /
+  `vani_record_to_ring`, caching scratch on the device handle instead. On a
+  free-less bump allocator that per-call allocation was an unbounded leak across a
+  long render, so this directly hardens dhvani's RT ring path.
+- **varna 2.4.1 made the pre-built phoneme inventories shared singletons**
+  (build-once). Previously every `dhvani_g2p_text_to_phonemes` / `dhvani_g2p_speak`
+  call rebuilt the 47-entry English inventory plus phonotactics — also an
+  unbounded bump-allocator leak. Treat the returned inventories as read-only;
+  `phoneme_clone` gives a mutable copy.
+- **nidhi 2.1.1's render path is allocation-free**, and **svara 3.5.4** closes a
+  crash for `sample_rate <= 1200 Hz` in the creature/vocal path (`tests/creature.tcyr`
+  only ever passes 44100, which is why the suite never saw it).
+- **shabda 3.0.2+** fixed a heap over-read in `_shabda_decode_chars` (UTF-8
+  continuation bytes past the NUL terminator) and stopped `shabda_select_phonemes`
+  terminating the host process on an empty pronunciation vector. SSML nesting is
+  now capped at `SHABDA_SSML_MAX_DEPTH = 256` — a parse error where `rust-old`
+  would SIGSEGV, and an intentional divergence from the oracle.
+- **naad 2.2.2 / garjan 2.4.0 / ghurni 2.5.0** now range-check constructor
+  arguments and return `*_ERR_INVALID_PARAMETER` instead of falling through to a
+  last-enum default.
+
+Full suite **65 suites / 1,695 assertions green** on 6.5.41 (1,692 at 2.2.1; the
++3 is `tests/hw/device.tcyr`, now discovered by the recursive runner). Hot paths
+re-benched with no regression.
+
 ## [2.2.1] — toolchain 6.4.12 + svara 3.1.0 refresh (in progress)
 
 ### Changed

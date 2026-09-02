@@ -80,7 +80,7 @@ fn dhvani_chroma_chromagram(buf, window_size) {
         elif (f64_lt(freq, 1.0) == 1) { bin = bin + 1; }
         else {
             var semitones = f64_mul(12.0, f64_log2(f64_div(freq, c0)));
-            var rounded = f64_to(f64_round(semitones));
+            var rounded = f64_to(f64_round_half_away(semitones));
             # rem_euclid(12): always in [0, 11].
             var class = ((rounded % 12) + 12) % 12;
             vec_set(chroma, class, f64_add(vec_get(chroma, class), f64_mul(mag, mag)));

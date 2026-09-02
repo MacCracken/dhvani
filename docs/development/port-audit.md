@@ -82,11 +82,55 @@ pre-sized arena; port it early and make it the universal convention.
 
 ---
 
+### Rounding: always `f64_round_half_away`, never bare `f64_round`
+
+Rust's `f32::round()`/`f64::round()` round **half away from zero**. Cyrius has a
+cycc **builtin** `f64_round` that rounds **ties-to-even**, and abaco exports
+`f64_round_half_away` for the Rust semantics. abaco used to also export
+`f64_round`; 2.4.x **deleted** it.
+
+⚠ **This is a silent-divergence trap.** A bare `f64_round(x)` call still compiles
+after the deletion — it just rebinds to the builtin — so the tests stay green
+while the numbers quietly stop matching the oracle. dhvani 2.2.2 shipped this bug
+in `reverb`, `dither` and `chroma` before it was caught by symbol-diffing the
+abaco bundle. Measured: `0.5 → 0` (want 1), `2.5 → 2` (want 3), `4.5 → 4` (want 5).
+
+**Rule:** every ported `.round()` becomes `f64_round_half_away`. The oracle has
+exactly three `.round()` call sites, and dhvani has exactly three — keep them 1:1.
+More generally: on any bundle bump, diff the exported symbols and grep for every
+removed name, because a flat namespace turns a deletion into a rebind, not an error.
+
+### Accepted divergences from `rust-old/` (dependency-imposed)
+
+These come from hardened upstream siblings, not from the port. Each is a
+deliberate deviation from "matches what Rust did":
+
+- **SSML nesting depth is capped** at `SHABDA_SSML_MAX_DEPTH = 256` (shabda
+  3.0.2+). `rust-old/src/ssml.rs` had no cap and would SIGSEGV on deeper nesting;
+  the Cyrius path returns a parse error instead.
+- **Pre-built phoneme inventories are shared singletons** (varna 2.4.1). Rust
+  rebuilt them per call. They are now **read-only** — use `phoneme_clone` for a
+  mutable copy. This was required, not cosmetic: rebuilding the 47-entry English
+  inventory on every `dhvani_g2p_*` call leaked unboundedly under the free-less
+  bump allocator.
+- **Constructors range-check their arguments** and return
+  `*_ERR_INVALID_PARAMETER` (naad 2.2.2, garjan 2.4.0, ghurni 2.5.0, prani 2.0.6)
+  where Rust fell through to the last enum variant.
+- **`ganita_f64_pow` fixed `0^0` / `0^-n` / negative-base-integral-exponent**
+  (ganita 1.1.4). The comment at `src/automation.cyr:38` describing the old
+  NaN-returning behavior is stale; the guard itself still matches the oracle and
+  stays.
+
+---
+
 ## Toolchain & commands
 
-- cycc pin: **6.4.12** (`cyrius.cyml [package].cyrius`).
+- cycc pin: **6.5.41** (`cyrius.cyml [package].cyrius`).
 - Build: `cyrius build src/main.cyr build/dhvani`
 - Test ONE suite: `cyrius test tests/<mod>.tcyr` (explicit path — no discovery).
+- ⚠ **Discovery is RECURSIVE as of 6.5.x** — bare `cyrius test` walks `tests/`
+  subdirectories, so `tests/hw/` reaches CI. HW suites self-gate at runtime
+  (named SKIP + exit 0 when the capability is absent).
 - **Concurrency**: `cyrius build/test/deps` re-resolve deps and race on
   `cyrius.lock`. Parallel-porting agents MUST serialize every `cyrius …` call
   behind a shared file lock: `flock <scratch>/dhvani-build.lock cyrius …`.

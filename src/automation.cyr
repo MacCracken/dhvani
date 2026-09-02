@@ -35,7 +35,11 @@ fn dhvani_auto_interpolate(from, to, from_frame, to_frame, current, curve, exp) 
     if (curve == DH_CURVE_LINEAR) { return f64_add(from, f64_mul(f64_sub(to, from), t)); }
     if (curve == DH_CURVE_EXPONENTIAL) {
         var e = f64_max(exp, 0.001);
-        # f64_pow(0, e) returns NaN in Cyrius (ln(0)); Rust powf(0,e)=0. Guard it.
+        # Historically f64_pow(0, e) returned NaN in Cyrius (ln(0)) while Rust
+        # powf(0,e) = 0, so this guard was load-bearing. ganita 1.1.4 (via hisab
+        # 2.11.2) fixed the zero-base case — f64_pow(0, e) is now 0 — so the guard
+        # is redundant, but it is KEPT: it states the oracle's contract explicitly
+        # and costs one predictable branch outside any hot loop.
         var tp = 0;
         if (f64_gt(t, 0) == 1) { tp = f64_pow(t, e); }
         return f64_add(from, f64_mul(f64_sub(to, from), tp));

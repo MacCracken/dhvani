@@ -43,7 +43,7 @@ fn dhvani_reverbparams_validate(p) {
 # scale a base delay (@44100) to the target rate; min 1.
 #must_use
 fn dhvani_reverb_scale_delay(base, sample_rate) {
-    var s = f64_to(f64_round(f64_div(f64_mul(f64_from(base), f64_from(sample_rate)), 44100.0)));
+    var s = f64_to(f64_round_half_away(f64_div(f64_mul(f64_from(base), f64_from(sample_rate)), 44100.0)));
     if (s < 1) { s = 1; }
     return s;
 }

@@ -7,7 +7,7 @@
 # `Result<T, E>` shape using v5.8.21 generic-parameter syntax.
 # Tagged.cyr transitively `include`s this file so existing
 # consumers (lib/net.cyr, lib/ws_server.cyr, lib/sandhi.cyr,
-# tests/tcyr/tagged.tcyr) stay working unchanged.
+# tests/tcyr/stdlib/tagged.tcyr) stay working unchanged.
 #
 # Layout — same as the v5.8.23 compiler-generated form:
 #   tag at +0  (0 = Ok, 1 = Err — matches prior OK/ERR convention)
@@ -15,7 +15,7 @@
 #
 # Type parameters T/E are syntactically accepted but not yet
 # bound semantically (mono-only, erasure semantics — same status
-# as `enum TwoParams<T, E>` in tests/tcyr/enum_generics.tcyr).
+# as `enum TwoParams<T, E>` in tests/tcyr/lang/enum_generics.tcyr).
 # Subsequent slots in the v5.8.28–v5.8.32 sub-suite layer the
 # `?` propagation operator (v5.8.29) and stdlib migrations
 # (v5.8.30/.31) on top.
@@ -23,6 +23,49 @@
 enum Result<T, E> {
     Ok(v);
     Err(e);
+}
+
+# ── Allocator-parameterised constructors (v6.5.41) ──
+#
+# THE DEFECT (sandhi, filed against 6.4.86 and reproducing unchanged since). `Ok(v)` / `Err(e)`
+# allocate **16 bytes per construction from the global bump allocator**, whose only reclaim is
+# `alloc_reset()` — and that "INVALIDATES EVERY POINTER THE ALLOCATOR HAS EVER HANDED OUT", so
+# a long-running server cannot call it. Measured on 6.5.39: `100x sock_send` grows the global
+# allocator by exactly 1600 B, 16 per call. Unbounded growth with no consumer workaround.
+#
+# ⭐ THE CAUSE IS NOT `Result`, AND NOT net.cyr. It is the enum payload-variant constructor
+# lowering itself (`src/frontend/parse_types.cyr:386` emits `EMOVI(S, 8 + ctor_arity * 8)`
+# followed by a call to the function literally named `alloc`) — unconditional, and not
+# allocator-parameterised. A plain user `enum Color { Red(v); Green; }` allocates the identical
+# 16 B. Nor does the `: Result` return annotation matter: it is a codegen NO-OP, classified as
+# an i64-shape scalar. So this is a language-level property that every payload-carrying enum has.
+#
+# ⚠ THE REAL FIX IS THE REPRESENTATION, AND IT IS A DIFFERENT SIZE CLASS: 24 payload-variant
+# enum declarations across 15 files and **516** `Ok(`/`Err(`/`Some(` construction sites. Note
+# also that cycc's OWN source cannot detect a mistake there — every `enum` in `src/` is
+# constants-only, with no payload variants, which is exactly why an earlier attempt could reach
+# a byte-identical self-host while being wrong. Not attempted here.
+#
+# What IS here is the escape hatch: construct the same 16-byte box from a caller-supplied
+# allocator, so a server can hand in an arena it resets per request. Layout is unchanged —
+# tag at +0, payload at +8 — so `is_ok` / `is_err_result` / `result_unwrap` / `?` all accept
+# these boxes with no change. Hand-rolled rather than `Ok(v)` precisely because the `Ok(...)`
+# form is what routes to the global `alloc`.
+# Build an `Ok(v)` box from a caller-supplied allocator instead of the global bump allocator.
+fn ok_via(a, v): i64 {
+    var r = alloc_via(a, 16);
+    store64(r, Ok);
+    store64(r + 8, v);
+    return r;
+}
+
+# Build an `Err(e)` box from a caller-supplied allocator. See `ok_via` above for why this
+# exists and why it is hand-rolled rather than using the `Err(...)` constructor.
+fn err_via(a, e): i64 {
+    var r = alloc_via(a, 16);
+    store64(r, Err);
+    store64(r + 8, e);
+    return r;
 }
 
 # Return 1 if result is Ok

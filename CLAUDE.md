@@ -48,10 +48,14 @@ cyrius test                              # run tests/*.tcyr (CI does this)
 cyrius test tests/hw/device.tcyr         # HARDWARE tests — local only, explicit path
 ```
 
-**Hardware tests live in `tests/hw/`.** Bare `cyrius test` (what CI runs) only
-auto-discovers top-level `tests/*.tcyr`, so `tests/hw/` is skipped in CI — those
-suites need real audio hardware (`/dev/snd`, e.g. device enumeration) and would
-fail headless. Run them locally by explicit path.
+**Hardware tests live in `tests/hw/`.** As of Cyrius **6.5.x** bare `cyrius test`
+(what CI runs) **recurses into `tests/` subdirectories**, so `tests/hw/` is NO
+longer excluded from CI — the pre-6.5 "top-level only" split is gone. Those suites
+need real audio hardware (`/dev/snd`, e.g. device enumeration), so each one
+**self-gates at runtime**: when the capability is missing it prints a named SKIP
+and exits 0, keeping headless CI green while a box with a sound card still runs
+the real assertions. Follow that pattern for any new `tests/hw/` suite — a runtime
+check on the actual result, never an `#ifdef`/CI env flag.
 
 ## Key Principles
 

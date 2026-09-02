@@ -62,7 +62,7 @@ fn dhvani_dither_noise_shaped(samples, out, target_bits) {
         var r2 = dh_rng_bipolar(rng);
         var dither = f64_mul(f64_mul(f64_add(r1, r2), 0.5), quant_step);
         var dithered = f64_add(shaped, dither);
-        var quantized = f64_mul(f64_round(f64_div(dithered, quant_step)), quant_step);
+        var quantized = f64_mul(f64_round_half_away(f64_div(dithered, quant_step)), quant_step);
         error = f64_sub(quantized, shaped);
         vec_set(out, i, quantized);
         i = i + 1;

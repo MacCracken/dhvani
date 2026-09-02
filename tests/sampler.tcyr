@@ -58,7 +58,7 @@ alloc_init();
 # ---- sampler_to_buffer ----
 test_group("sampler_to_buffer");
 var e1 = make_engine();
-n_engine_note_on(e1, 69, 100);
+var v1 = n_engine_note_on(e1, 69, 100);
 var b1 = dhvani_sampler_render_to_buffer(e1, 2, 4410, 44100);
 assert_eq(dhvani_buffer_channels(b1), 2, "channels 2");
 assert_eq(dhvani_buffer_frames(b1), 4410, "frames 4410");
@@ -67,14 +67,14 @@ assert(f64_gt(dhvani_buffer_rms(b1), 0), "rms > 0");
 # ---- sampler_pitch_shift ----
 test_group("sampler_pitch_shift");
 var e2 = make_engine();
-n_engine_note_on(e2, 81, 100);
+var v2 = n_engine_note_on(e2, 81, 100);
 var b2 = dhvani_sampler_render_to_buffer(e2, 1, 4410, 44100);
 assert(f64_gt(dhvani_buffer_rms(b2), 0), "pitch-shifted rms > 0");
 
 # ---- sampler_note_off ----
 test_group("sampler_note_off");
 var e3 = make_engine();
-n_engine_note_on(e3, 69, 100);
+var v3 = n_engine_note_on(e3, 69, 100);
 n_engine_note_off(e3, 69);
 var b3 = dhvani_sampler_render_to_buffer(e3, 1, 44100, 44100);
 assert_eq(all_finite(b3), 1, "all finite through release");
