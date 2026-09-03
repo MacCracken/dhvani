@@ -107,7 +107,8 @@ fn dhvani_biquad_coeffs_unity() {
 # process one sample through a state (Direct Form II Transposed).
 fn dhvani_biquad_state_process(st, input, c) {
     var out = f64_add(f64_mul(DhBiquadCoeffs_b0(c), input), DhBiquadState_z1(st));
-    DhBiquadState_set_z1(st, f64_add(f64_sub(f64_mul(DhBiquadCoeffs_b1(c), input), f64_mul(DhBiquadCoeffs_a1(c), out)), DhBiquadState_z2(st)));
+    var z1n = f64_sub(f64_mul(DhBiquadCoeffs_b1(c), input), f64_mul(DhBiquadCoeffs_a1(c), out));
+    DhBiquadState_set_z1(st, f64_add(z1n, DhBiquadState_z2(st)));
     DhBiquadState_set_z2(st, f64_sub(f64_mul(DhBiquadCoeffs_b2(c), input), f64_mul(DhBiquadCoeffs_a2(c), out)));
     return out;
 }
@@ -166,7 +167,10 @@ fn dhvani_biquad_process(self, buf) {
 #must_use
 fn dhvani_biquad_process_sample(self, sample, channel) {
     if (channel < vec_len(DhBiquadFilter_states(self))) {
-        return dhvani_biquad_state_process(vec_get(DhBiquadFilter_states(self), channel), sample, DhBiquadFilter_coeffs(self));
+        return dhvani_biquad_state_process(
+          vec_get(DhBiquadFilter_states(self), channel),
+          sample,
+          DhBiquadFilter_coeffs(self));
     }
     return sample;
 }
@@ -190,12 +194,20 @@ fn dhvani_biquad_set_params(self, filter_type, gain_db, freq_hz, q) {
     DhBiquadFilter_set_gain_db(self, gain_db);
     DhBiquadFilter_set_freq_hz(self, freq_hz);
     DhBiquadFilter_set_q(self, q);
-    DhBiquadFilter_set_coeffs(self, dhvani_biquad_design(filter_type, gain_db, freq_hz, q, DhBiquadFilter_sample_rate(self)));
+    DhBiquadFilter_set_coeffs(
+      self,
+      dhvani_biquad_design(filter_type, gain_db, freq_hz, q, DhBiquadFilter_sample_rate(self)));
     return 0;
 }
 fn dhvani_biquad_set_sample_rate(self, sample_rate) {
     DhBiquadFilter_set_sample_rate(self, sample_rate);
-    DhBiquadFilter_set_coeffs(self, dhvani_biquad_design(DhBiquadFilter_filter_type(self), DhBiquadFilter_gain_db(self), DhBiquadFilter_freq_hz(self), DhBiquadFilter_q(self), sample_rate));
+    var rc = dhvani_biquad_design(
+      DhBiquadFilter_filter_type(self),
+      DhBiquadFilter_gain_db(self),
+      DhBiquadFilter_freq_hz(self),
+      DhBiquadFilter_q(self),
+      sample_rate);
+    DhBiquadFilter_set_coeffs(self, rc);
     return 0;
 }
 fn dhvani_biquad_set_bypass(self, bypassed) { DhBiquadFilter_set_bypassed(self, bypassed); return 0; }

@@ -135,34 +135,157 @@ path = "../abaco"
 tag = "2.4.5"
 modules = ["dist/abaco.cyr"]
 
-# ── Synthesis stack (Wave F) — sibling dist bundles are NOT wired as [deps]. ──
-#    The `[deps.X] modules=["dist/X.cyr"]` path auto-includes each bundle's
-#    transitive deps in an order that breaks cross-bundle *type* refs (naad
-#    `sizeof(CoupledRooms)` before goonj) AND forces stdlib `hashmap`+`bayan`
-#    (bayan is 136 KB — force-including it overflows the compiler LEXID cap).
-#    Instead the 10 bundles (naad/svara/prani/nidhi/garjan/ghurni/goonj + sakshi
-#    + hisab + shravan) are vendored into `lib/` (committed) and each Wave F
-#    test/module `include`s the ones it needs IN DEPENDENCY ORDER:
-#        sakshi → hisab → goonj → naad → shravan → svara → ghurni → garjan → prani
-#    (shravan = WAV codec, needed by nidhi for STREAM_EVT_*/wav_* — like every
-#    dist, nidhi externalizes it; the consumer supplies it.) hisab compiles clean
-#    under this ordering (the "array size" error was a mis-ordered-concatenation
-#    artifact, not a 6.4.4 break). Full rationale in port-audit.md Wave F.
-#    (naad 2.1.1 removed its own amplitude_to_db/db_to_amplitude — the former
-#    abaco↔naad duplicate-symbol warning is gone; only abaco defines them now.)
+# ── Sibling bundles — WIRED AS REAL `[deps]` as of 2.2.3 ────────────────────
+#    Declared in DEPENDENCY ORDER (the same order the `include` lines use):
+#        sakshi → hisab → goonj → naad → shravan → svara → nidhi → ghurni
+#        → garjan → prani → varna → shabdakosh → shabda → patra → yukti → vani
 #
-# ── g2p (shabda) — ported 2026-07-06, same vendored-include pattern as Wave F. ──
-#    shabda 3.0.4 + its subtree (shabdakosh 3.0.6 pronunciation dictionary, varna
-#    2.4.1 phoneme inventories) are vendored into lib/ and included in dependency
-#    order AFTER the naad/svara chain (shabda's own main.cyr order):
-#        … svara → varna → shabdakosh → shabda
-#    The g2p wrapper (src/g2p.cyr) EXTERNALIZES them from the dist like every Wave
-#    F wrapper — a consumer links the shabda chain to use g2p (unused refs
-#    DCE-prune). shabda/shabdakosh both fold hisab/goonj/naad (already present).
-#    Reachable stdlib leaves: `hashmap` (the dictionary map_*) + `unicode`
-#    (shabda 3.0.2+ Unicode tables). `mmap` (dead lazy
-#    loader shbdk_lazy_open) and `bayan` (0 calls) stay OUT — they DCE-prune like
-#    the json_*/http_* refs. Validated by tests/g2p.tcyr + tests/bundle_g2p.tcyr.
+#    HISTORY — why these used to be hand-vendored. Through 2.2.2 the 16 sibling
+#    bundles were copied into `lib/` by hand and pulled in by explicit ordered
+#    `include`, because `[deps]` had two blocking defects: (a) it auto-included
+#    each bundle's transitive deps in an order that broke cross-bundle *type*
+#    refs (naad `sizeof(CoupledRooms)` compiled before goonj), and (b) it
+#    force-included stdlib `bayan` (136 KB), overflowing the compiler's 16384
+#    LEXID identifier-dedup cap.
 #
+#    BOTH are now resolved, so the workaround is retired:
+#      (a) every sibling now declares its FULL transitive closure explicitly and
+#          in order (naad wires hisab+goonj, prani wires svara+naad+hisab+goonj+
+#          sakshi, …), and each dist ships a `.deps` sidecar that `cyrius deps`
+#          consumes — so ordering is declared, not inferred.
+#      (b) the LEXID cap went 16384 → 65536 (cyrius 6.4.21) and the identifier
+#          pool 256 KB → 512 KB (6.4.76). Measured headroom at 6.5.41 is
+#          ~20k/8.4M identifiers — the bayan ceiling is no longer reachable.
+#
+#    What this buys: versions are DECLARED and hash-LOCKED in `cyrius.lock`
+#    instead of living in an uncommitted copy step, CI resolves them from git
+#    tags, and the dep surface is auditable from one file. `path` is for local
+#    dev, `git`+`tag` for CI/release — same dual form abaco already used.
+#    The `include "lib/<x>.cyr"` lines in src/ and tests/ are UNCHANGED: `[deps]`
+#    governs vendoring into `lib/`, the includes still govern compile order.
+#
+
+# logging base — goonj/garjan/ghurni/prani call sakshi_*
+[deps.sakshi]
+git = "https://github.com/MacCracken/sakshi.git"
+path = "../sakshi"
+tag = "2.4.12"
+modules = ["dist/sakshi.cyr"]
+
+# math; goonj needs its HVec3 (hvec3_*/HVec3_*) — REACHABLE, not DCE
+[deps.hisab]
+git = "https://github.com/MacCracken/hisab.git"
+path = "../hisab"
+tag = "2.11.2"
+modules = ["dist/hisab.cyr"]
+
+# acoustics; defines CoupledRooms (naad sizeof's it)
+[deps.goonj]
+git = "https://github.com/MacCracken/goonj.git"
+path = "../goonj"
+tag = "2.0.4"
+modules = ["dist/goonj.cyr"]
+
+# synthesis; sizeof(CoupledRooms) from goonj. Owns NAAD_FILTER_*
+[deps.naad]
+git = "https://github.com/MacCracken/naad.git"
+path = "../naad"
+tag = "2.2.2"
+modules = ["dist/naad.cyr"]
+
+# codec substrate under shravan/nidhi. Declared explicitly so the whole closure
+# is TAG-pinned: left implicit, `cyrius deps` resolves it to a bare commit hash.
+# dhvani makes 0 direct sankoch_* calls — it DCE-prunes — but it must still be
+# declared to be auditable and reproducible.
+[deps.sankoch]
+git = "https://github.com/MacCracken/sankoch.git"
+path = "../sankoch"
+tag = "2.7.10"
+modules = ["dist/sankoch.cyr"]
+
+# THE audio codec — nidhi needs its STREAM_EVT_*/wav_*
+[deps.shravan]
+git = "https://github.com/MacCracken/shravan.git"
+path = "../shravan"
+tag = "2.8.0"
+modules = ["dist/shravan.cyr"]
+
+# voice; references naad's NOISE_WHITE etc.
+[deps.svara]
+git = "https://github.com/MacCracken/svara.git"
+path = "../svara"
+tag = "3.5.4"
+modules = ["dist/svara.cyr"]
+
+# sampler engine; needs naad + shravan
+[deps.nidhi]
+git = "https://github.com/MacCracken/nidhi.git"
+path = "../nidhi"
+tag = "2.1.1"
+modules = ["dist/nidhi.cyr"]
+
+# mechanical; naad + sakshi
+[deps.ghurni]
+git = "https://github.com/MacCracken/ghurni.git"
+path = "../ghurni"
+tag = "2.6.0"
+modules = ["dist/ghurni.cyr"]
+
+# environment; sakshi + goonj
+[deps.garjan]
+git = "https://github.com/MacCracken/garjan.git"
+path = "../garjan"
+tag = "2.5.1"
+modules = ["dist/garjan.cyr"]
+
+# creature; svara + sakshi
+[deps.prani]
+git = "https://github.com/MacCracken/prani.git"
+path = "../prani"
+tag = "2.0.12"
+modules = ["dist/prani.cyr"]
+
+# g2p: phoneme inventories (shared singletons — READ-ONLY)
+[deps.varna]
+git = "https://github.com/MacCracken/varna.git"
+path = "../varna"
+tag = "2.4.1"
+modules = ["dist/varna.cyr"]
+
+# g2p: pronunciation dictionary (the hashmap map_*)
+[deps.shabdakosh]
+git = "https://github.com/MacCracken/shabdakosh.git"
+path = "../shabdakosh"
+tag = "3.0.6"
+modules = ["dist/shabdakosh.cyr"]
+
+# g2p engine; needs varna + shabdakosh + svara
+[deps.shabda]
+git = "https://github.com/MacCracken/shabda.git"
+path = "../shabda"
+tag = "3.0.4"
+modules = ["dist/shabda.cyr"]
+
+# device I/O: procfs/text reads — yukti 2.3.8 reads /proc/asound through it
+[deps.patra]
+git = "https://github.com/MacCracken/patra.git"
+path = "../patra"
+tag = "1.13.11"
+modules = ["dist/patra.cyr"]
+
+# device I/O: PCM endpoint discovery
+[deps.yukti]
+git = "https://github.com/MacCracken/yukti.git"
+path = "../yukti"
+tag = "2.3.8"
+modules = ["dist/yukti.cyr"]
+
+# device I/O: raw /dev/snd ALSA PCM — drives src/playback.cyr
+[deps.vani]
+git = "https://github.com/MacCracken/vani.git"
+path = "../vani"
+tag = "1.2.2"
+modules = ["dist/vani.cyr"]
+
 # ── BLOCKED — dependency not yet ported to Cyrius (still Rust) ──────────────
 #    bhava  → `bhava-voice` / voice_synth/bhava_bridge  (port bhava first)

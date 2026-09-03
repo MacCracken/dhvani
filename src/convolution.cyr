@@ -42,6 +42,8 @@ struct DhConvolutionReverb {
     channels;
     scratch_real;
     scratch_imag;
+    acc_real;
+    acc_imag;
     fdl;
     fdl_pos;
 }
@@ -90,6 +92,12 @@ fn dhvani_conv_with_block_size(ir_samples, block_size, mix, sample_rate) {
     DhConvolutionReverb_set_channels(self, 0);
     DhConvolutionReverb_set_scratch_real(self, dh_vec_zeros(fft_size));
     DhConvolutionReverb_set_scratch_imag(self, dh_vec_zeros(fft_size));
+    # Reusable partition accumulators. rust-old allocates these per block and
+    # lets scope drop them; under the free-less bump allocator that is an
+    # unbounded leak (~2 * fft_size * 8 B per channel per block), so they are
+    # struct-owned and zeroed in place instead — same values, zero bytes/block.
+    DhConvolutionReverb_set_acc_real(self, dh_vec_zeros(fft_size));
+    DhConvolutionReverb_set_acc_imag(self, dh_vec_zeros(fft_size));
     DhConvolutionReverb_set_fdl(self, vec_new());
     DhConvolutionReverb_set_fdl_pos(self, 0);
     return self;
@@ -114,8 +122,16 @@ fn dhvani_conv_mix(self) { return DhConvolutionReverb_mix(self); }
 # set_ir(ir) -- rebuild partitions from a new IR, then reset state.
 fn dhvani_conv_set_ir(self, ir_samples) {
     var parts = dhvani_conv_partition_ir(ir_samples,
-        DhConvolutionReverb_block_size(self), DhConvolutionReverb_fft_size(self));
+      DhConvolutionReverb_block_size(self), DhConvolutionReverb_fft_size(self));
     DhConvolutionReverb_set_ir_partitions(self, parts);
+    # The per-channel frequency delay line is sized to the PARTITION COUNT, and
+    # dhvani_conv_ensure_channels -- the only place that sizes it -- early-returns
+    # when the channel count is unchanged. A longer IR therefore left the FDL
+    # short, and process_block indexed ch_fdl[0..num_partitions) straight off the
+    # end (vec_get -> _vec_die -> exit 1). Invalidate the channel cache so the
+    # next process rebuilds the FDL at the new partition count. set_ir is a
+    # configuration call, not a hot path, so the rebuild costs nothing that matters.
+    DhConvolutionReverb_set_channels(self, 0);
     dhvani_conv_reset(self);
     return 0;
 }
@@ -226,8 +242,12 @@ fn dhvani_conv_process_block(self, channel) {
     }
 
     # Accumulate: sum over all partitions (FDL[pos-k] * IR[k]).
-    var acc_real = dh_vec_zeros(fft_size);
-    var acc_imag = dh_vec_zeros(fft_size);
+    # Struct-owned scratch, zeroed in place (the accumulate below reads the
+    # previous value via f64_add, so the zero-fill is mandatory, not cosmetic).
+    var acc_real = DhConvolutionReverb_acc_real(self);
+    var acc_imag = DhConvolutionReverb_acc_imag(self);
+    var az = 0;
+    while (az < fft_size) { vec_set(acc_real, az, 0); vec_set(acc_imag, az, 0); az = az + 1; }
     var k = 0;
     while (k < num_partitions) {
         var fdl_idx = (fdl_pos + num_partitions - k) % num_partitions;
@@ -325,6 +345,14 @@ fn dhvani_conv_process(self, buf) {
             while (cw < ch) {
                 var ov = vec_get(DhConvolutionReverb_overlap(self), cw);
                 var oi = 0;
+                # `block_start` goes NEGATIVE when a block spans two process()
+                # calls (write_pos carries across calls), and those output frames
+                # belong to the previous call's buffer, which is already gone.
+                # Skip them: a negative index would abort the process in vec_get
+                # (lib/vec.cyr `_vec_die`). rust-old computes the same expression
+                # in usize, where a release build wraps to a huge value that then
+                # fails its `src_idx < len` check — i.e. the same no-op.
+                if (block_start < 0) { oi = 0 - block_start; }
                 while (oi < block_size) {
                     var src_idx = (block_start + oi) * ch + cw;
                     if (src_idx < samples_len) {

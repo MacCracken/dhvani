@@ -78,7 +78,7 @@ fn dhvani_comp_process(self, buf) {
         var peak = 0;
         var c = 0;
         while (c < ch) {
-            peak = f64_max(peak, f64_abs(vec_get(samples, frame * ch + c)));
+            peak = dh_max_ignore_nan(peak, f64_abs(vec_get(samples, frame * ch + c)));
             c = c + 1;
         }
         var input_db = f64_max(amplitude_to_db(peak), f64_neg(120.0));

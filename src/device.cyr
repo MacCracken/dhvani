@@ -40,7 +40,12 @@ fn dhvani_playback_open_default_fmt(sample_rate, channels, bit_depth) {
     while (i < n) {
         var d = vec_get(devs, i);
         if (yukti_audio_direction(d) == YUKTI_AUDIO_PLAYBACK) {
-            return dhvani_playback_open_fmt(yukti_audio_card(d), yukti_audio_device(d), sample_rate, channels, bit_depth);
+            return dhvani_playback_open_fmt(
+              yukti_audio_card(d),
+              yukti_audio_device(d),
+              sample_rate,
+              channels,
+              bit_depth);
         }
         i = i + 1;
     }
@@ -59,7 +64,12 @@ fn dhvani_capture_open_default_fmt(sample_rate, channels, bit_depth) {
     while (i < n) {
         var d = vec_get(devs, i);
         if (yukti_audio_direction(d) == YUKTI_AUDIO_CAPTURE) {
-            return dhvani_capture_open_fmt(yukti_audio_card(d), yukti_audio_device(d), sample_rate, channels, bit_depth);
+            return dhvani_capture_open_fmt(
+              yukti_audio_card(d),
+              yukti_audio_device(d),
+              sample_rate,
+              channels,
+              bit_depth);
         }
         i = i + 1;
     }

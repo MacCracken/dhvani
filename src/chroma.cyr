@@ -90,7 +90,7 @@ fn dhvani_chroma_chromagram(buf, window_size) {
     # Normalize to 0..1 by the peak.
     var max = 0;
     var m = 0;
-    while (m < 12) { max = f64_max(max, vec_get(chroma, m)); m = m + 1; }
+    while (m < 12) { max = dh_max_ignore_nan(max, vec_get(chroma, m)); m = m + 1; }
     if (f64_gt(max, 0) == 1) {
         var p = 0;
         while (p < 12) { vec_set(chroma, p, f64_div(vec_get(chroma, p), max)); p = p + 1; }

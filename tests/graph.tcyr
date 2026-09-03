@@ -305,5 +305,24 @@ var lzp = dhvani_graph_compile(lzg);
 assert_eq(dhvani_plan_total_latency(lzp), 0, "total 0");
 assert_eq(dhvani_plan_latency_frames(lzp, lz_id), 0, "latency 0");
 
+# ---- graph_process_is_alloc_free (regression, 2.2.3) ----
+# The per-node input-gather vec is struct-owned (rust-old's `input_scratch`
+# field, which the port had dropped and re-minted per node per cycle). Under a
+# free-less bump allocator that is an unbounded leak on the RT path. Warm up so
+# the output buffers exist, then measure a steady-state cycle.
+test_group("graph_process_is_alloc_free");
+var afg = dhvani_graph_new();
+var af_src = dhvani_node_id_next();
+dhvani_graph_add_node(afg, af_src, dhvani_graph_node_new(&gen_process, mkf(0.5), 0, 1, 0, 0, 0, 0, "generator"));
+var afproc = dhvani_graph_proc_new(2, 44100, 256);
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(afproc), dhvani_graph_compile(afg));
+var afw = 0;
+while (afw < 4) { dhvani_graph_proc_process(afproc); afw = afw + 1; }
+var af_before = alloc_used();
+dhvani_graph_proc_process(afproc);
+var af_after = alloc_used();
+assert_eq(af_after - af_before, 0, "graph_proc_process allocates 0 bytes in steady state");
+
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -5,9 +5,9 @@
 # samples: a `vec` of f64 (was Vec<f32>). channels/sample_rate/frames: integer
 # counts. SampleFormat/Layout enums -> integer codes. Fallible constructors
 # (from_interleaved/mix/resample_linear return Result) -> a valid handle, or 0
-# (null) on error. serde dropped. AudioBufferRef (borrowed view) is deferred --
-# in Cyrius a "ref" is the same handle read via accessors; add when a consumer
-# needs the distinct type.
+# (null) on error. serde dropped. AudioBufferRef is deferred (roadmap.md, CHANGELOG [2.0.0]):
+# a borrowed view buys nothing here -- in Cyrius a "ref" is the same handle read
+# via accessors -- so it lands only when a consumer needs the distinct type.
 
 # ---- SampleFormat (was enum) ----
 var DH_FMT_F32 = 0;
@@ -111,7 +111,7 @@ fn dhvani_buffer_total_samples(self) { return vec_len(DhAudioBuffer_samples(self
 #must_use
 fn dhvani_buffer_duration_secs(self) {
     return f64_div(f64_from(DhAudioBuffer_frames(self)),
-                   f64_from(DhAudioBuffer_sample_rate(self)));
+      f64_from(DhAudioBuffer_sample_rate(self)));
 }
 
 # peak amplitude across all channels.
@@ -265,8 +265,8 @@ fn dhvani_pool_acquire(self) {
     var buffers = DhBufferPool_buffers(self);
     if (vec_len(buffers) > 0) { return vec_pop(buffers); }
     return dhvani_buffer_silence(DhBufferPool_channels(self),
-                                 DhBufferPool_frames(self),
-                                 DhBufferPool_sample_rate(self));
+      DhBufferPool_frames(self),
+      DhBufferPool_sample_rate(self));
 }
 
 # release -- silence a buffer and return it to the pool.

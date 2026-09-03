@@ -76,12 +76,12 @@ struct DhParametricEq { configs; filts; sample_rate; channels; bypassed; mix; dr
 #must_use
 fn dhvani_eq_build_filter(cfg, sample_rate, channels) {
     return dhvani_biquad_new(
-        dhvani_eq_band_to_filter_type(DhEqBandConfig_band_type(cfg)),
-        DhEqBandConfig_gain_db(cfg),
-        DhEqBandConfig_freq_hz(cfg),
-        DhEqBandConfig_q(cfg),
-        sample_rate,
-        channels);
+      dhvani_eq_band_to_filter_type(DhEqBandConfig_band_type(cfg)),
+      DhEqBandConfig_gain_db(cfg),
+      DhEqBandConfig_freq_hz(cfg),
+      DhEqBandConfig_q(cfg),
+      sample_rate,
+      channels);
 }
 
 # new(bands, sample_rate, channels) -- bands is a vec of DhEqBandConfig handles.
@@ -173,11 +173,11 @@ fn dhvani_eq_set_band(self, index, config) {
     if (index < vec_len(configs)) {
         var filt = vec_get(DhParametricEq_filts(self), index);
         dhvani_biquad_set_params(
-            filt,
-            dhvani_eq_band_to_filter_type(DhEqBandConfig_band_type(config)),
-            DhEqBandConfig_gain_db(config),
-            DhEqBandConfig_freq_hz(config),
-            DhEqBandConfig_q(config));
+          filt,
+          dhvani_eq_band_to_filter_type(DhEqBandConfig_band_type(config)),
+          DhEqBandConfig_gain_db(config),
+          DhEqBandConfig_freq_hz(config),
+          DhEqBandConfig_q(config));
         vec_set(configs, index, config);
     }
     return 0;
@@ -187,9 +187,9 @@ fn dhvani_eq_set_band(self, index, config) {
 fn dhvani_eq_add_band(self, config) {
     vec_push(DhParametricEq_configs(self), config);
     vec_push(DhParametricEq_filts(self),
-             dhvani_eq_build_filter(config,
-                                    DhParametricEq_sample_rate(self),
-                                    DhParametricEq_channels(self)));
+      dhvani_eq_build_filter(config,
+        DhParametricEq_sample_rate(self),
+        DhParametricEq_channels(self)));
     return 0;
 }
 
@@ -262,11 +262,11 @@ fn dhvani_eq_set_sample_rate(self, sample_rate) {
         var filt = vec_get(filts, i);
         dhvani_biquad_set_sample_rate(filt, sample_rate);
         dhvani_biquad_set_params(
-            filt,
-            dhvani_eq_band_to_filter_type(DhEqBandConfig_band_type(cfg)),
-            DhEqBandConfig_gain_db(cfg),
-            DhEqBandConfig_freq_hz(cfg),
-            DhEqBandConfig_q(cfg));
+          filt,
+          dhvani_eq_band_to_filter_type(DhEqBandConfig_band_type(cfg)),
+          DhEqBandConfig_gain_db(cfg),
+          DhEqBandConfig_freq_hz(cfg),
+          DhEqBandConfig_q(cfg));
         i = i + 1;
     }
     return 0;

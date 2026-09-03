@@ -15,7 +15,8 @@ struct DhModulatedDelay { delay; params; lfo_phase; sample_rate; bypassed; }
 #must_use
 fn dhvani_delay_new(delay_ms, max_delay_ms, feedback, mix, sample_rate, channels) {
     var self = alloc(sizeof(DhDelayLine));
-    var max_samples = f64_to(f64_trunc(f64_mul(f64_div(f64_max(max_delay_ms, delay_ms), 1000.0), f64_from(sample_rate))));
+    var max_secs = f64_div(f64_max(max_delay_ms, delay_ms), 1000.0);
+    var max_samples = f64_to(f64_trunc(f64_mul(max_secs, f64_from(sample_rate))));
     if (max_samples < 1) { max_samples = 1; }
     var delay_samples = f64_to(f64_trunc(f64_mul(f64_div(delay_ms, 1000.0), f64_from(sample_rate))));
     if (delay_samples > max_samples) { delay_samples = max_samples; }
@@ -139,7 +140,9 @@ fn dhvani_moddelayparams_validate(p) {
 #must_use
 fn dhvani_moddelay_new(params, sample_rate, channels) {
     var self = alloc(sizeof(DhModulatedDelay));
-    var max_ms = f64_add(f64_add(DhModulatedDelayParams_base_delay_ms(params), DhModulatedDelayParams_depth_ms(params)), 1.0);
+    var max_ms = f64_add(
+      f64_add(DhModulatedDelayParams_base_delay_ms(params), DhModulatedDelayParams_depth_ms(params)),
+      1.0);
     DhModulatedDelay_set_delay(self, dhvani_delay_new(DhModulatedDelayParams_base_delay_ms(params), max_ms,
         DhModulatedDelayParams_feedback(params), DhModulatedDelayParams_mix(params), sample_rate, channels));
     DhModulatedDelay_set_params(self, params);
@@ -195,7 +198,9 @@ fn dhvani_moddelay_process(self, buf) {
 #must_use
 fn dhvani_moddelay_latency_frames(self) {
     var p = DhModulatedDelay_params(self);
-    return f64_to(f64_trunc(f64_mul(f64_div(DhModulatedDelayParams_base_delay_ms(p), 1000.0), f64_from(DhModulatedDelay_sample_rate(self)))));
+    var base_secs = f64_div(DhModulatedDelayParams_base_delay_ms(p), 1000.0);
+    var sr_f = f64_from(DhModulatedDelay_sample_rate(self));
+    return f64_to(f64_trunc(f64_mul(base_secs, sr_f)));
 }
 #inline
 #must_use

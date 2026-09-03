@@ -51,9 +51,9 @@ fn dhvani_deesser_new(params, sample_rate, channels) {
     if (dhvani_is_err(dhvani_deesserparams_validate(params)) == 1) { return 0; }
     var self = alloc(sizeof(DhDeEsser));
     var detector = dhvani_biquad_new(DH_BQ_BANDPASS, 0,
-                                     DhDeEsserParams_freq_hz(params),
-                                     DhDeEsserParams_q(params),
-                                     sample_rate, channels);
+      DhDeEsserParams_freq_hz(params),
+      DhDeEsserParams_q(params),
+      sample_rate, channels);
     DhDeEsser_set_params(self, params);
     DhDeEsser_set_detector(self, detector);
     # reusable sidechain sample vec (grows to buffer length, reused per call)
@@ -113,7 +113,7 @@ fn dhvani_deesser_process(self, buf) {
         var sidechain_peak = 0;
         var c = 0;
         while (c < ch) {
-            sidechain_peak = f64_max(sidechain_peak, f64_abs(vec_get(side, frame * ch + c)));
+            sidechain_peak = dh_max_ignore_nan(sidechain_peak, f64_abs(vec_get(side, frame * ch + c)));
             c = c + 1;
         }
         # If sidechain exceeds threshold, compute proportional gain reduction.

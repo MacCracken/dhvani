@@ -27,7 +27,7 @@ fn dhvani_acoustics_generate_ir(sx, sy, sz, lx, ly, lz, room, config) {
 #must_use
 fn dhvani_acoustics_convolution_from_ir(ir, mix) {
     return dhvani_conv_new(ImpulseResponse_samples(ir), mix,
-        ImpulseResponse_sample_rate(ir));
+      ImpulseResponse_sample_rate(ir));
 }
 
 # ── Bridge: DhvaniIr (broadband) -> ConvolutionReverb ──
@@ -42,7 +42,7 @@ fn dhvani_acoustics_convolution_from_dhvani_ir(ir, mix) {
 fn dhvani_acoustics_convolve_multiband(buf, multiband, mix) {
     var broadband = multiband_ir_to_broadband(multiband);
     var reverb = dhvani_conv_new(ImpulseResponse_samples(broadband), mix,
-        ImpulseResponse_sample_rate(broadband));
+      ImpulseResponse_sample_rate(broadband));
     dhvani_conv_process(reverb, buf);
     return DHVANI_ERR_NONE;
 }
@@ -112,7 +112,7 @@ fn dhvani_acoustics_decode_bformat_stereo(bformat) {
 #must_use
 fn dhvani_acoustics_export_ir_wav(ir) {
     return write_wav_mono(ImpulseResponse_samples(ir),
-        ImpulseResponse_sample_rate(ir));
+      ImpulseResponse_sample_rate(ir));
 }
 
 # ── Room presets (goonj AcousticRoom + AcousticMaterial) ──
@@ -127,7 +127,7 @@ fn dhvani_acoustics_preset_rehearsal_room() {
 #must_use
 fn dhvani_acoustics_preset_concert_hall() {
     return acoustic_room_shoebox(f64_from(40), f64_from(25), f64_from(15),
-        acoustic_material_concrete());
+      acoustic_material_concrete());
 }
 #must_use
 fn dhvani_acoustics_preset_bathroom() {
@@ -136,10 +136,10 @@ fn dhvani_acoustics_preset_bathroom() {
 #must_use
 fn dhvani_acoustics_preset_cathedral() {
     return acoustic_room_shoebox(f64_from(60), f64_from(30), f64_from(28),
-        acoustic_material_concrete());
+      acoustic_material_concrete());
 }
 #must_use
 fn dhvani_acoustics_preset_outdoor() {
     return acoustic_room_shoebox(f64_from(100), f64_from(100), f64_from(50),
-        acoustic_material_carpet());
+      acoustic_material_carpet());
 }

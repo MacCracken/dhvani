@@ -2,11 +2,16 @@
 
 Direct dependencies to monitor for updates, CVEs, and breaking changes.
 
-dhvani is a Cyrius engine: `[deps.abaco]` is the one auto-resolved bundle;
-the synthesis siblings + device-I/O bundles are **vendored into `lib/`** (committed)
-and `include`d in dependency order, not wired as `[deps]` (see
-[`port-audit.md`](port-audit.md) Wave F). "Version" below is the tag/bundle version
-tracked, not a crates.io release.
+dhvani is a Cyrius engine. **As of 2.2.3 every bundle below is a real `[deps.X]`
+entry** in `cyrius.cyml` (`git` + `path` + `tag`), resolved by `cyrius deps` into
+`lib/` and hash-locked in `cyrius.lock` — 18 declared deps, 74 locked files, and
+the closure is **100% tag-pinned** (no commit-pins). The `include "lib/<x>.cyr"`
+lines still govern **compile order**; `[deps]` governs **vendoring**. Bump a
+version by editing its `tag` and re-running `cyrius deps` — never by hand-copying
+a bundle into `lib/`, which the next `cyrius build/test` silently overwrites.
+
+⚠ **A green `cyrius test` does not clear a bump.** One flat namespace means a
+deleted upstream symbol rebinds instead of erroring — see the Upgrade Policy below.
 
 ## Core Dependencies
 
@@ -29,8 +34,13 @@ tracked, not a crates.io release.
 | **hisab** | 2.11.2 | (support) | HVec3 math for goonj |
 | **shravan** | 2.8.0 | (support) | WAV codec, needed by nidhi |
 
-Include order (dependency order):
-`sakshi → hisab → goonj → naad → shravan → svara → ghurni → garjan → prani`.
+Include order (dependency order — also the `[deps]` declaration order):
+`sakshi → hisab → goonj → naad → shravan → svara → nidhi → ghurni → garjan → prani`,
+then `varna → shabdakosh → shabda`, then `patra → yukti → vani`.
+
+**sankoch 2.7.10** is declared explicitly too: it arrives transitively under
+shravan/nidhi, and left implicit `cyrius deps` pins it to a bare commit hash
+instead of a tag. dhvani makes no `sankoch_*` calls (it DCE-prunes).
 
 ## g2p Stack (2.2.0, vendored in `lib/`)
 

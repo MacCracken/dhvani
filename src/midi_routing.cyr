@@ -132,8 +132,16 @@ fn dhvani_midiroute_filter_event(self, event) {
     var note = dhvani_note_event_note(event);
     if (note < DhMidiRoute_note_min(self)) { return 0; }
     if (note > DhMidiRoute_note_max(self)) { return 0; }
-    var vel = dhvani_midiroute_curve_apply(DhMidiRoute_velocity_curve(self), DhMidiRoute_velocity_fixed(self), dhvani_note_event_velocity(event));
-    return dhvani_note_event_new(dhvani_note_event_position(event), dhvani_note_event_duration(event), note, vel, dhvani_note_event_channel(event));
+    var vel = dhvani_midiroute_curve_apply(
+      DhMidiRoute_velocity_curve(self),
+      DhMidiRoute_velocity_fixed(self),
+      dhvani_note_event_velocity(event));
+    return dhvani_note_event_new(
+      dhvani_note_event_position(event),
+      dhvani_note_event_duration(event),
+      note,
+      vel,
+      dhvani_note_event_channel(event));
 }
 
 # ================================================================
@@ -170,7 +178,9 @@ fn dhvani_midiroute_cc_max_value(m) { return DhCcMapping_max_value(m); }
 #must_use
 fn dhvani_midiroute_cc_map_value(m, cc_value) {
     var norm = f64_div(f64_from(cc_value), 127.0);
-    return f64_add(DhCcMapping_min_value(m), f64_mul(norm, f64_sub(DhCcMapping_max_value(m), DhCcMapping_min_value(m))));
+    return f64_add(
+      DhCcMapping_min_value(m),
+      f64_mul(norm, f64_sub(DhCcMapping_max_value(m), DhCcMapping_min_value(m))));
 }
 
 # map_value_32 -- 32-bit CC (MIDI 2.0) -> param range. u32::MAX = 4294967295
@@ -178,5 +188,7 @@ fn dhvani_midiroute_cc_map_value(m, cc_value) {
 #must_use
 fn dhvani_midiroute_cc_map_value_32(m, cc_value) {
     var norm = f64_div(f64_from(cc_value), f64_from(4294967295));
-    return f64_add(DhCcMapping_min_value(m), f64_mul(norm, f64_sub(DhCcMapping_max_value(m), DhCcMapping_min_value(m))));
+    return f64_add(
+      DhCcMapping_min_value(m),
+      f64_mul(norm, f64_sub(DhCcMapping_max_value(m), DhCcMapping_min_value(m))));
 }

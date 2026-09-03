@@ -27,7 +27,9 @@ fn dhvani_zcr_compute(buf) {
             prev = curr;
             frame = frame + 1;
         }
-        var rate = f64_div(f64_mul(f64_from(crossings), f64_from(DhAudioBuffer_sample_rate(buf))), f64_from(frames - 1));
+        var rate = f64_div(
+          f64_mul(f64_from(crossings), f64_from(DhAudioBuffer_sample_rate(buf))),
+          f64_from(frames - 1));
         vec_push(per_channel, rate);
         total = total + crossings;
         c = c + 1;

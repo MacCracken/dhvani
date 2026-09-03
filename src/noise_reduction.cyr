@@ -24,7 +24,9 @@ fn dhvani_noise_reducer_new() {
     var denom = DH_NR_WINDOW_SIZE - 1;
     var i = 0;
     while (i < DH_NR_WINDOW_SIZE) {
-        var w = f64_mul(0.5, f64_sub(1.0, f64_cos(f64_div(f64_mul(f64_mul(2.0, F64_PI), f64_from(i)), f64_from(denom)))));
+        var w = f64_mul(
+          0.5,
+          f64_sub(1.0, f64_cos(f64_div(f64_mul(f64_mul(2.0, F64_PI), f64_from(i)), f64_from(denom)))));
         vec_push(window, w);
         i = i + 1;
     }

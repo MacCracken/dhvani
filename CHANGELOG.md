@@ -5,6 +5,121 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.3] — P-1 hardening sweep + vendored deps promoted to real `[deps]`
+
+### Fixed — P-1
+
+- **S24 device buffers were sized with the packed width, so the kernel read/wrote
+  33% past the allocation.** ALSA's `SND_PCM_FORMAT_S24_LE` carries 24 significant
+  bits in a **32-bit** word (`vani_bytes_per_sample` returns 4), but every
+  vani-facing path sized its buffer with `dh_pcm_bytes(24)` — which is **3**, the
+  *packed* layout that matches `rust-old`'s `f32_to_i24_packed`. A 24-bit capture
+  therefore allocated `frames*channels*3` and handed it to the kernel, which wrote
+  `frames*channels*4`. Introduced `dh_pcm_store_bytes` (the ALSA storage width)
+  and split the two concepts: the pure bridge keeps the packed width (Rust parity,
+  and `tests/playback.tcyr` pins it), while `dhvani_capture_read_fmt`, the RT
+  player and the RT recorder all use the storage width. `dh_pack_le` /
+  `dh_unpack_le` gained explicit-width `_w` variants; the unpack masks to
+  `bit_depth` bits before the sign fold, so S24's sign padding no longer reads as
+  a huge positive sample.
+- **`dhvani_playback_write` always emitted S16 regardless of the device's
+  negotiated depth.** It called `dhvani_playback_to_s16le` (2 bytes/sample) but
+  passed `frames` straight to the kernel, which reads
+  `frames*channels*<negotiated width>` — so a device opened via
+  `dhvani_playback_open_fmt(..., 24)` or `32` read past the buffer. It now reads
+  the depth back off the handle (`vani_format_get` → `vani_format_bit_depth`).
+- **Convolution reverb leaked 130,240 bytes per `process` call.** `process_block`
+  allocated two `fft_size` accumulators per channel per block. `rust-old` does the
+  same and lets scope drop them — but under a **free-less bump allocator** there is
+  no drop, so a stereo 44.1 kHz render leaked ~2.8 MB/s until the process died.
+  The accumulators are now struct-owned and zeroed in place. The figure is measured,
+  not estimated: `tests/convolution.tcyr` asserts `alloc_used()` is unchanged across
+  a steady-state call, and reverting the fix makes it report exactly 130240.
+- **Convolution aborted the process when a block spanned two `process` calls.**
+  `write_pos` carries across calls, so `block_start = frame + to_copy - block_size`
+  goes negative and reached `vec_get`, which calls `_vec_die()` → `exit(1)`. Those
+  output frames belong to the previous call's buffer and are now skipped —
+  reproducing what the oracle does in release mode, where the same `usize`
+  expression wraps and fails its `src_idx < len` check.
+- **The graph processor allocated a fresh input-gather vec per node per audio
+  cycle.** `rust-old` carries an `input_scratch: Vec<AudioBuffer>` field on
+  `GraphProcessor` and clears it per node; the port dropped the field. Restored, so
+  the RT graph path is 0 bytes/cycle in steady state (asserted in `tests/graph.tcyr`).
+
+- **`dhvani_conv_set_ir` with a longer IR aborted the process.** The per-channel
+  frequency delay line is sized to the partition count, and
+  `dhvani_conv_ensure_channels` — the only place that sizes it — early-returns
+  when the channel count is unchanged. So: process once with a short IR, set a
+  longer one, process again, and `process_block` indexed `ch_fdl` past its end
+  (`vec_get` → `_vec_die` → `exit(1)`). `set_ir` now invalidates the channel cache
+  so the next `process` rebuilds the FDL. Regression-tested; the test aborts with
+  `vec: index out of bounds` without the fix.
+- **NaN in a sample buffer silently under-reported every running peak.** Cyrius's
+  `f64_max` is **asymmetric** on NaN — `f64_max(x, NaN)` → NaN, but
+  `f64_max(NaN, x)` → x — so a naive fold first poisons the accumulator and then
+  **resets** it to the sample after the NaN. `rust-old` uses `f32::max` /
+  `.fold(0.0f32, f32::max)`, which *ignore* NaN. Measured: a buffer of
+  `[0.8, NaN, 0.2]` reported a peak of **0.2 instead of 0.8**, so
+  `dhvani_dsp_normalize` would over-amplify 4×. The threat model explicitly treats
+  incoming samples as untrusted and expects NaN, so this was reachable from a
+  public entry point. Added `dh_max_ignore_nan` and applied it to all six
+  running-max folds: `simd` (`peak_abs`), `limiter`, `compressor`, `deesser`
+  (sidechain peak), `analysis` (spectrum max), `chroma`.
+
+### Fixed — P-2 / P-3
+
+- **`dhvani_vsynth_render_vocal_tract` checked neither svara handle** before using
+  them as struct bases (raw `load64`/`store64`, with no vec bounds check behind
+  them). Both producers return negative error codes — `svara_glottal_new` →
+  `SVARA_ERR_INVALID_PITCH`, `svara_tract_new` → a mapped naad error — so an
+  unchecked handle forwarded by a consumer was a wild access. Rust took `&mut`
+  references here, which made an error value unrepresentable; the flattened i64
+  port has to state the guard. Every sibling bridge already did.
+- **`dhvani_detect_tempo` could produce a negative lag.** Rust's float→int
+  `as usize` **saturates** (negative → 0), so `min_lag`/`max_lag` could never go
+  negative there; Cyrius's `f64_to` truncates, so a negative or NaN BPM reached
+  `vec_get` as a negative index and aborted the process. Now clamped, reproducing
+  the oracle's saturating cast.
+
+### Changed — dependencies
+
+- **All 16 vendored sibling bundles are now real `[deps]`**, declared in dependency
+  order with `git` + `path` + `tag`, replacing the hand-copy-into-`lib/` step.
+  Versions are declared and hash-locked in `cyrius.lock` (74 entries) instead of
+  living in an uncommitted copy, CI resolves them from git tags, and the whole
+  surface is auditable from one file. `cyrius deps` reproduced all 16 bundles
+  **byte-identically**, and the `include "lib/<x>.cyr"` lines are unchanged —
+  `[deps]` governs vendoring, the includes still govern compile order.
+- The two defects that forced hand-vendoring are gone, so the workaround retired:
+  transitive ordering is now **declared** (every sibling lists its full closure and
+  ships a `.deps` sidecar `cyrius deps` consumes), and the LEXID identifier cap went
+  16384 → 65536 (cyrius 6.4.21) with the pool 256 KB → 512 KB (6.4.76), so the
+  documented "`bayan` overflows the cap" ceiling is no longer reachable.
+- **`sankoch` 2.7.10 declared explicitly.** It arrives transitively under
+  shravan/nidhi; left implicit, `cyrius deps` pinned it to a bare commit hash.
+  Declaring it makes the closure **100% tag-pinned** (0 commit-pins). dhvani makes
+  no `sankoch_*` calls — it DCE-prunes — but it is now auditable.
+- `lib/` grows ~5.4 MB → 8.5 MB: promoting to `[deps]` pulls the siblings' full
+  declared stdlib closure (bayan, chrono, mmap, slice, sync, thread*, sankoch, …)
+  rather than only the leaves the hand-vendoring happened to need. These are
+  unreachable from dhvani and DCE-prune; `bayan`'s size is an upstream matter.
+
+### Changed — audit gate
+
+- **`cyrius audit` fmt and lint gates now pass** (they were `FAIL: files need
+  reformatting` + 33 warnings). All 58 `src/*.cyr` are canonically formatted, and
+  the 33 long-line warnings and 1 untracked deferral are cleared. The line-wrapping
+  was verified **token-identical** on 56 of 58 files; the two exceptions are
+  `biquad.cyr` and `delay.cyr`, where long nested expressions were given
+  intermediate names by hand rather than wrapped.
+- Toolchain pin stays **6.5.41** deliberately (6.5.42 is in progress upstream), so
+  a `toolchain drift` warning on 6.5.42 boxes is expected and benign.
+
+Full suite **65 suites / 1,712 assertions green**; `cyrius audit` fmt+lint clean.
+Every alloc-free and NaN assertion added here is **mutation-proven** — reverting
+the fix makes the test fail with the exact wrong value (130240 leaked bytes;
+peak 0.2 instead of 0.8).
+
 ## [2.2.2] — toolchain 6.5.41 + full dependency sweep
 
 ### Fixed

@@ -95,7 +95,9 @@ fn dhvani_fft_spectrum(buf, window_size) {
     if (denom < 1) { denom = 1; }
     var i = 0;
     while (i < n) {
-        var window = f64_mul(0.5, f64_sub(1.0, f64_cos(f64_div(f64_mul(f64_mul(2.0, F64_PI), f64_from(i)), f64_from(denom)))));
+        var window = f64_mul(
+          0.5,
+          f64_sub(1.0, f64_cos(f64_div(f64_mul(f64_mul(2.0, F64_PI), f64_from(i)), f64_from(denom)))));
         vec_set(real, i, f64_mul(vec_get(samples, i), window));
         i = i + 1;
     }

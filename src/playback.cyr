@@ -13,7 +13,7 @@
 # dist bundle. The PURE format bridges need no hardware and are unit-tested; the
 # device glue needs /dev/snd. S16 helpers stay as thin wrappers (2.1.0 API).
 
-# ── PCM format params ──────────────────────────────────────────────────────
+# ── PCM format params ───────────────────────────────
 # bytes-per-sample + full-scale for a bit depth. NB: 32-bit full-scale is
 # 2147483647 (>2^24), so f64_from() — a decimal literal there would misparse.
 fn dh_pcm_bytes(bit_depth) {
@@ -27,13 +27,24 @@ fn dh_pcm_scale(bit_depth) {
     return f64_from(2147483647);   # 32-bit
 }
 
-# ── Pure format bridge (no vani, no hardware) ──────────────────────────────
+# ALSA *storage* width, which is NOT dh_pcm_bytes for 24-bit. `SND_PCM_FORMAT_S24_LE`
+# carries 24 significant bits inside a 32-bit word (vani_bytes_per_sample returns 4
+# for it, lib/vani.cyr), whereas dh_pcm_bytes(24) == 3 — the *packed* layout the
+# pure bridge uses to match rust-old's `f32_to_i24_packed`. Sizing a device buffer
+# with the packed width makes the kernel read/write 33% past the allocation, so
+# every vani-facing path MUST use this one instead.
+fn dh_pcm_store_bytes(bit_depth) {
+    if (bit_depth == 16) { return 2; }
+    if (bit_depth == 24) { return 4; }   # S24_LE: 24 bits inside a 32-bit word
+    return 4;                            # 32
+}
+
+# ── Pure format bridge (no vani, no hardware) ───────────────────────
 
 # pack `n` f64 samples -> `dst` as little-endian signed PCM at `bit_depth`
 # (clamp[-1,1] then trunc(*full-scale)). Alloc-free (caller-owned dst) -> the RT
 # path uses this straight into a reusable scratch.
-fn dh_pack_le(samples, n, dst, bit_depth) {
-    var bytes = dh_pcm_bytes(bit_depth);
+fn dh_pack_le_w(samples, n, dst, bit_depth, bytes) {
     var scale = dh_pcm_scale(bit_depth);
     var i = 0;
     while (i < n) {
@@ -49,11 +60,17 @@ fn dh_pack_le(samples, n, dst, bit_depth) {
     }
     return 0;
 }
+# packed-width pack (logical layout — the rust-old-parity bridge).
+fn dh_pack_le(samples, n, dst, bit_depth) {
+    return dh_pack_le_w(samples, n, dst, bit_depth, dh_pcm_bytes(bit_depth));
+}
 
 # unpack `n` little-endian signed PCM samples at `bit_depth` from `src` into f64
-# vec `dst` (sign-extend from bit_depth bits, / full-scale).
-fn dh_unpack_le(src, n, dst, bit_depth) {
-    var bytes = dh_pcm_bytes(bit_depth);
+# vec `dst` (sign-extend from bit_depth bits, / full-scale), reading `bytes` of
+# storage per sample. `bytes` may exceed bit_depth/8 (S24_LE in a 32-bit word),
+# so the raw word is masked to bit_depth bits BEFORE the sign fold — otherwise a
+# negative sample's 0xFF sign padding would read as a huge positive value.
+fn dh_unpack_le_w(src, n, dst, bit_depth, bytes) {
     var scale = dh_pcm_scale(bit_depth);
     var i = 0;
     while (i < n) {
@@ -64,11 +81,16 @@ fn dh_unpack_le(src, n, dst, bit_depth) {
             v = v | (load8(src + off + b) << (b * 8));
             b = b + 1;
         }
+        v = v & ((1 << bit_depth) - 1);
         if (v >= (1 << (bit_depth - 1))) { v = v - (1 << bit_depth); }
         vec_set(dst, i, f64_div(f64_from(v), scale));
         i = i + 1;
     }
     return 0;
+}
+# packed-width unpack (logical layout — the rust-old-parity bridge).
+fn dh_unpack_le(src, n, dst, bit_depth) {
+    return dh_unpack_le_w(src, n, dst, bit_depth, dh_pcm_bytes(bit_depth));
 }
 
 # AudioBuffer f64 -> freshly-allocated little-endian PCM at `bit_depth`
@@ -97,7 +119,7 @@ fn dhvani_capture_from_s16le(pcm, frames, channels, sample_rate) {
     return dhvani_capture_from_pcm(pcm, frames, channels, sample_rate, 16);
 }
 
-# ── Device glue (over vani; needs /dev/snd) ────────────────────────────────
+# ── Device glue (over vani; needs /dev/snd) ───────────────────────
 
 # Open + configure + start a playback device at `bit_depth`. vani handle, or 0.
 fn dhvani_playback_open_fmt(card, device, sample_rate, channels, bit_depth) {
@@ -113,10 +135,22 @@ fn dhvani_playback_open(card, device, sample_rate, channels) {
     return dhvani_playback_open_fmt(card, device, sample_rate, channels, 16);
 }
 
-# Convert an AudioBuffer to S16_LE and play it. Frames written, or -1.
+# Convert an AudioBuffer to the DEVICE's negotiated PCM format and play it.
+# Frames written, or -1. The depth is read back off the handle rather than
+# assumed: `frames` goes straight to the kernel, which reads
+# frames*channels*<negotiated width> bytes, so emitting a fixed S16 buffer to a
+# device opened at 24/32-bit had the kernel read past the allocation.
 fn dhvani_playback_write(dev, buf) {
     var frames = dhvani_buffer_frames(buf);
-    var pres = vani_play(dev, dhvani_playback_to_s16le(buf), frames);
+    var fmt = vani_format_get(dev);
+    if (fmt == 0) { return 0 - 1; }
+    var depth = vani_format_bit_depth(fmt);
+    var samples = dhvani_buffer_samples(buf);
+    var n = vec_len(samples);
+    var pcm = alloc(n * dh_pcm_store_bytes(depth));
+    if (pcm == 0) { return 0 - 1; }
+    dh_pack_le_w(samples, n, pcm, depth, dh_pcm_store_bytes(depth));
+    var pres = vani_play(dev, pcm, frames);
     if (is_ok(pres) == 0) { return 0 - 1; }
     return payload(pres);
 }
@@ -140,10 +174,15 @@ fn dhvani_capture_open(card, device, sample_rate, channels) {
 # Record `frames` at `bit_depth` into a new AudioBuffer, or 0 on failure.
 #must_use
 fn dhvani_capture_read_fmt(dev, frames, channels, sample_rate, bit_depth) {
-    var pcm = alloc(frames * channels * dh_pcm_bytes(bit_depth));
+    var n = frames * channels;
+    # STORAGE width: the kernel writes n*<negotiated width> bytes into `pcm`.
+    var pcm = alloc(n * dh_pcm_store_bytes(bit_depth));
+    if (pcm == 0) { return 0; }
     var rres = vani_record(dev, pcm, frames);
     if (is_ok(rres) == 0) { return 0; }
-    return dhvani_capture_from_pcm(pcm, frames, channels, sample_rate, bit_depth);
+    var f = dh_vec_zeros(n);
+    dh_unpack_le_w(pcm, n, f, bit_depth, dh_pcm_store_bytes(bit_depth));
+    return dhvani_buffer_from_interleaved(f, channels, sample_rate);
 }
 #must_use
 fn dhvani_capture_read(dev, frames, channels, sample_rate) {
@@ -165,7 +204,9 @@ struct DhPlayer { ring; scratch; scratch_bytes; bit_depth; }
 fn dhvani_player_new_fmt(ring_bytes, max_frames, channels, bit_depth) {
     var self = alloc(sizeof(DhPlayer));
     DhPlayer_set_ring(self, vani_ring_new(ring_bytes));
-    var bytes = max_frames * channels * dh_pcm_bytes(bit_depth);
+    # STORAGE width: this scratch is copied into the ring, which vani drains
+    # straight to the device, so it must carry the device's wire layout.
+    var bytes = max_frames * channels * dh_pcm_store_bytes(bit_depth);
     DhPlayer_set_scratch(self, alloc(bytes));
     DhPlayer_set_scratch_bytes(self, bytes);
     DhPlayer_set_bit_depth(self, bit_depth);
@@ -185,10 +226,10 @@ fn dhvani_player_ring(self) { return DhPlayer_ring(self); }
 fn dhvani_player_push(self, buf) {
     var samples = dhvani_buffer_samples(buf);
     var n = vec_len(samples);
-    var bpp = dh_pcm_bytes(DhPlayer_bit_depth(self));
+    var bpp = dh_pcm_store_bytes(DhPlayer_bit_depth(self));
     var cap = DhPlayer_scratch_bytes(self);
     if (n * bpp > cap) { n = cap / bpp; }   # never overrun the scratch
-    dh_pack_le(samples, n, DhPlayer_scratch(self), DhPlayer_bit_depth(self));
+    dh_pack_le_w(samples, n, DhPlayer_scratch(self), DhPlayer_bit_depth(self), bpp);
     return vani_ring_write(DhPlayer_ring(self), DhPlayer_scratch(self), n * bpp);
 }
 
@@ -197,7 +238,7 @@ fn dhvani_player_drain(self, dev) {
     return vani_play_from_ring(dev, DhPlayer_ring(self));
 }
 
-# ── Ring-buffer RT capture (mirror of the player) ──────────────────────────
+# ── Ring-buffer RT capture (mirror of the player) ─────────────────────
 # A recorder owns a vani ring + reusable scratch. The RT loop: fill the ring
 # from the device (vani_record_to_ring), then read decoded blocks back as
 # AudioBuffers. No per-block allocation on the fill side.
@@ -209,7 +250,8 @@ struct DhRecorder { ring; scratch; scratch_bytes; bit_depth; channels; sample_ra
 fn dhvani_recorder_new_fmt(ring_bytes, max_frames, channels, sample_rate, bit_depth) {
     var self = alloc(sizeof(DhRecorder));
     DhRecorder_set_ring(self, vani_ring_new(ring_bytes));
-    var bytes = max_frames * channels * dh_pcm_bytes(bit_depth);
+    # STORAGE width — the ring is filled by vani straight from the device.
+    var bytes = max_frames * channels * dh_pcm_store_bytes(bit_depth);
     DhRecorder_set_scratch(self, alloc(bytes));
     DhRecorder_set_scratch_bytes(self, bytes);
     DhRecorder_set_bit_depth(self, bit_depth);
@@ -235,7 +277,7 @@ fn dhvani_recorder_fill(self, dev, frames) {
 #must_use
 fn dhvani_recorder_read(self, frames) {
     var ch = DhRecorder_channels(self);
-    var bpp = dh_pcm_bytes(DhRecorder_bit_depth(self));
+    var bpp = dh_pcm_store_bytes(DhRecorder_bit_depth(self));
     var frame_bytes = ch * bpp;
     var want = frames * frame_bytes;
     if (want > DhRecorder_scratch_bytes(self)) { want = DhRecorder_scratch_bytes(self); }
@@ -243,6 +285,6 @@ fn dhvani_recorder_read(self, frames) {
     got = (got / frame_bytes) * frame_bytes;   # floor to a whole-frame boundary
     var samples = got / bpp;
     var f = dh_vec_zeros(samples);
-    dh_unpack_le(DhRecorder_scratch(self), samples, f, DhRecorder_bit_depth(self));
+    dh_unpack_le_w(DhRecorder_scratch(self), samples, f, DhRecorder_bit_depth(self), bpp);
     return dhvani_buffer_from_interleaved(f, ch, DhRecorder_sample_rate(self));
 }

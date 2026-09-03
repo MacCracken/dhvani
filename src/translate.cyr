@@ -63,12 +63,12 @@ fn dhvani_miditx_pitch_bend_32_to_14(v) {
 #must_use
 fn dhvani_miditx_note_event_to_v2(event) {
     return dhvani_midi2_note_on_new(
-        dhvani_note_event_position(event),
-        dhvani_note_event_note(event),
-        dhvani_miditx_velocity_7_to_16(dhvani_note_event_velocity(event)),
-        dhvani_note_event_channel(event),
-        0,
-        0);
+      dhvani_note_event_position(event),
+      dhvani_note_event_note(event),
+      dhvani_miditx_velocity_7_to_16(dhvani_note_event_velocity(event)),
+      dhvani_note_event_channel(event),
+      0,
+      0);
 }
 
 # Convert a MIDI 2.0 NoteOnV2 back to a MIDI 1.0 NoteEvent (lossy).
@@ -76,29 +76,29 @@ fn dhvani_miditx_note_event_to_v2(event) {
 #must_use
 fn dhvani_miditx_note_on_v2_to_event(event, duration) {
     return dhvani_note_event_new(
-        dhvani_midi2_note_on_position(event),
-        duration,
-        dhvani_midi2_note_on_note(event),
-        dhvani_miditx_velocity_16_to_7(dhvani_midi2_note_on_velocity(event)),
-        dhvani_midi2_note_on_channel(event));
+      dhvani_midi2_note_on_position(event),
+      duration,
+      dhvani_midi2_note_on_note(event),
+      dhvani_miditx_velocity_16_to_7(dhvani_midi2_note_on_velocity(event)),
+      dhvani_midi2_note_on_channel(event));
 }
 
 # Convert a MIDI 1.0 ControlChange to MIDI 2.0 ControlChangeV2.
 #must_use
 fn dhvani_miditx_cc_to_v2(cc) {
     return dhvani_midi2_cc_new(
-        dhvani_cc_position(cc),
-        dhvani_cc_controller(cc),
-        dhvani_miditx_cc_7_to_32(dhvani_cc_value(cc)),
-        dhvani_cc_channel(cc));
+      dhvani_cc_position(cc),
+      dhvani_cc_controller(cc),
+      dhvani_miditx_cc_7_to_32(dhvani_cc_value(cc)),
+      dhvani_cc_channel(cc));
 }
 
 # Convert a MIDI 2.0 ControlChangeV2 to MIDI 1.0 ControlChange (lossy).
 #must_use
 fn dhvani_miditx_cc_v2_to_cc(cc) {
     return dhvani_cc_new(
-        dhvani_midi2_cc_position(cc),
-        dhvani_midi2_cc_controller(cc),
-        dhvani_miditx_cc_32_to_7(dhvani_midi2_cc_value(cc)),
-        dhvani_midi2_cc_channel(cc));
+      dhvani_midi2_cc_position(cc),
+      dhvani_midi2_cc_controller(cc),
+      dhvani_miditx_cc_32_to_7(dhvani_midi2_cc_value(cc)),
+      dhvani_midi2_cc_channel(cc));
 }

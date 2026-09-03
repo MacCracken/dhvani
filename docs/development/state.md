@@ -5,7 +5,11 @@
 
 ## Version
 
-**2.2.2** (in progress) — toolchain **6.5.41** + a **full 17-bundle dependency
+**2.2.3** (in progress) — **P-1 hardening sweep** (2 device-buffer overruns, 2
+alloc-path leaks, 1 process-abort, + sentinel/saturation repairs) and the
+**vendored → real `[deps]` migration**: all 16 sibling bundles are now declared,
+tag-pinned and hash-locked instead of hand-copied. `cyrius audit` fmt+lint gates
+pass. **2.2.2** — toolchain **6.5.41** + a **full 17-bundle dependency
 sweep** (naad 2.2.2 / svara 3.5.4 / hisab 2.11.2 / vani 1.2.2 / …), the
 `f64_round` → `f64_round_half_away` **rounding-parity fix**, and a self-gating
 `tests/hw/device.tcyr` (6.5.x made test discovery recursive). **2.2.1** —
@@ -44,7 +48,15 @@ zero per-block allocation, as the free-less bump allocator requires.
 
 ## Dependencies
 
-Direct (declared/planned in `cyrius.cyml`):
+**As of 2.2.3 all of these are real `[deps.X]` entries** (`git`+`path`+`tag`),
+resolved by `cyrius deps` into `lib/` and hash-locked in `cyrius.lock` — 18
+declared, 74 locked, 100% tag-pinned. The ordered `include` lines still govern
+compile order. Bump a version via its `tag`, never by hand-copying into `lib/`.
+Cost of the migration: `lib/` grew ~5.4 MB → 8.5 MB, because the siblings'
+declared stdlib closure (bayan, chrono, mmap, slice, sync, thread*, sankoch, …)
+comes along; all of it is unreachable from dhvani and DCE-prunes.
+
+Direct (declared in `cyrius.cyml`):
 
 - **stdlib** — base set + the DSP-math set (`math`, `ganita`, `tagged`,
   `fnptr`, `callback`, `bench`) + the g2p set (`hashmap`, `atomic`, `mmap` — for
@@ -94,7 +106,12 @@ externalized from the dist like the Wave F siblings; stdlib gained only `hashmap
 (the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
 `tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
 suites, all green on 6.4.12** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
-**As of 2.2.2: 65 suites / 1,695 assertions green on 6.5.41** — `tests/hw/device.tcyr`
+**As of 2.2.3: 65 suites / 1,712 assertions green on 6.5.41** (the +17 are the
+hardening regression tests: S24 storage-width + round-trip, convolution
+block-spanning / alloc-free / set_ir-grows-partitions, graph alloc-free, and the
+NaN-ignoring peak fold). The alloc-free assertions are
+mutation-proven — reverting the convolution fix makes the test report exactly
+130240 leaked bytes per call. **As of 2.2.2: 65 suites / 1,695 assertions green on 6.5.41** — `tests/hw/device.tcyr`
 is now discovered (recursive runner) and contributes its 3 assertions, skipping
 cleanly where there is no audio hardware.
 

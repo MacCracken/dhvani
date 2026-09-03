@@ -43,6 +43,17 @@ fn dhvani_vsynth_render_phoneme(phoneme, voice, sample_rate, duration) {
 # directly per frame.
 #must_use
 fn dhvani_vsynth_render_vocal_tract(source, tract, frames, sample_rate) {
+    # Both handles are raw i64 that share their value space with svara's negative
+    # error codes (svara_glottal_new -> SVARA_ERR_INVALID_PITCH, svara_tract_new
+    # -> a mapped naad error). The consumers below do raw load64/store64 off the
+    # handle -- no vec bounds check stands behind them -- so an unchecked
+    # negative or null handle is a wild access. Rust took &mut refs here, which
+    # made an error value unrepresentable; the flattened port has to say it.
+    # svara_is_err only tests `code < 0`, so 0 needs its own test.
+    if (source == 0) { return 0; }
+    if (svara_is_err(source) == 1) { return 0; }
+    if (tract == 0) { return 0; }
+    if (svara_is_err(tract) == 1) { return 0; }
     var samples = vec_new();
     var i = 0;
     while (i < frames) {

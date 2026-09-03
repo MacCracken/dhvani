@@ -40,7 +40,7 @@ fn dhvani_clock_with_tempo(sample_rate, bpm) {
 #must_use
 fn dhvani_clock_position_secs(self) {
     return f64_div(f64_from(DhAudioClock_position_samples(self)),
-                   f64_from(DhAudioClock_sample_rate(self)));
+      f64_from(DhAudioClock_sample_rate(self)));
 }
 
 # position_ms -- position in milliseconds.
@@ -63,7 +63,7 @@ fn dhvani_clock_position_beats(self) {
 fn dhvani_clock_advance(self, frames) {
     if (DhAudioClock_running(self) == 1) {
         DhAudioClock_set_position_samples(self,
-            DhAudioClock_position_samples(self) + frames);
+          DhAudioClock_position_samples(self) + frames);
     }
     return 0;
 }

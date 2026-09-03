@@ -148,5 +148,42 @@ assert(f64_lt(f64_abs(f64_sub(vec_get(gs, 1), f64_neg(1.0))), 0.0001), "sample1 
 assert(f64_lt(f64_abs(f64_sub(vec_get(gs, 2), 0.5)), 0.0001), "sample2 ~0.5");
 assert(f64_lt(f64_abs(vec_get(gs, 3)), 0.0001), "sample3 ~0");
 
+# ---- s24_storage_vs_packed_width (regression, 2.2.3) ----
+# ALSA's SND_PCM_FORMAT_S24_LE carries 24 significant bits in a 32-bit word, so
+# the DEVICE width is 4 while the packed/logical width (rust-old parity, used by
+# the pure bridge) is 3. Sizing a device buffer with the packed width made the
+# kernel read/write 33% past the allocation.
+test_group("s24_storage_vs_packed_width");
+assert_eq(dh_pcm_bytes(16), 2, "packed width 16 == 2");
+assert_eq(dh_pcm_bytes(24), 3, "packed width 24 == 3 (rust-old f32_to_i24_packed)");
+assert_eq(dh_pcm_bytes(32), 4, "packed width 32 == 4");
+assert_eq(dh_pcm_store_bytes(16), 2, "storage width 16 == 2");
+assert_eq(dh_pcm_store_bytes(24), 4, "storage width 24 == 4 (S24_LE in a 32-bit word)");
+assert_eq(dh_pcm_store_bytes(32), 4, "storage width 32 == 4");
+# the storage width must agree with what vani will tell the kernel
+assert_eq(dh_pcm_store_bytes(24), vani_bytes_per_sample(vani_alsa_for(24, 1)), "storage width 24 matches vani");
+assert_eq(dh_pcm_store_bytes(16), vani_bytes_per_sample(vani_alsa_for(16, 1)), "storage width 16 matches vani");
+assert_eq(dh_pcm_store_bytes(32), vani_bytes_per_sample(vani_alsa_for(32, 1)), "storage width 32 matches vani");
+
+# ---- s24_storage_roundtrip_extremes (regression, 2.2.3) ----
+# Round-trip through the 4-byte storage layout, including the sign padding that
+# the unpack mask has to strip before the sign fold.
+test_group("s24_storage_roundtrip_extremes");
+var sv = vec_new();
+vec_push(sv, 1.0); vec_push(sv, DH_NEG_ONE); vec_push(sv, 0); vec_push(sv, 0.5);
+var sbytes = dh_pcm_store_bytes(24);
+var sbuf = alloc(4 * sbytes);
+dh_pack_le_w(sv, 4, sbuf, 24, sbytes);
+var sout = dh_vec_zeros(4);
+dh_unpack_le_w(sbuf, 4, sout, 24, sbytes);
+assert_eq(f64_to(f64_mul(vec_get(sout, 0), 1000.0)), 1000, "S24 storage +full-scale round-trips");
+assert_eq(f64_to(f64_mul(vec_get(sout, 1), 1000.0)), 0 - 1000, "S24 storage -full-scale round-trips (sign padding stripped)");
+assert_eq(f64_to(f64_mul(vec_get(sout, 2), 1000.0)), 0, "S24 storage zero round-trips");
+# half-scale is not exact: 0.5*8388607 = 4194303.5, and the pack TRUNCATES (as
+# rust-old does), so the round-trip lands one quantum low. Assert within one LSB.
+var half_err = f64_abs(f64_sub(vec_get(sout, 3), 0.5));
+assert_eq(f64_lt(half_err, 0.0000002), 1, "S24 storage half-scale round-trips within 1 LSB");
+
+
 var rc = assert_summary();
 syscall(60, rc);

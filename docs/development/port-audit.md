@@ -82,6 +82,39 @@ pre-sized arena; port it early and make it the universal convention.
 
 ---
 
+### Hot paths: parity with `rust-old` is the WRONG bar for allocation
+
+`rust-old` allocates per-block scratch and lets scope drop it. Cyrius's allocator
+**never frees**, so a line-for-line port of that shape is an unbounded leak. Two
+shipped this way and were fixed in 2.2.3: convolution's partition accumulators
+(measured **130,240 bytes per `process` call**) and the graph processor's per-node
+input-gather vec — the latter especially avoidable, since Rust *did* hold it as an
+`input_scratch` field and the port simply dropped it.
+
+**Rule:** any `vec_new` / `dh_vec_zeros` / `alloc` reachable from a per-sample or
+per-block loop becomes a struct-owned field, zeroed or truncated in place. Assert
+it: `alloc_used()` before/after a steady-state call, `assert_eq(delta, 0, ...)`.
+Warm up first — the first calls legitimately allocate.
+
+### `f64_max`/`f64_min` are ASYMMETRIC on NaN — Rust's `max`/`min` are not
+
+`f64_max(x, NaN)` returns **NaN**; `f64_max(NaN, x)` returns **x**. Rust's
+`f32::max`/`f64::max` **ignore** NaN and return the non-NaN operand. So the
+idiomatic Rust fold `acc = acc.max(v)` (or `.fold(0.0f32, f32::max)`) does NOT
+port to `acc = f64_max(acc, v)`: one NaN first poisons the accumulator and then
+**resets** it to the value after the NaN, silently under-reporting the result.
+
+Measured on `[0.8, NaN, 0.2]`: peak came out **0.2** instead of 0.8, and
+`dhvani_dsp_normalize` divides by that peak — so it over-amplified 4×. Six folds
+carried this (simd/limiter/compressor/deesser/analysis/chroma). The threat model
+treats samples as untrusted and expects NaN, so it was reachable from the public
+API.
+
+**Rule:** every ported `.max()`/`.min()` accumulator goes through
+`dh_max_ignore_nan` (`src/simd.cyr`), never bare `f64_max`. Same shape as the
+`f64_round` trap below: the Cyrius primitive is *nearly* the Rust one, and the
+difference only shows on an input the tests do not carry.
+
 ### Rounding: always `f64_round_half_away`, never bare `f64_round`
 
 Rust's `f32::round()`/`f64::round()` round **half away from zero**. Cyrius has a

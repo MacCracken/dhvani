@@ -31,11 +31,11 @@ fn dhvani_resample_windowed_sinc(x, half_width) {
     var t = f64_mul(f64_add(f64_div(x, half_width), 1.0), 0.5);
     var tau_t = f64_mul(DH_TAU, t);
     var window = f64_sub(
-        f64_add(
-            f64_sub(0.35875, f64_mul(0.48829, f64_cos(tau_t))),
-            f64_mul(0.14128, f64_cos(f64_mul(2.0, tau_t)))
+      f64_add(
+        f64_sub(0.35875, f64_mul(0.48829, f64_cos(tau_t))),
+        f64_mul(0.14128, f64_cos(f64_mul(2.0, tau_t)))
         ),
-        f64_mul(0.01168, f64_cos(f64_mul(3.0, tau_t))));
+      f64_mul(0.01168, f64_cos(f64_mul(3.0, tau_t))));
     return f64_mul(sinc, window);
 }
 

@@ -72,6 +72,11 @@ check on the actual result, never an `#ifdef`/CI env flag.
 Full per-module ledger + established conventions live in
 [`docs/development/port-audit.md`](docs/development/port-audit.md). The load-bearing ones:
 
+- **A green `cyrius test` does NOT clear a dependency bump.** These are flat
+  concatenated bundles in one namespace, so a *deleted* upstream symbol silently
+  rebinds to a same-named cycc builtin or another bundle's copy and still
+  compiles. Diff the bundle's exported symbols and grep for every removed name.
+  (2.2.2 shipped a rounding-parity bug exactly this way.)
 - **Alloc-free hot paths.** Cyrius runs a **free-less bump allocator** — a
   per-sample or per-block heap allocation leaks unboundedly across a render.
   Every process loop must allocate zero bytes/sample; reuse scratch owned by the
@@ -99,7 +104,11 @@ Full per-module ledger + established conventions live in
 - **Never use `gh` CLI** — use `curl` to the GitHub API if needed
 - Do not modify `rust-old/` — it's the parity oracle
 - Do not skip tests before claiming changes work
-- Do not modify `lib/` files (vendored stdlib / dep symlinks)
+- Do not hand-edit `lib/` — as of 2.2.3 every bundle there is resolved by
+  `cyrius deps` from a `[deps.X]` entry in `cyrius.cyml` and hash-locked in
+  `cyrius.lock`. To change a dependency, bump its `tag` in the manifest and
+  re-run `cyrius deps`; a manual edit is silently overwritten on the next
+  `cyrius build/test` (which both re-resolve).
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
 
 ## Documentation

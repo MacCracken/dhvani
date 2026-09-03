@@ -147,5 +147,78 @@ var buf_h = dhvani_buffer_from_interleaved(sh, 1, 44100);
 dhvani_conv_process(rev_h, buf_h);
 assert_eq(conv_all_finite(buf_h), 1, "set_ir_replaces output finite");
 
+# ---- block_spans_two_process_calls (regression, 2.2.3) ----
+# write_pos carries across process() calls, so a frame count that is not a
+# multiple of block_size drives `block_start = frame + to_copy - block_size`
+# NEGATIVE on a later call. Those output frames belong to the previous call's
+# buffer and must be skipped; before the fix the negative index reached vec_get
+# and aborted the process (lib/vec.cyr `_vec_die`), so merely REACHING the
+# assert below is the regression proof.
+test_group("block_spans_two_process_calls");
+var ir_s = vec_new(); vec_push(ir_s, 1.0); vec_push(ir_s, 0.5);
+var rev_s = dhvani_conv_new(ir_s, 1.0, 44100);
+var call_n = 0;
+while (call_n < 4) {
+    var ss = vec_new();
+    var pj = 0;
+    while (pj < 300) { vec_push(ss, 0.25); pj = pj + 1; }   # 300 is NOT a multiple of block_size
+    var buf_s = dhvani_buffer_from_interleaved(ss, 1, 44100);
+    dhvani_conv_process(rev_s, buf_s);
+    assert_eq(conv_all_finite(buf_s), 1, "spanning-call output finite");
+    call_n = call_n + 1;
+}
+
+# ---- process_block_is_alloc_free (regression, 2.2.3) ----
+# The partition accumulators are struct-owned now; rust-old allocated them per
+# block and relied on scope-drop, which the free-less bump allocator cannot do.
+# Warm up first (channel setup + FDL growth legitimately allocate), then measure
+# a steady-state window.
+test_group("process_block_is_alloc_free");
+var ir_a = vec_new(); vec_push(ir_a, 1.0); vec_push(ir_a, 0.5); vec_push(ir_a, 0.25);
+var rev_a = dhvani_conv_new(ir_a, 1.0, 44100);
+var warm = 0;
+while (warm < 3) {
+    var sa0 = vec_new();
+    var wa = 0;
+    while (wa < 2048) { vec_push(sa0, 0.1); wa = wa + 1; }
+    dhvani_conv_process(rev_a, dhvani_buffer_from_interleaved(sa0, 1, 44100));
+    warm = warm + 1;
+}
+# steady state: build the input buffer OUTSIDE the measured window
+var sa = vec_new();
+var ka = 0;
+while (ka < 2048) { vec_push(sa, 0.1); ka = ka + 1; }
+var buf_a = dhvani_buffer_from_interleaved(sa, 1, 44100);
+var used_before = alloc_used();
+dhvani_conv_process(rev_a, buf_a);
+var used_after = alloc_used();
+assert_eq(used_after - used_before, 0, "conv_process allocates 0 bytes in steady state");
+
+
+# ---- set_ir_grows_partitions (regression, 2.2.3) ----
+# dhvani_conv_ensure_channels is the ONLY place the per-channel FDL is sized to
+# the partition count, and it early-returns when the channel count is unchanged.
+# So: process once with a SHORT ir (FDL sized to 1 partition), then set a LONGER
+# ir, then process again -- process_block indexes ch_fdl[0..num_partitions) and
+# runs off the end (vec_get -> _vec_die -> exit 1). Reaching the assert is the
+# regression proof.
+test_group("set_ir_grows_partitions");
+var ir_g0 = vec_new(); vec_push(ir_g0, 1.0);
+var rev_g = dhvani_conv_new(ir_g0, 1.0, 44100);
+var sg0 = vec_new();
+var gj = 0;
+while (gj < 2048) { vec_push(sg0, 0.2); gj = gj + 1; }
+dhvani_conv_process(rev_g, dhvani_buffer_from_interleaved(sg0, 1, 44100));   # sizes FDL to the SHORT ir
+var ir_g1 = vec_new();
+var gk = 0;
+while (gk < 4096) { vec_push(ir_g1, 0.01); gk = gk + 1; }                    # many more partitions
+dhvani_conv_set_ir(rev_g, ir_g1);
+var sg1 = vec_new();
+var gm = 0;
+while (gm < 2048) { vec_push(sg1, 0.2); gm = gm + 1; }
+var buf_g3 = dhvani_buffer_from_interleaved(sg1, 1, 44100);
+dhvani_conv_process(rev_g, buf_g3);
+assert_eq(conv_all_finite(buf_g3), 1, "longer ir after process: no OOB, output finite");
+
 var rc = assert_summary();
 syscall(60, rc);

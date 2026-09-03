@@ -164,5 +164,20 @@ assert(near(vec_get(bs, 1), 0.004836739652368523, 0.000000001), "R[0] = b0*1.0")
 assert_eq(dhvani_is_finite(vec_get(bs, 2)), 1, "L[1] finite");
 assert_eq(dhvani_is_finite(vec_get(state, 0)), 1, "state finite");
 
+# ---- peak_abs_ignores_nan (regression, 2.2.3) ----
+# Cyrius f64_max is asymmetric on NaN: f64_max(x, NaN) -> NaN, f64_max(NaN, x) -> x.
+# A naive fold therefore poisons the running peak on a NaN and then RESETS it to
+# the next sample, under-reporting the peak -- which makes normalize OVER-amplify.
+# rust-old uses f32::max / .fold(0.0f32, f32::max), which IGNORE NaN.
+test_group("peak_abs_ignores_nan");
+var nanbuf = vec_new();
+vec_push(nanbuf, 0.8);
+vec_push(nanbuf, f64_div(0, 0));   # NaN
+vec_push(nanbuf, 0.2);
+var np = dhvani_simd_peak_abs(nanbuf);
+assert_eq(f64_eq(np, np), 1, "peak over a NaN-containing buffer is not NaN");
+assert_eq(f64_to(f64_mul(np, 100.0)), 80, "peak keeps the true max (0.8), not the post-NaN reset (0.2)");
+
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -5,7 +5,15 @@
 # log10(x) = ln(x)/ln(10) (no f64_log10 in stdlib).
 
 #derive(accessors)
-struct DhSpectrum { magnitudes; magnitude_db; freq_resolution; sample_rate; fft_size; peak_frequency; peak_magnitude_db; }
+struct DhSpectrum {
+    magnitudes;
+    magnitude_db;
+    freq_resolution;
+    sample_rate;
+    fft_size;
+    peak_frequency;
+    peak_magnitude_db;
+}
 
 #must_use
 fn dh_log10(x) { return f64_div(f64_ln(x), F64_LN10); }
@@ -129,7 +137,7 @@ fn dhvani_analysis_spectrum_dft(buf, window_size) {
 fn dhvani_analysis_normalize(magnitudes, num_bins) {
     var max = 0;
     var m = 0;
-    while (m < num_bins) { max = f64_max(max, vec_get(magnitudes, m)); m = m + 1; }
+    while (m < num_bins) { max = dh_max_ignore_nan(max, vec_get(magnitudes, m)); m = m + 1; }
     if (f64_gt(max, 0) == 1) {
         var p = 0;
         while (p < num_bins) { vec_set(magnitudes, p, f64_div(vec_get(magnitudes, p), max)); p = p + 1; }

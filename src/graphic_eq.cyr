@@ -17,9 +17,11 @@
 # each time. set_band recomputes only that band's coeffs and swaps its config.
 # serde round-trip + Display tests are the only drops.
 
-var DH_GEQ_Q          = 0x3FF6666666666666;   # GRAPHIC_EQ_Q = 1.4 (exact hex; 1.4 has no finite binary form so the decimal literal would misparse)
+# GRAPHIC_EQ_Q = 1.4 (exact hex; 1.4 has no finite binary form so the decimal literal would misparse)
+var DH_GEQ_Q          = 0x3FF6666666666666;
 var DH_GEQ_MAX_GAIN   = 12.0;                  # MAX_GAIN_DB
-var DH_GEQ_FLAT_EPS   = 0x3F847AE147AE147B;    # 0.01 (is_flat / enabled threshold; 0.01 is not exactly representable -> hex)
+# 0.01 (is_flat / enabled threshold; 0.01 is not exactly representable -> hex)
+var DH_GEQ_FLAT_EPS   = 0x3F847AE147AE147B;
 
 # ISO center frequency (Hz) for band index i (0..9). All integer-valued so
 # decimal literals below 2^24 are safe.
@@ -91,7 +93,7 @@ fn dhvani_geq_settings_is_flat(self) {
 fn dhvani_geq_settings_set_band(self, band, gain_db) {
     if (band < 10) {
         vec_set(DhGraphicEqSettings_bands(self), band,
-                f64_clamp(gain_db, f64_neg(DH_GEQ_MAX_GAIN), DH_GEQ_MAX_GAIN));
+          f64_clamp(gain_db, f64_neg(DH_GEQ_MAX_GAIN), DH_GEQ_MAX_GAIN));
     }
     return 0;
 }
@@ -102,7 +104,10 @@ fn dhvani_geq_settings_set_band(self, band, gain_db) {
 fn dhvani_geq_settings_preset(name) {
     var b = dh_vec_zeros(10);
     if (streq(name, "rock") == 1) {
-        vec_set(b, 0, 4.0); vec_set(b, 1, 3.0); vec_set(b, 2, 1.0); vec_set(b, 3, f64_neg(1.0)); vec_set(b, 4, f64_neg(2.0));
+        vec_set(
+          b,
+          0,
+          4.0); vec_set(b, 1, 3.0); vec_set(b, 2, 1.0); vec_set(b, 3, f64_neg(1.0)); vec_set(b, 4, f64_neg(2.0));
         vec_set(b, 5, 0); vec_set(b, 6, 2.0); vec_set(b, 7, 3.0); vec_set(b, 8, 4.0); vec_set(b, 9, 4.0);
     } elif (streq(name, "pop") == 1) {
         vec_set(b, 0, f64_neg(1.0)); vec_set(b, 1, 1.0); vec_set(b, 2, 3.0); vec_set(b, 3, 4.0); vec_set(b, 4, 3.0);
@@ -112,7 +117,10 @@ fn dhvani_geq_settings_preset(name) {
         vec_set(b, 5, f64_neg(1.0)); vec_set(b, 6, 0); vec_set(b, 7, 1.0); vec_set(b, 8, 2.0); vec_set(b, 9, 3.0);
     } elif (streq(name, "classical") == 1) {
         vec_set(b, 0, 0); vec_set(b, 1, 0); vec_set(b, 2, 0); vec_set(b, 3, 0); vec_set(b, 4, 0);
-        vec_set(b, 5, 0); vec_set(b, 6, f64_neg(2.0)); vec_set(b, 7, f64_neg(3.0)); vec_set(b, 8, f64_neg(2.0)); vec_set(b, 9, 0);
+        vec_set(
+          b,
+          5,
+          0); vec_set(b, 6, f64_neg(2.0)); vec_set(b, 7, f64_neg(3.0)); vec_set(b, 8, f64_neg(2.0)); vec_set(b, 9, 0);
     } elif (streq(name, "bass") == 1) {
         vec_set(b, 0, 6.0); vec_set(b, 1, 5.0); vec_set(b, 2, 4.0); vec_set(b, 3, 2.0); vec_set(b, 4, 0);
         vec_set(b, 5, 0); vec_set(b, 6, 0); vec_set(b, 7, 0); vec_set(b, 8, 0); vec_set(b, 9, 0);
@@ -120,7 +128,10 @@ fn dhvani_geq_settings_preset(name) {
         vec_set(b, 0, 0); vec_set(b, 1, 0); vec_set(b, 2, 0); vec_set(b, 3, 0); vec_set(b, 4, 0);
         vec_set(b, 5, 0); vec_set(b, 6, 2.0); vec_set(b, 7, 4.0); vec_set(b, 8, 5.0); vec_set(b, 9, 6.0);
     } elif (streq(name, "vocal") == 1) {
-        vec_set(b, 0, f64_neg(2.0)); vec_set(b, 1, f64_neg(1.0)); vec_set(b, 2, 0); vec_set(b, 3, 2.0); vec_set(b, 4, 4.0);
+        vec_set(
+          b,
+          0,
+          f64_neg(2.0)); vec_set(b, 1, f64_neg(1.0)); vec_set(b, 2, 0); vec_set(b, 3, 2.0); vec_set(b, 4, 4.0);
         vec_set(b, 5, 4.0); vec_set(b, 6, 3.0); vec_set(b, 7, 1.0); vec_set(b, 8, 0); vec_set(b, 9, f64_neg(1.0));
     } elif (streq(name, "electronic") == 1) {
         vec_set(b, 0, 5.0); vec_set(b, 1, 4.0); vec_set(b, 2, 1.0); vec_set(b, 3, 0); vec_set(b, 4, f64_neg(2.0));
@@ -217,7 +228,7 @@ fn dhvani_geq_rebuild(self) {
         var enabled = 0;
         if (f64_ge(f64_abs(gain_db), DH_GEQ_FLAT_EPS) == 1) { enabled = 1; }
         dhvani_eq_set_band(inner, i,
-            dhvani_eq_band_config_new(DH_BAND_PEAKING, dhvani_geq_iso_band(i), gain_db, DH_GEQ_Q, enabled));
+          dhvani_eq_band_config_new(DH_BAND_PEAKING, dhvani_geq_iso_band(i), gain_db, DH_GEQ_Q, enabled));
         i = i + 1;
     }
     return 0;

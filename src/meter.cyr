@@ -160,7 +160,19 @@ fn dhvani_meter_shared_bank(capacity) { return dhvani_meter_bank_new(capacity); 
 # LevelMeter -- block-accumulating meter (peak, RMS, LUFS, peak-hold).
 # ================================================================
 #derive(accessors)
-struct DhLevelMeter { peak; rms; lufs; channels; rms_sum; rms_count; lufs_blocks; lufs_buffer; lufs_buffer_pos; peak_hold; peak_decay; }
+struct DhLevelMeter {
+    peak;
+    rms;
+    lufs;
+    channels;
+    rms_sum;
+    rms_count;
+    lufs_blocks;
+    lufs_buffer;
+    lufs_buffer_pos;
+    peak_hold;
+    peak_decay;
+}
 
 # new(channels, sample_rate) -- allocate per-channel state; lufs = DB_FLOOR.
 # lufs_buffer length = (sample_rate * 0.4) truncated (Rust `as usize`).

@@ -129,8 +129,8 @@ fn dhvani_auto_value_at(self, frame) {
     var prev = vec_get(bps, idx - 1);
     var next = vec_get(bps, idx);
     return dhvani_auto_interpolate(DhBreakpoint_value(prev), DhBreakpoint_value(next),
-        DhBreakpoint_frame(prev), DhBreakpoint_frame(next), frame,
-        DhBreakpoint_curve(next), DhBreakpoint_exp(next));
+      DhBreakpoint_frame(prev), DhBreakpoint_frame(next), frame,
+      DhBreakpoint_curve(next), DhBreakpoint_exp(next));
 }
 
 # render(output, start_frame) -- fill output[i] with value_at(start_frame+i).

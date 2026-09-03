@@ -99,12 +99,12 @@ fn dhvani_svf_process_sample_internal(self, input, channel) {
     if (mode == DH_SVF_PEAK)     { return f64_add(input, f64_mul(f64_sub(f64_mul(a, a), 1.0), v1)); }
     if (mode == DH_SVF_LOWSHELF) {
         return f64_add(f64_add(input, f64_mul(f64_sub(f64_mul(a, a), 1.0), v2)),
-                       f64_mul(f64_mul(f64_sub(a, 1.0), k), v1));
+          f64_mul(f64_mul(f64_sub(a, 1.0), k), v1));
     }
     # HighShelf
     var hp = f64_sub(f64_sub(input, f64_mul(k, v1)), v2);
     return f64_add(f64_add(input, f64_mul(f64_sub(f64_mul(a, a), 1.0), hp)),
-                   f64_mul(f64_mul(f64_sub(a, 1.0), k), v1));
+      f64_mul(f64_mul(f64_sub(a, 1.0), k), v1));
 }
 
 # process(buf) -- filter in place with dry/wet mix.
@@ -147,10 +147,22 @@ fn dhvani_svf_set_params(self, mode, freq_hz, q, gain_db) {
     dhvani_svf_update_coeffs(self);
     return 0;
 }
-fn dhvani_svf_set_frequency(self, freq_hz) { DhSvfFilter_set_freq_hz(self, freq_hz); dhvani_svf_update_coeffs(self); return 0; }
+fn dhvani_svf_set_frequency(self, freq_hz) {
+    DhSvfFilter_set_freq_hz(self, freq_hz);
+    dhvani_svf_update_coeffs(self);
+    return 0;
+}
 fn dhvani_svf_set_q(self, q) { DhSvfFilter_set_q(self, f64_max(q, 0.01)); dhvani_svf_update_coeffs(self); return 0; }
-fn dhvani_svf_set_gain_db(self, gain_db) { DhSvfFilter_set_gain_db(self, gain_db); dhvani_svf_update_coeffs(self); return 0; }
-fn dhvani_svf_set_sample_rate(self, sample_rate) { DhSvfFilter_set_sample_rate(self, sample_rate); dhvani_svf_update_coeffs(self); return 0; }
+fn dhvani_svf_set_gain_db(self, gain_db) {
+    DhSvfFilter_set_gain_db(self, gain_db);
+    dhvani_svf_update_coeffs(self);
+    return 0;
+}
+fn dhvani_svf_set_sample_rate(self, sample_rate) {
+    DhSvfFilter_set_sample_rate(self, sample_rate);
+    dhvani_svf_update_coeffs(self);
+    return 0;
+}
 fn dhvani_svf_set_bypass(self, bypassed) { DhSvfFilter_set_bypassed(self, bypassed); return 0; }
 fn dhvani_svf_set_mix(self, mix) { DhSvfFilter_set_mix(self, f64_clamp(mix, 0, 1.0)); return 0; }
 

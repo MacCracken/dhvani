@@ -208,6 +208,12 @@ fn dhvani_detect_tempo(buf, min_bpm, max_bpm) {
     var min_lag = f64_to(f64_trunc(f64_div(f64_mul(onset_sr, 60.0), max_bpm)));
     # max_lag = (onset_sr * 60 / min_bpm) as usize
     var max_lag = f64_to(f64_trunc(f64_div(f64_mul(onset_sr, 60.0), min_bpm)));
+    # Rust's float->int `as usize` SATURATES (negative -> 0), so min_lag/max_lag
+    # could never go negative there. Cyrius f64_to truncates, so a negative or
+    # NaN bpm yields a negative lag that reaches vec_get as a negative index and
+    # aborts the process. Reproduce the saturating cast to keep oracle parity.
+    if (min_lag < 0) { min_lag = 0; }
+    if (max_lag < 0) { max_lag = 0; }
     # max_lag = max_lag.min(onset_env.len() / 2)
     var half_env = vec_len(onset_env) / 2;
     if (max_lag > half_env) { max_lag = half_env; }

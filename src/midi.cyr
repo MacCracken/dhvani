@@ -277,7 +277,12 @@ fn dhvani_midi_clip_merge(self, other) {
     while (i < nn) {
         var e = vec_get(onotes, i);
         dh_midi_insert_note(DhMidiClip_notes(self),
-            dhvani_note_event_new(DhNoteEvent_position(e), DhNoteEvent_duration(e), DhNoteEvent_note(e), DhNoteEvent_velocity(e), DhNoteEvent_channel(e)));
+          dhvani_note_event_new(
+            DhNoteEvent_position(e),
+            DhNoteEvent_duration(e),
+            DhNoteEvent_note(e),
+            DhNoteEvent_velocity(e),
+            DhNoteEvent_channel(e)));
         i = i + 1;
     }
     var occs = DhMidiClip_control_changes(other);
@@ -285,7 +290,12 @@ fn dhvani_midi_clip_merge(self, other) {
     var j = 0;
     while (j < nc) {
         var c = vec_get(occs, j);
-        dhvani_midi_clip_add_cc(self, DhControlChange_position(c), DhControlChange_controller(c), DhControlChange_value(c), DhControlChange_channel(c));
+        dhvani_midi_clip_add_cc(
+          self,
+          DhControlChange_position(c),
+          DhControlChange_controller(c),
+          DhControlChange_value(c),
+          DhControlChange_channel(c));
         j = j + 1;
     }
     if (nn > 0) {

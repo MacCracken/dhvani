@@ -472,7 +472,7 @@ fn dhvani_plan_total_latency(plan) {
 # pending = a shared length-1 vec cell (Arc<Mutex<Option<plan>>>); node_outputs
 # indexed by NodeId value; 0 = None.
 #derive(accessors)
-struct DhGraphProc { current_plan; pending; node_outputs; channels; sample_rate; buffer_frames; }
+struct DhGraphProc { current_plan; pending; node_outputs; channels; sample_rate; buffer_frames; input_scratch; }
 
 fn dhvani_graph_proc_new(channels, sample_rate, buffer_frames) {
     var self = alloc(sizeof(DhGraphProc));
@@ -484,6 +484,12 @@ fn dhvani_graph_proc_new(channels, sample_rate, buffer_frames) {
     DhGraphProc_set_channels(self, channels);
     DhGraphProc_set_sample_rate(self, sample_rate);
     DhGraphProc_set_buffer_frames(self, buffer_frames);
+    # Reusable per-node input-gather vec. rust-old carries the same field
+    # (`input_scratch: Vec<AudioBuffer>` on GraphProcessor, cleared per node);
+    # the port dropped it and re-minted a vec per node per audio cycle, which
+    # the free-less bump allocator never reclaims. vec_truncate rewinds len and
+    # keeps capacity, so steady state is 0 bytes/cycle.
+    DhGraphProc_set_input_scratch(self, vec_new());
     return self;
 }
 
@@ -553,8 +559,9 @@ fn dhvani_graph_proc_process(self) {
         var node_id = vec_get(order, p);
         var idx = node_id;
 
-        # gather input buffers from predecessor output slots
-        var scratch = vec_new();
+        # gather input buffers from predecessor output slots (reused scratch)
+        var scratch = DhGraphProc_input_scratch(self);
+        vec_truncate(scratch, 0);
         var imi = dh_graph_find(im_ids, node_id);
         if (imi >= 0) {
             var preds = vec_get(im_lists, imi);
