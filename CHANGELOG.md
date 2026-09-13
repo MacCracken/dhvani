@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.4] — cyrius 6.6.3, the current sound stack, and device glue on the value form
+
+Toolchain `cyrius` 6.5.41 → **6.6.3**, with every dependency moved to its current release
+except hisab.
+
+### Dependencies
+
+| dep | was | now |
+|---|---|---|
+| abaco | 2.4.5 | **2.4.6** |
+| garjan | 2.5.1 | **2.5.2** |
+| ghurni | 2.6.0 | **2.6.1** |
+| goonj | 2.0.4 | **2.0.5** |
+| hisab | 2.11.2 | 2.11.2 (unchanged) |
+| naad | 2.2.2 | **2.2.4** |
+| nidhi | 2.1.1 | **2.1.2** |
+| patra | 1.13.11 | **1.14.2** |
+| prani | 2.0.12 | **2.0.13** |
+| sakshi | 2.4.12 | **2.5.2** |
+| sankoch | 2.7.10 | **2.7.15** |
+| shabda | 3.0.4 | **3.0.5** |
+| shabdakosh | 3.0.6 | **3.0.7** |
+| shravan | 2.8.0 | **2.8.1** |
+| svara | 3.5.4 | **3.5.5** |
+| vani | 1.2.2 | **1.2.5** |
+| varna | 2.4.1 | **2.4.2** |
+| yukti | 2.3.8 | **2.3.11** |
+
+**hisab stays at 2.11.2.** naad 2.2.4 and svara 3.5.5 both pin hisab 2.22.1, but both were
+rebuilt from their released tags against 2.11.2 and pass — naad 40/40, svara 22/22 — so
+dhvani, which holds the stack's versions, keeps 2.11.2.
+
+### Fixed — device glue on the value form
+
+`src/playback.cyr` called vani's device API the pre-6.6.0 way —
+`var ores = vani_open_playback(...)`, `is_ok(ores)`, then `payload(ores)`. That was correct
+against vani 1.2.2's boxed Results, but vani 1.2.5 returns the value form and `payload()` was
+retired at cyrius 6.6.0. Nine test files stopped compiling (`bundle`, `bundle_synth`,
+`bundle_g2p`, `integration`, `integration_advanced`, `playback`, `proptest`, `dsp_reference`,
+`hw/device`) — all through this one module; `src/main.cyr` never includes it, which is why
+the build itself stayed green. The six call sites (`vani_open_playback`, `vani_open_capture`,
+`vani_play`, `vani_record`, and `vani_configure` twice) now bind both halves, the same way
+vani's own `src/playback.cyr` and `src/capture.cyr` do. `dist/dhvani.cyr` regenerated.
+
+### Changed — the lock now describes what CI builds
+
+dhvani carries 18 `path = "../<sibling>"` overrides. A path override silently wins over
+the dep's `tag`, so a local `cyrius deps` reads each sibling's *worktree* — while CI, which
+has no siblings, clones the tags. That divergence was live: hisab's worktree is ahead of any
+tag, so a local resolve compiled dhvani against unreleased hisab code. `lib/` and
+`cyrius.lock` are regenerated here from the tags alone — all 18 deps commit-pinned, where the
+previous lock had none.
+
 ## [2.2.3] — P-1 hardening sweep + vendored deps promoted to real `[deps]`
 
 ### Fixed — P-1

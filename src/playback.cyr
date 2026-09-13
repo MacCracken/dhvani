@@ -123,11 +123,11 @@ fn dhvani_capture_from_s16le(pcm, frames, channels, sample_rate) {
 
 # Open + configure + start a playback device at `bit_depth`. vani handle, or 0.
 fn dhvani_playback_open_fmt(card, device, sample_rate, channels, bit_depth) {
-    var ores = vani_open_playback(card, device);
-    if (is_ok(ores) == 0) { return 0; }
-    var d = payload(ores);
-    var cres = vani_configure(d, vani_format_new(sample_rate, channels, bit_depth, vani_alsa_for(bit_depth, 1)));
-    if (is_ok(cres) == 0) { vani_close(d); return 0; }
+    var ores_tag, d = vani_open_playback(card, device);
+    if (is_ok(ores_tag) == 0) { return 0; }
+    var cres_tag, cres = vani_configure(d,
+      vani_format_new(sample_rate, channels, bit_depth, vani_alsa_for(bit_depth, 1)));
+    if (is_ok(cres_tag) == 0) { vani_close(d); return 0; }
     vani_start(d);
     return d;
 }
@@ -150,20 +150,20 @@ fn dhvani_playback_write(dev, buf) {
     var pcm = alloc(n * dh_pcm_store_bytes(depth));
     if (pcm == 0) { return 0 - 1; }
     dh_pack_le_w(samples, n, pcm, depth, dh_pcm_store_bytes(depth));
-    var pres = vani_play(dev, pcm, frames);
-    if (is_ok(pres) == 0) { return 0 - 1; }
-    return payload(pres);
+    var pres_tag, pres = vani_play(dev, pcm, frames);
+    if (is_ok(pres_tag) == 0) { return 0 - 1; }
+    return pres;
 }
 
 fn dhvani_playback_close(dev) { return vani_close(dev); }
 
 # Open + configure + start a capture device at `bit_depth`. Handle, or 0.
 fn dhvani_capture_open_fmt(card, device, sample_rate, channels, bit_depth) {
-    var ores = vani_open_capture(card, device);
-    if (is_ok(ores) == 0) { return 0; }
-    var d = payload(ores);
-    var cres = vani_configure(d, vani_format_new(sample_rate, channels, bit_depth, vani_alsa_for(bit_depth, 1)));
-    if (is_ok(cres) == 0) { vani_close(d); return 0; }
+    var ores_tag, d = vani_open_capture(card, device);
+    if (is_ok(ores_tag) == 0) { return 0; }
+    var cres_tag, cres = vani_configure(d,
+      vani_format_new(sample_rate, channels, bit_depth, vani_alsa_for(bit_depth, 1)));
+    if (is_ok(cres_tag) == 0) { vani_close(d); return 0; }
     vani_start(d);
     return d;
 }
@@ -178,8 +178,8 @@ fn dhvani_capture_read_fmt(dev, frames, channels, sample_rate, bit_depth) {
     # STORAGE width: the kernel writes n*<negotiated width> bytes into `pcm`.
     var pcm = alloc(n * dh_pcm_store_bytes(bit_depth));
     if (pcm == 0) { return 0; }
-    var rres = vani_record(dev, pcm, frames);
-    if (is_ok(rres) == 0) { return 0; }
+    var rres_tag, rres = vani_record(dev, pcm, frames);
+    if (is_ok(rres_tag) == 0) { return 0; }
     var f = dh_vec_zeros(n);
     dh_unpack_le_w(pcm, n, f, bit_depth, dh_pcm_store_bytes(bit_depth));
     return dhvani_buffer_from_interleaved(f, channels, sample_rate);
