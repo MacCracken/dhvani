@@ -5,7 +5,7 @@ description = "dhvani — core audio engine (buffers, format conversion, mixing,
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/dhvani"
 language = "cyrius"
-cyrius = "6.6.3"
+cyrius = "6.6.10"
 
 [build]
 entry = "src/main.cyr"
@@ -173,9 +173,12 @@ tag = "2.5.2"
 modules = ["dist/sakshi.cyr"]
 
 # math; goonj needs its HVec3 (hvec3_*/HVec3_*) — REACHABLE, not DCE
+# No `path` line: the ../hisab checkout is on the 3.x line, where num_fft /
+# num_ifft return a `: stack` Result, and `path` wins over `tag`. With it, a
+# local resolve vendored hisab 3.x instead of this 2.11.2 pin and naad 2.2.4's
+# int-returning FFT calls stopped compiling — local != CI (fixed 2.2.5).
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-path = "../hisab"
 tag = "2.11.2"
 modules = ["dist/hisab.cyr"]
 

@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.5] — a local resolve vendors the pinned hisab again; cyrius 6.6.10
+
+Toolchain `cyrius` 6.6.3 → **6.6.10**. Every dependency tag is unchanged; hisab stays at
+**2.11.2**.
+
+### Fixed — `path = "../hisab"` vendored hisab 3.x in place of the 2.11.2 pin
+
+`[deps.hisab]` carried `path = "../hisab"`, and `path` wins over `tag`. The hisab
+checkout is on the 3.x line (3.2.1), where `num_fft` / `num_ifft` return a `: stack`
+Result instead of an int. A local `cyrius deps` therefore put hisab 3.2.1 into `lib/`, and
+naad 2.2.4 (written against the 2.x int-returning FFT) stopped compiling:
+
+```
+error:lib/naad.cyr:10506/10508/10528:12: a : stack enum returns two values — bind both
+sidecar NOT written
+```
+
+CI resolves from the tag and never saw it, so the local unit and the CI unit were different
+programs. The `path` line is removed, with a comment in `cyrius.cyml` saying why. hisab is
+not migrated: naad moving to hisab 3.x is separate work. Verified by resolving with the
+remaining sibling paths made absolute: `lib/hisab.cyr` is byte-identical to hisab's
+`2.11.2:dist/hisab.cyr` and `cyrius distlib` writes the sidecar. With the path line put
+back (`cyrius deps --relock`, since the lock now refuses the 3.x content), `lib/hisab.cyr` is
+3.2.1 and `cyrius distlib` fails as above.
+
+### Changed
+
+- `lib/` re-vendored from the 6.6.10 stdlib snapshot and `cyrius.lock` re-locked (tag mode,
+  18 deps commit-pinned). Every `[deps.*]` tag is unchanged. Three of those names are also
+  stdlib folds, and `cyrius deps` keeps the snapshot's copy over a same-named dep
+  (`refusing to overwrite stdlib leaf`), so they move with the toolchain: `lib/sakshi.cyr`
+  2.5.5, `lib/patra.cyr` 1.15.1, `lib/yukti.cyr` 2.3.14 (pins 2.5.2 / 1.14.2 / 2.3.11). The
+  other 15 bundles are byte-identical to their tags. `lib/alloc_cx.cyr` and `lib/random.cyr`
+  are new snapshot files.
+- `dist/dhvani.cyr` regenerated (header only). `dist/dhvani.deps` is 19 leaves: 6.6.10's
+  `distlib` drops `freelist` / `chrono` / `fs` / `process` and compile-verifies `http` / `net`
+  back in.
+
 ## [2.2.4] — cyrius 6.6.3, the current sound stack, and device glue on the value form
 
 Toolchain `cyrius` 6.5.41 → **6.6.3**, with every dependency moved to its current release
