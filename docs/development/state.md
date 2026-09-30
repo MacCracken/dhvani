@@ -48,7 +48,7 @@ zero per-block allocation, as the free-less bump allocator requires.
 
 ## Dependencies
 
-**As of 2.2.3 all of these are real `[deps.X]` entries** (`git`+`path`+`tag`),
+**As of 2.2.3 all of these are real `[deps.X]` entries** (`git`+`tag`; no committed `path` since 2.2.6),
 resolved by `cyrius deps` into `lib/` and hash-locked in `cyrius.lock` — 18
 declared, 74 locked, 100% tag-pinned. The ordered `include` lines still govern
 compile order. Bump a version via its `tag`, never by hand-copying into `lib/`.

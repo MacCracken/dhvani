@@ -3,7 +3,7 @@
 Direct dependencies to monitor for updates, CVEs, and breaking changes.
 
 dhvani is a Cyrius engine. **As of 2.2.3 every bundle below is a real `[deps.X]`
-entry** in `cyrius.cyml` (`git` + `path` + `tag`), resolved by `cyrius deps` into
+entry** in `cyrius.cyml` (`git` + `tag`; no committed `path` since 2.2.6), resolved by `cyrius deps` into
 `lib/` and hash-locked in `cyrius.lock` — 18 declared deps, 74 locked files, and
 the closure is **100% tag-pinned** (no commit-pins). The `include "lib/<x>.cyr"`
 lines still govern **compile order**; `[deps]` governs **vendoring**. Bump a

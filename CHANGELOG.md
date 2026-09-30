@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.6] — no committed `path` deps: a local resolve reads the same tags as CI
+
+Toolchain `cyrius` stays **6.6.10**. Every dependency tag is unchanged.
+
+### Fixed — 17 `path = "../<x>"` lines made a local resolve differ from CI
+
+2.2.5 removed hisab's `path` line; the other 17 `[deps.*]` blocks (abaco, sakshi, goonj,
+naad, sankoch, shravan, svara, nidhi, ghurni, garjan, prani, varna, shabdakosh, shabda,
+patra, yukti, vani) still carried `path = "../<x>"` beside their `tag`. `path` beats
+`tag`, so on a machine with sibling checkouts `cyrius deps` read those working trees while
+CI read the tags. Comparing each checkout's module against `git show <tag>:<module>`, five
+were already past their pin: sakshi (pin 2.5.2, checkout 2.5.5), sankoch (2.7.15 vs
+2.8.0), patra (1.14.2 vs 1.15.1), yukti (2.3.11 vs 2.3.14) and vani (1.2.5 vs 1.2.7). The
+other twelve matched only until their siblings moved.
+
+All 17 lines are removed, and the manifest note that called `path` "for local dev" now says
+a `path` line is never committed. `cyrius.lock` is byte-identical when re-resolved from tags
+in a clean copy with an empty dep cache, so the unit CI builds is the one already locked.
+
+### Changed
+
+- `dist/dhvani.cyr` regenerated (version header only); `dist/dhvani.deps` unchanged.
+- `docs/development/dependency-watch.md` and `docs/development/state.md` no longer describe
+  the deps as `git` + `path` + `tag`.
+
 ## [2.2.5] — a local resolve vendors the pinned hisab again; cyrius 6.6.10
 
 Toolchain `cyrius` 6.6.3 → **6.6.10**. Every dependency tag is unchanged; hisab stays at
