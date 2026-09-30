@@ -146,3 +146,45 @@ Parity first; these resume once the port is green. Demand-gated.
 - Audio file I/O (shravan / tarang), plugin hosting (shruti), composition /
   sequencing / timeline (shruti), streaming protocols (aethersafta), DAW UI
   (shruti), neural TTS / text-to-phoneme ML models (hoosh).
+
+---
+
+## Moving the cyrius pin to 6.6.6
+
+**Current pin: `cyrius = "6.6.3"`.** Nothing must change first — dhvani needs the pin
+bump and a rebuild, nothing else.
+
+**What was checked** (58 `.cyr` under `src/`; vendored `lib/` excluded throughout):
+
+- **Windows write corruption (the 6.6.6 headline): not a dhvani exposure.** `O_APPEND` /
+  `O_TRUNC` appear **39 times, all inside the vendored `lib/` fold and zero times in
+  `src/`** — dhvani opens no files at all (no `file_open` / `sys_open` / `file_read_all` /
+  `file_exists` call site anywhere in `src/`). Device I/O is ALSA ioctls, not file writes.
+- **Struct copies / by-value struct params: nothing to change.** dhvani declares **82
+  `Dh*` structs**, and **not one** of them is a by-value fn parameter, a fn return type, or
+  a `var x: DhT = …` declaration — every one is a heap-offset layout reached through a raw
+  pointer. So 6.6.6's new "copying between two different struct types is a compile error"
+  and "a by-value struct parameter over 8 B is now deep-copied" both touch zero sites here.
+- **Also clean:** no `async fn`, no `operator` fn, no pair-return fn with a mismatched
+  `return` (checked every fn for mixed pair/scalar returns — zero), no `var` inside a
+  top-level block (zero top-level `{` / `if (` / `while (` at column 0, so the new
+  block-scoping rule is a no-op), no raw `SYS_STATFS`, no `lib/regression.cyr` consumer, no
+  `vec_*` of dhvani's own (so the new `assert.cyr` → `vec.cyr` transitive include cannot
+  collide), no duplicate top-level global.
+- **Platform:** CI is `ubuntu-latest` only and `src/` carries no `CYRIUS_TARGET_*` branch
+  at all. No Windows or Mach-O build exists to be affected by the PE or Darwin changes.
+
+**What it gains:** 6.6.5's aggregate-layout fix (silently wrong since 5.8.17 — for a
+library whose whole job is dense buffer layout, this is the one to want) and the three
+corrected ENTRY stack bases, plus 6.6.6's nine new refusals that turn previously-silent
+miscompiles into named compile errors. For a library this size the refusals are the real
+win — they are a free audit of `src/`. **Not** a gain here: 6.6.4's ≥64 KB string-literal
+fix — dhvani's longest literal is 22 bytes (`src/error.cyr`), measured, so that defect was
+never reachable.
+
+**Verify after bumping:** `cyrius deps` (re-vendors the whole `lib/` fold from the 6.6.6
+store, which is where dhvani's 39 `O_APPEND`/`O_TRUNC` sites actually live) → `cyrius build`
+→ `cyrius test` → **regenerate `dist/dhvani.cyr`**. The dist bundle is compiled by each
+consumer's own toolchain, so a consumer still on an older cyrius must keep compiling it;
+confirm the regenerated bundle still builds under the oldest pin in the consumer set before
+tagging.
