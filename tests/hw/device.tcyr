@@ -9,17 +9,29 @@
 # into tests/ subdirectories, so this file is picked up by the bare `cyrius test`
 # CI runs too — the old "tests/hw/ is invisible to CI" split no longer holds.
 # Rather than delete or relocate the test, it gates itself at RUNTIME: when
-# enumeration yields no endpoints it prints a NAMED SKIP and exits 0, so a
-# headless CI box stays green while a box with a sound card still gets the full
-# n > 0 assertion. This follows the toolchain's own idiom for capability-gated
-# tests ("a skip you can read beats a test you deleted", cyrius 6.5.27).
+# enumeration yields no endpoints the `device_list` group prints a NAMED SKIP,
+# so a headless CI box stays green while a box with a sound card still gets the
+# full n > 0 assertion. This follows the toolchain's own idiom for
+# capability-gated tests ("a skip you can read beats a test you deleted",
+# cyrius 6.5.27).
+#
+# ⚠ The SKIP is PER GROUP, never an early exit (Cyrius 6.6.11). A .tcyr whose
+# source calls assert_summary( passes only if it exits 0 AND its last
+# `N passed, M failed` line has N >= 1 and M == 0. Through 2.2.6 this file
+# skipped with `syscall(60, 0)` before its summary, which 6.6.11+ grades FAIL
+# ("no assert summary on stdout"). So the hardware-free groups below always run
+# real assertions, the no-endpoint branch asserts the null-handle contract, and
+# every path reaches assert_summary(). Same shape as cyrius's own
+# capability-gated tests: the gated group SKIPs by name, the rest still assert.
 #
 # ⚠ The gate is deliberately a RUNTIME check on the enumeration result, NOT a
 # compile-time `#ifdef`/CI flag: the premise being tested is "this machine has
 # PCM endpoints", not "this machine is CI". A compile-time switch would also
 # hide the path from every other device-less environment (a container without
 # /dev/snd, a sandbox denying the udevadm probe) and would compile the code out
-# so it never got exercised.
+# so it never got exercised. To exercise the no-hardware path on a box that has
+# a sound card, hide /dev/snd in a throwaway user+mount namespace:
+#     unshare -r -m sh -c 'mount -t tmpfs none /dev/snd && cyrius test tests/hw/device.tcyr'
 #
 # Full chain: freelist -> process -> fs -> patra -> yukti -> sakshi ->
 # vani, then dhvani error -> simd -> buffer -> playback -> device.
@@ -37,41 +49,79 @@ include "src/buffer.cyr"
 include "src/playback.cyr"
 include "src/device.cyr"
 
+# A synthetic yukti audio descriptor (layout: yukti's AudioInfoOff, AI_SIZE
+# bytes). Only the fields dhvani's accessors read are meaningful; the string
+# fields are zeroed.
+fn mk_dev(card, index, dir) {
+    var d = alloc(AI_SIZE);
+    store64(d + AI_CARD, card);
+    store64(d + AI_DEVICE, index);
+    store64(d + AI_SUBDEVICE, 0);
+    store64(d + AI_DIRECTION, dir);
+    store64(d + AI_NAME, 0);
+    store64(d + AI_DRIVER, 0);
+    store64(d + AI_HW_ID, 0);
+    store64(d + AI_DEV_PATH, 0);
+    store64(d + AI_SYS_PATH, 0);
+    return d;
+}
+
 alloc_init();
 
-# ---- enumerate real endpoints; each obeys the direction/card invariant ----
-test_group("device_list");
+# ---- every host: enumeration answers a list, empty or not ----
+test_group("device_list_shape");
 var devs = dhvani_devices_list();
+assert(devs != 0, "enumeration returns a list (empty when there are no PCM endpoints)");
 var n = 0;
 if (devs != 0) { n = vec_len(devs); }
 
-# Capability gate: no PCM endpoints => this box has no audio hardware (or no
-# access to it). Name the missing capability and exit 0 rather than failing.
+# ---- every host: the accessors read the right descriptor fields ----
+test_group("device_accessors");
+var dp = mk_dev(2, 3, YUKTI_AUDIO_PLAYBACK);
+assert_eq(dhvani_device_card(dp), 2, "card reads AI_CARD");
+assert_eq(dhvani_device_index(dp), 3, "index reads AI_DEVICE (not the subdevice)");
+assert_eq(dhvani_device_direction(dp), YUKTI_AUDIO_PLAYBACK, "direction reads AI_DIRECTION");
+assert_eq(dhvani_device_is_playback(dp), 1, "playback descriptor is playback");
+assert_eq(dhvani_device_is_capture(dp), 0, "playback descriptor is not capture");
+var dc = mk_dev(0, 1, YUKTI_AUDIO_CAPTURE);
+assert_eq(dhvani_device_is_playback(dc), 0, "capture descriptor is not playback");
+assert_eq(dhvani_device_is_capture(dc), 1, "capture descriptor is capture");
+
+# ---- this machine's real endpoints (capability-gated) ----
+test_group("device_list");
 if (n == 0) {
-    var skip = "SKIP device_list: no PCM endpoints enumerated -- this machine has no audio hardware, no /dev/snd access, or no udevadm probe (src/device.cyr itself compiled and ran)\n";
-    syscall(1, 1, skip, strlen(skip));
-    syscall(60, 0);
+    # Capability gate: no PCM endpoints => this box has no audio hardware (or no
+    # access to it). Name the missing capability. The no-endpoint contract is
+    # checkable here and only here: with nothing to open, the default-open
+    # helpers answer the null handle without touching a device.
+    var skip1 = "SKIP device_list: no PCM endpoints enumerated -- this machine has no audio hardware,";
+    var skip2 = " no /dev/snd access, or no udevadm probe (src/device.cyr itself compiled and ran)\n";
+    syscall(1, 1, skip1, strlen(skip1));
+    syscall(1, 1, skip2, strlen(skip2));
+    assert_eq(dhvani_playback_open_default(48000, 2), 0, "no endpoints: playback_open_default -> 0");
+    assert_eq(dhvani_capture_open_default(48000, 2), 0, "no endpoints: capture_open_default -> 0");
 }
 
-assert(n > 0, "enumerated > 0 PCM endpoints on this machine");
-
-var inv = 1;
-var pc = 0;
-var i = 0;
-while (i < n) {
-    var d = vec_get(devs, i);
-    var dir = dhvani_device_direction(d);
-    if (dir != YUKTI_AUDIO_PLAYBACK) {
-        if (dir != YUKTI_AUDIO_CAPTURE) { inv = 0; }
+if (n > 0) {
+    assert(n > 0, "enumerated > 0 PCM endpoints on this machine");
+    var inv = 1;
+    var pc = 0;
+    var i = 0;
+    while (i < n) {
+        var d = vec_get(devs, i);
+        var dir = dhvani_device_direction(d);
+        if (dir != YUKTI_AUDIO_PLAYBACK) {
+            if (dir != YUKTI_AUDIO_CAPTURE) { inv = 0; }
+        }
+        if (dhvani_device_card(d) < 0) { inv = 0; }
+        if (dhvani_device_index(d) < 0) { inv = 0; }
+        if (dhvani_device_is_playback(d) == 1) { pc = pc + 1; }
+        if (dhvani_device_is_capture(d) == 1) { pc = pc + 1; }
+        i = i + 1;
     }
-    if (dhvani_device_card(d) < 0) { inv = 0; }
-    if (dhvani_device_index(d) < 0) { inv = 0; }
-    if (dhvani_device_is_playback(d) == 1) { pc = pc + 1; }
-    if (dhvani_device_is_capture(d) == 1) { pc = pc + 1; }
-    i = i + 1;
+    assert_eq(inv, 1, "each endpoint: valid direction + card/index >= 0");
+    assert_eq(pc, n, "every endpoint classified playback xor capture");
 }
-assert_eq(inv, 1, "each endpoint: valid direction + card/index >= 0");
-assert_eq(pc, n, "every endpoint classified playback xor capture");
 
 var rc = assert_summary();
 syscall(60, rc);

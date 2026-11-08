@@ -41,7 +41,8 @@ zero per-block allocation, as the free-less bump allocator requires.
 - Test ONE suite: `cyrius test tests/<mod>.tcyr` (explicit path — no discovery).
 - ⚠ **`cyrius test` discovery is RECURSIVE as of 6.5.x** — it walks `tests/`
   subdirectories, so `tests/hw/` is no longer invisible to CI. `tests/hw/device.tcyr`
-  self-gates instead: no PCM endpoints → named SKIP, exit 0.
+  self-gates instead: no PCM endpoints → a named SKIP for that group, while its
+  hardware-free groups still assert (6.6.11+ fails a `.tcyr` with no `N ≥ 1` summary).
 - **Parallel-porting concurrency**: every `cyrius …` call re-resolves deps and
   races on `cyrius.lock` (concurrent runs corrupt it). Serialize toolchain calls
   behind `flock <scratch>/dhvani-build.lock cyrius …`.
@@ -114,8 +115,11 @@ externalized from the dist like the Wave F siblings; stdlib gained only `hashmap
 (the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
 `tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
 suites, all green on 6.4.12** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
-**As of 2.2.7: 65 suites / 1,719 assertions green on 6.6.20** (+2: the
-compressor-attack / limiter-release time-constant regressions). **As of 2.2.3: 65 suites / 1,712 assertions green on 6.5.41** (the +17 are the
+**As of 2.2.7: 65 suites green on 6.6.20** — 1,727 assertions on a box with
+audio hardware, 1,726 headless (CI: 1,716 across the other 64 suites + 10 in
+`tests/hw/device.tcyr`, which runs 11 with hardware). New: the compressor-attack /
+limiter-release time-constant regressions, and the hw suite's always-run groups (its
+SKIP is per group since 6.6.11's summary rule). **As of 2.2.3: 65 suites / 1,712 assertions green on 6.5.41** (the +17 are the
 hardening regression tests: S24 storage-width + round-trip, convolution
 block-spanning / alloc-free / set_ir-grows-partitions, graph alloc-free, and the
 NaN-ignoring peak fold). The alloc-free assertions are

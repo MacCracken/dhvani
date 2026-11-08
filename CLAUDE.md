@@ -52,10 +52,21 @@ cyrius test tests/hw/device.tcyr         # HARDWARE tests — local only, explic
 (what CI runs) **recurses into `tests/` subdirectories**, so `tests/hw/` is NO
 longer excluded from CI — the pre-6.5 "top-level only" split is gone. Those suites
 need real audio hardware (`/dev/snd`, e.g. device enumeration), so each one
-**self-gates at runtime**: when the capability is missing it prints a named SKIP
-and exits 0, keeping headless CI green while a box with a sound card still runs
-the real assertions. Follow that pattern for any new `tests/hw/` suite — a runtime
-check on the actual result, never an `#ifdef`/CI env flag.
+**self-gates at runtime**: the hardware group prints a named SKIP when the
+capability is missing, while hardware-free groups in the same file still assert,
+keeping headless CI green while a box with a sound card still runs the real
+assertions. Follow that pattern for any new `tests/hw/` suite — a runtime check on
+the actual result, never an `#ifdef`/CI env flag.
+
+**Never skip by exiting early.** Since Cyrius 6.6.11 a `.tcyr` whose source calls
+`assert_summary(` passes only if it exits 0 **and** its last `N passed, M failed`
+line has N ≥ 1, M = 0 — so a `syscall(60, 0)` before the summary, or a run that
+asserts nothing, is a CI FAIL (this broke CI on the 6.6.20 bump). A dev box with a
+sound card never takes the skip path, so exercise it headless before pushing:
+
+```sh
+unshare -r -m sh -c 'mount -t tmpfs none /dev/snd && cyrius test tests/hw/device.tcyr'
+```
 
 ## Key Principles
 

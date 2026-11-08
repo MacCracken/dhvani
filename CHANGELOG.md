@@ -116,6 +116,33 @@ gave them, and limiter release is audible as a release rather than instant.
   and `syscalls_windows.cyr` does not. dhvani does not build for Windows (device I/O is
   ALSA); 6.6.18 is simply the first distlib that prints such names.
 
+### Fixed — `tests/hw/device.tcyr` failed CI on 6.6.20 (its SKIP exited before the summary)
+
+The first CI run of this release failed one suite of 65:
+`FAIL: tests/hw/device.tcyr (exit 0, but no assert summary on stdout)`. On a box with no
+PCM endpoints the test printed its named SKIP and left with `syscall(60, 0)`, before
+`assert_summary()`. Cyrius 6.6.11 grades a `.tcyr` that calls `assert_summary(` on its
+stdout as well as its exit code: the last `N passed, M failed` line must exist with N ≥ 1 and
+M = 0. So the early exit went from PASS to FAIL. Locally it passed, because a box with a
+sound card never takes the skip path. That is also why the "Verified" run below said 65/65.
+
+The SKIP is now per group, as in cyrius's own capability-gated tests, and every path reaches
+`assert_summary()`:
+- `device_list_shape` (every host): enumeration returns a list, empty or not.
+- `device_accessors` (every host): `dhvani_device_card` / `_index` / `_direction` /
+  `_is_playback` / `_is_capture` read the right fields of a synthetic yukti descriptor (index
+  is `AI_DEVICE`, not the subdevice).
+- `device_list` (capability-gated): with endpoints, the same n > 0 and per-endpoint
+  invariants as before. Without them, a named SKIP, plus the no-endpoint contract only that
+  box can check: `dhvani_playback_open_default` and `dhvani_capture_open_default` return the
+  null handle.
+
+Reproduced and verified headless by hiding `/dev/snd` in a user+mount namespace
+(`unshare -r -m sh -c 'mount -t tmpfs none /dev/snd && cyrius test tests/hw/device.tcyr'`).
+Before the fix this printed the same FAIL as CI. Now it gives **10/10 with the SKIP**, and
+11/11 with the sound card visible. `CLAUDE.md`'s hardware-test rule now says to never skip by
+exiting early, and to run that command before pushing.
+
 ### Known — not fixed here
 
 - **`DH_SIZE` collides between goonj and yukti.** goonj's `DhvaniLayout` sets it to 88,
@@ -128,9 +155,12 @@ gave them, and limiter release is audible as a release rather than instant.
 
 ### Verified
 
-- `cyrius deps` → `cyrius build` → `cyrius test` (the CI sequence) on 6.6.20: **65 suites,
-  1,719 assertions, 0 failed** (+2: the regression tests above). On the new deps before the
-  fix it was 63/65, the two failures being `compressor` and `limiter`.
+- `cyrius deps` → `cyrius build` → `cyrius test` (the CI sequence) on 6.6.20, on a box
+  with audio hardware: **65 suites, 0 failed** (+2 assertions: the time-constant regression
+  tests above). On the new deps before the time-constant fix it was 63/65, the two failures
+  being `compressor` and `limiter`. That box takes the hardware path in
+  `tests/hw/device.tcyr`, so it could not see the headless failure fixed above. CI (no
+  `/dev/snd`) is the run that did: 64/65 before that fix.
 - A 2.2.6 checkout on its own pin (6.6.10) printed a shadowed-stdlib warning
   (`vani 1.2.5 (pinned: 1.2.7), sankoch 2.7.15 (pinned: 2.8.0)`); 2.2.7 prints none.
 - Benchmarks, same box, a clean 2.2.6 checkout on 6.6.10 against 2.2.7, interleaved: no
