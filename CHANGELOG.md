@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — cyrius 6.7.9 and its dependency batch
+
+Toolchain `cyrius` 6.6.20 → **6.7.9**, with every dependency moved to the release pinned to
+6.7.9. No dhvani source file changed.
+
+### Dependencies
+
+| dep | was | now | pinned by |
+|---|---|---|---|
+| abaco | 2.4.13 | **2.5.0** | its 6.7.9 tag |
+| sakshi | 2.5.7 | **2.5.8** | 6.7.9 stdlib snapshot |
+| hisab | 3.3.7 | **3.4.0** | its 6.7.9 tag |
+| goonj | 2.0.6 | **2.1.0** | its 6.7.9 tag |
+| naad | 2.2.5 | **2.3.0** | its 6.7.9 tag |
+| sankoch | 2.8.1 | **2.8.3** | 6.7.9 stdlib snapshot |
+| shravan | 2.8.2 | **2.9.0** | its 6.7.9 tag |
+| svara | 3.5.6 | **3.6.0** | its 6.7.9 tag |
+| nidhi | 2.1.3 | **2.2.0** | its 6.7.9 tag |
+| ghurni | 2.6.2 | **2.7.0** | its 6.7.9 tag |
+| garjan | 2.5.3 | **2.6.0** | its 6.7.9 tag |
+| prani | 2.0.14 | **2.1.0** | its 6.7.9 tag |
+| varna | 2.4.3 | **2.5.0** | its 6.7.9 tag |
+| shabdakosh | 3.0.8 | **3.1.0** | its 6.7.9 tag |
+| shabda | 3.0.6 | **3.1.0** | its 6.7.9 tag |
+| patra | 1.15.2 | **1.16.0** | 6.7.9 stdlib snapshot |
+| yukti | 2.3.15 | **2.3.16** | 6.7.9 stdlib snapshot |
+| vani | 1.2.9 | **1.2.10** | 6.7.9 stdlib snapshot |
+
+Thirteen deps have a tag whose own `cyrius.cyml` pins 6.7.9 and that the batch uses. The
+other five also ship in the toolchain's stdlib snapshot, so their tags are set to the
+versions 6.7.9's snapshot carries, which are also what the batch's manifests pin. sakshi
+2.5.9 / 2.5.10 and yukti 2.3.17 / 2.3.18 pin 6.7.9 too, but neither the snapshot nor any
+dep in the batch uses them. Every bundle in `lib/` is byte-identical to its tag's
+`dist/<x>.cyr`, and the five to the snapshot's copy.
+
+**Correction to the 2.2.7 note.** It said `cyrius deps` keeps the snapshot's copy for all
+five. That holds for sakshi, patra and yukti. sankoch and vani are vendored from the tag, and
+a mismatch prints a shadowed-stdlib warning, which is what 2.2.6's vani 1.2.5 and sankoch
+2.7.15 did. Keeping all five tags equal to the snapshot is still the rule.
+
+### Audit
+
+- **Removed names.** 51 top-level names and enum members left the bundles, 30 of them from
+  hisab, whose 3.4.0 retires 27 public names for `Result`-returning replacements. dhvani
+  names none of the 51, and no other bundle still references one without a remaining
+  definition.
+- **Changed bodies among the names dhvani calls.** On dhvani's targets, three differ. hisab's
+  `hvec3_new` now returns 0 on a refused allocation. `fncall1` .. `fncall3` change on the CX
+  target only. `_vec_die` changes in a comment only, as does `alloc` in its agnos variant.
+- **6.7.x language changes.** `!` became a real operator at 6.7.3 (before that a lone `!`
+  was silently dropped, so one in the source would flip meaning), `dyn` and others became
+  reserved words, and `*T` / slice reads changed width rules. With strings and comments
+  stripped, `src/`, `tests/` and `docs/examples/` have no lone `!`, no `~`, no `>>>`, no
+  reserved word as a name, no typed pointers or slices, and no unary minus before an
+  operator.
+- **Duplicate symbols.** The same 13 warnings as on 6.6.20, none new. The goonj / yukti
+  `DH_SIZE` collision is unchanged (2.2.7, *Known*): goonj 2.1.0 still has 88, yukti 2.3.16
+  still 24, and it is still open.
+
+### Changed — upstream answers that reach dhvani
+
+- abaco 2.5.0 reports no symbol, result or error code changed, with `tan` now the stdlib's.
+- svara 3.6.0 fixes `svara_prosody_f0_at`, which read a contour value of exactly 0.0 as 1.0.
+- naad 2.3.0 and nidhi 2.2.0 report byte-identical audio against their previous tags;
+  goonj 2.1.0 reports no result moved.
+
+### Changed — lock, lib and dist
+
+- `cyrius.lock` rebuilt from empty: 18 pins, `cyrius deps --verify` 80/80.
+- `lib/` re-vendored from the 6.7.9 snapshot.
+- `dist/dhvani.cyr` regenerated (version header only). There is still no
+  `dist/dhvani.deps`, and distlib still names `is_err` on x86_64-windows only (see 2.2.7).
+
+### Verified
+
+- `cyrius deps` → `cyrius build` → `cyrius test` with `/dev/snd` hidden, the way CI runs:
+  **65 suites, 1,726 assertions, 0 failed**, with `tests/hw/device.tcyr` taking its SKIP.
+  With the sound card visible that suite is 11/11. The seven suites that link
+  `dist/dhvani.cyr` pass against the regenerated bundle.
+- Benchmarks against 2.2.7 on 6.6.20, interleaved: flat, every path within ±2.3 %. Tables in
+  `BENCHMARKS.md`.
+
 ## [2.2.7] — cyrius 6.6.20 and its dependency batch; compressor and limiter time constants
 
 Toolchain `cyrius` 6.6.10 → **6.6.20**, with every dependency moved to the release pinned

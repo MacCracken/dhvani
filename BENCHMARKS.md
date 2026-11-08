@@ -78,6 +78,33 @@ The per-sample figures sit well under the 2.2.2 table's (59 → 14 ns for `osc_s
 That gap spans ~60 toolchain releases and different box load, so compare only within a
 table.
 
+## 2.3.0 re-measure (cycc 6.7.9 vs 6.6.20, same box, back to back)
+
+Captured for the toolchain 6.6.20 → 6.7.9 bump and the 6.7.9 dependency batch: a clean
+`git archive` of 2.2.7 on its own pin against the 2.3.0 tree, interleaved twice per tree;
+each cell is the mean of the two runs. **No path regressed**; every delta is within ±2.3 %.
+
+| hot path (`tests/hotpath.bcyr`) | 2.2.7 (6.6.20) | 2.3.0 (6.7.9) | delta |
+|----------|--------------:|---------------:|------:|
+| `osc_sample` (sine, per-sample) | 14.0 ns | 14.0 ns | 0 % |
+| `biquad_process_sample` (per-sample) | 25.5 ns | 25.0 ns | −2.0 % |
+| `svf_process_sample` (per-sample) | 28.0 ns | 28.0 ns | 0 % |
+| `simd_peak_abs` (512-block) | 5.83 µs | 5.81 µs | −0.3 % |
+| `simd_apply_gain` (512-block) | 5.09 µs | 5.17 µs | +1.5 % |
+| `simd_i16_to_f32` (512-block) | 4.96 µs | 5.08 µs | +2.3 % |
+| `fft_spectrum` (1024-radix-2) | 672 µs | 663 µs | −1.4 % |
+
+| per second of audio (`tests/bench_compare.bcyr`) | 2.2.7 (6.6.20) | 2.3.0 (6.7.9) | delta |
+|----------|--------------:|---------------:|------:|
+| gain stereo_1s | 889 µs | 903 µs | +1.6 % |
+| peak stereo_1s | 1.02 ms | 1.03 ms | +1.2 % |
+| biquad_lp stereo_1s | 2.64 ms | 2.63 ms | −0.3 % |
+| compressor stereo_1s | 5.39 ms | 5.33 ms | −1.1 % |
+| limiter stereo_1s | 3.54 ms | 3.47 ms | −2.0 % |
+| r128 stereo_1s | 8.87 ms | 8.67 ms | −2.2 % |
+| dynamics mono_1s | 4.71 ms | 4.64 ms | −1.3 % |
+| fft 4096 mono | 3.27 ms | 3.21 ms | −1.7 % |
+
 Notes:
 - Per-sample DSP (osc/biquad/svf) benched with `bench_run_batch` (200k calls,
   batched to amortize the ~240 ns/pair `clock_gettime` overhead).
