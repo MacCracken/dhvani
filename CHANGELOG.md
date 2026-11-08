@@ -5,6 +5,101 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] — cyrius 6.7.18 and the newest dependency tags, with abaco held at 2.7.0
+
+Toolchain `cyrius` 6.7.9 → **6.7.18**, and every dependency on its newest tag except abaco.
+No dhvani source file changed.
+
+### Dependencies
+
+| dep | was | now |
+|---|---|---|
+| abaco | 2.5.0 | **2.7.0** (newest is 2.8.0; see below) |
+| sakshi | 2.5.8 | **2.5.10** |
+| hisab | 3.4.0 | **3.4.1** |
+| goonj | 2.1.0 | **2.3.1** |
+| naad | 2.3.0 | **2.3.3** |
+| sankoch | 2.8.3 | **2.8.9** |
+| shravan | 2.9.0 | **2.9.3** |
+| svara | 3.6.0 | **3.6.3** |
+| nidhi | 2.2.0 | **2.2.1** |
+| ghurni | 2.7.0 | **2.7.2** |
+| garjan | 2.6.0 | **2.6.3** |
+| prani | 2.1.0 | **2.1.1** |
+| varna | 2.5.0 | **2.5.2** |
+| shabdakosh | 3.1.0 | **3.1.1** |
+| shabda | 3.1.0 | **3.1.1** |
+| patra | 1.16.0 | **1.16.6** |
+| yukti | 2.3.16 | **2.3.18** |
+| vani | 1.2.10 | 1.2.10 (already newest) |
+
+The newest tags' manifests all agree with each other, and the five deps that also ship in
+the stdlib snapshot are at the versions 6.7.18 carries. Every bundle in `lib/` is
+byte-identical to its tag's `dist/<x>.cyr`, and those five to the snapshot's copy.
+
+### Why abaco is held at 2.7.0
+
+abaco 2.8.0 adds an FFT, including `power_spectrum(re, im, out, n)`. naad 2.3.3 defines
+`power_spectrum(x)`. They share one namespace, and cycc refuses a duplicate fn whose arity
+disagrees:
+
+```
+error:lib/naad.cyr:604:1: duplicate fn 'power_spectrum' disagrees about arity: this one takes 1, the one in lib/abaco.cyr takes 4
+```
+
+So the two newest tags cannot be built together. It is the only such collision. dhvani calls
+neither function, and 2.7.0 is the newest abaco that compiles with the rest of the stack.
+abaco is the ecosystem's math library and keeps the name, so the tag moves once naad gives it up. Filed with naad as
+`docs/development/issues/2026-11-08-power-spectrum-clashes-with-abaco-2-8-0.md`.
+
+### Removed — four stale files in `lib/`
+
+`lib/thread.cyr`, `thread_agnos.cyr`, `thread_macos.cyr` and `thread_win.cyr` had left the
+resolver's footprint. `cyrius deps` keeps such a tracked file but no longer refreshes it, so
+all four still held the 6.6.10 snapshot from 2.2.5. They shadowed the toolchain's copy of the
+`lib/thread.cyr` that sankoch includes. A resolve from an empty `lib/` does not vendor them
+and compiles without them. `lib/` and `cyrius.lock` are now identical to that clean resolve.
+
+### Changed — lock, lib and dist
+
+- `cyrius.lock` rebuilt from empty: 77 files, `cyrius deps --verify` 77/77, and 19 commit
+  pins. The 19th is bayan 1.11.1, which shravan 2.9.x declares. It is the same file the
+  snapshot ships, and declaring it in `cyrius.cyml` would only add a warning.
+- `lib/simd.cyr` is new, required by goonj. It shares no name with dhvani's `src/simd.cyr`.
+- `dist/dhvani.cyr` regenerated (version header only). distlib still names `is_err` on
+  x86_64-windows only (see 2.2.7).
+
+### Audit
+
+- **Removed names.** 111 top-level names and enum members left the bundles. dhvani names
+  none of them, and none is left undefined for another bundle.
+- **Changed bodies among the names dhvani calls.** `vec_get` / `vec_set` / `vec_push` change
+  only their abort path. The naad, goonj, garjan, ghurni and svara changes are the refactors
+  and hardening described under *Upstream* below.
+- **6.7.10 – 6.7.18 language changes** fall on generics, closures, traits, typed pointers
+  and enum separators. With strings and comments stripped, dhvani's source has no generics,
+  closures, traits, typed pointers or slices, and the compiler accepts its enums.
+- **Duplicate symbols.** 11 warnings, none new, and the two `silk_*` ones are gone. The goonj /
+  yukti `DH_SIZE` collision is still open (2.2.7, *Known*): goonj 2.3.1 has 88, yukti 2.3.18
+  has 24. Measured here: goonj's constructor reserves 24 bytes in a dhvani unit and 88 on its
+  own. Filed in both repos under `docs/development/issues/2026-11-08-dh-size-collides-*.md`.
+
+### Upstream — what the dependencies report
+
+naad 2.3.3, goonj 2.3.1, garjan 2.6.3, ghurni 2.7.2, nidhi 2.2.1 and prani 2.1.1 each report
+rendered output on valid input unchanged from the versions they replace, svara 3.6.3 likewise
+apart from two hostile inputs. naad's own fixes do change `tuning_freq_to_midi` on exact ties,
+which now round away from zero as Rust does; dhvani does not call it.
+
+### Verified
+
+- `cyrius deps` → `cyrius build` → `cyrius test` with `/dev/snd` hidden, the way CI runs:
+  **65 suites, 1,726 assertions, 0 failed**, with `tests/hw/device.tcyr` taking its SKIP.
+  With the sound card visible that suite is 11/11. The seven suites that link
+  `dist/dhvani.cyr` pass against the regenerated bundle.
+- Benchmarks against 2.3.0 on 6.7.9, interleaved: flat, every path within ±2.4 %. Tables in
+  `BENCHMARKS.md`.
+
 ## [2.3.0] — cyrius 6.7.9 and its dependency batch
 
 Toolchain `cyrius` 6.6.20 → **6.7.9**, with every dependency moved to the release pinned to
