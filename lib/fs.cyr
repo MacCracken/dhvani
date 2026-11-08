@@ -33,6 +33,28 @@ include "lib/vec.cyr"
 include "lib/fs_win.cyr"
 #endif
 
+# Copy EXACTLY the Str's bytes into `dst` (`cap` bytes) as a NUL-terminated C string for the
+# kernel. Returns the length, or -1 for an embedded NUL or a path that does not fit (`cap` is
+# PATH_MAX, 4096, at every caller — the kernel refuses longer itself). ⛔ 6.6.11 — the POSIX arms
+# handed `str_data(path)` straight to stat/open/readlink, so a Str made by `str_sub` (which
+# shares its parent's bytes, with no NUL at its end) was answered for whatever followed it:
+# `is_dir(str_sub(str_from("dirA"), 0, 3))` said 1 for a missing "dir" and dir_list listed
+# dirA — the same wrong answer as the Windows widen, on every target. CHANGELOG [6.6.11]
+fn _fs_cpath(path: Str, dst, cap): i64 {
+    var n = str_len(path);
+    if (n >= cap) { return 0 - 1; }
+    var pd = str_data(path);
+    var i = 0;
+    while (i < n) {
+        var c = load8(pd + i);
+        if (c == 0) { return 0 - 1; }
+        store8(dst + i, c);
+        i = i + 1;
+    }
+    store8(dst + n, 0);
+    return n;
+}
+
 # Join two path components with /
 fn path_join(dir: Str, name: Str): i64 {
     var sb = str_builder_new();
@@ -122,8 +144,10 @@ fn path_has_ext(path: Str, ext: Str): i64 {
 # this base lib keeps its existing dependency surface (string.cyr supplies
 # strlen). See 2026-06-18-stdlib-native-agnos-abi-fs.md.
 fn _dir_list_into_vec(path: Str, entries): i64 {
-    var dp = str_data(path);
-    var fd = sys_open(dp, strlen(dp), AO_DIRECTORY);   # agnos: (name, namelen, AO_DIRECTORY)
+    var dp[4096];
+    var dn = _fs_cpath(path, &dp, 4096);                # 6.6.11: exactly the Str's bytes
+    if (dn < 0) { return 0 - 1; }
+    var fd = sys_open(&dp, dn, AO_DIRECTORY);           # agnos: (name, namelen, AO_DIRECTORY)
     if (fd < 0) { return fd; }
     # v6.5.11: STACK scratch, not alloc(). The getdents buffer is dead the moment
     # this fn returns, but under the bump allocator alloc() never gives it back —
@@ -166,7 +190,9 @@ fn _dir_list_into_vec(path: Str, entries): i64 {
 #endif
 #ifndef CYRIUS_TARGET_AGNOS
 fn _dir_list_into_vec(path: Str, entries): i64 {
-    var fd = sys_open(str_data(path), O_RDONLY, 0);
+    var cpath[4096];
+    if (_fs_cpath(path, &cpath, 4096) < 0) { return 0 - 1; }   # 6.6.11: exactly the Str's bytes
+    var fd = sys_open(&cpath, O_RDONLY, 0);
     if (fd < 0) { return fd; }
     # ⛔ v6.5.11: STACK scratch, not alloc(). Both buffers are dead the moment this fn
     # returns, but the default allocator is a BUMP allocator — it has no free — so each
@@ -266,7 +292,8 @@ fn dir_list_checked(path: Str, entries): i64 {
 # filing asked for (2026-07-26-agora-fs-dir-list-per-call-alloc §"Proposed fix").
 #
 #   path        directory to list
-#   scratch     caller buffer for the raw getdents batch (>= 1024; 4096 recommended)
+#   scratch     caller buffer for the raw getdents batch (>= 1024; 4096 recommended; on
+#               Windows it holds one WIN32_FIND_DATAW)
 #   scratch_len size of `scratch`
 #   names       caller buffer receiving NUL-terminated entry names, packed
 #   names_cap   size of `names`
@@ -283,11 +310,20 @@ fn dir_list_checked(path: Str, entries): i64 {
 # `dir_list`.
 fn dir_list_into(path: Str, scratch, scratch_len, names, names_cap, offs, max_entries): i64 {
     if (scratch_len < 1024) { return 0 - 2; }
+    #ifdef CYRIUS_TARGET_WIN
+    # 6.6.12: FindFirstFileW/FindNextFileW into the caller's buffers (lib/fs_win.cyr) — there
+    # was no Windows arm, so the open + getdents64 body below answered -1 for every directory.
+    var wr = _dir_list_into_win(path, scratch, names, names_cap, offs, max_entries);
+    return wr;
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
     var count = 0;
     var npos = 0;
     #ifdef CYRIUS_TARGET_AGNOS
-    var dp = str_data(path);
-    var fd = sys_open(dp, strlen(dp), AO_DIRECTORY);
+    var dp[4096];
+    var dn = _fs_cpath(path, &dp, 4096);                # 6.6.11: exactly the Str's bytes
+    if (dn < 0) { return 0 - 1; }
+    var fd = sys_open(&dp, dn, AO_DIRECTORY);
     if (fd < 0) { return 0 - 1; }
     var rgo = 1;
     while (rgo == 1) {
@@ -322,7 +358,9 @@ fn dir_list_into(path: Str, scratch, scratch_len, names, names_cap, offs, max_en
     return count;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    var fd2 = sys_open(str_data(path), O_RDONLY, 0);
+    var cpath[4096];
+    if (_fs_cpath(path, &cpath, 4096) < 0) { return 0 - 1; }   # 6.6.11: exactly the Str's bytes
+    var fd2 = sys_open(&cpath, O_RDONLY, 0);
     if (fd2 < 0) { return 0 - 1; }
     var basep[8];
     store64(&basep, 0);
@@ -365,6 +403,7 @@ fn dir_list_into(path: Str, scratch, scratch_len, names, names_cap, offs, max_en
     sys_close(fd2);
     return count;
     #endif
+    #endif
 }
 
 # List directory entries with full paths
@@ -387,8 +426,10 @@ fn dir_list_full(path: Str): i64 {
 # inode (a regular file / nonexistent path → fd<0), so a successful open already
 # proves it is a directory. See dir_list above for the AO_DIRECTORY rationale.
 fn is_dir(path: Str): i64 {
-    var dp = str_data(path);
-    var fd = sys_open(dp, strlen(dp), AO_DIRECTORY);   # agnos: (name, namelen, AO_DIRECTORY)
+    var dp[4096];
+    var dn = _fs_cpath(path, &dp, 4096);                # 6.6.11: exactly the Str's bytes
+    if (dn < 0) { return 0; }
+    var fd = sys_open(&dp, dn, AO_DIRECTORY);           # agnos: (name, namelen, AO_DIRECTORY)
     if (fd < 0) { return 0; }
     # v6.5.11: STACK scratch — see the note in dir_list. is_dir was the DOMINANT
     # allocation cost in this file, not dir_list: dir_walk calls it once per entry.
@@ -414,7 +455,9 @@ fn is_dir(path: Str): i64 {
 # (v6.5.11: dir_walk calls this once per entry). CHANGELOG [6.6.10]
 fn is_dir(path: Str): i64 {
     var st[256];
-    if (sys_stat(str_data(path), &st) != 0) { return 0; }
+    var cpath[4096];
+    if (_fs_cpath(path, &cpath, 4096) < 0) { return 0; }   # 6.6.11: exactly the Str's bytes
+    if (sys_stat(&cpath, &st) != 0) { return 0; }
     if ((load32(&st + STAT_MODE) & 0xF000) == 0x4000) { return 1; }   # S_IFMT == S_IFDIR
     return 0;
 }
@@ -431,7 +474,7 @@ fn is_dir(path: Str): i64 {
 # inflating it, which is the silent-green shape this release keeps finding.
 #
 # A depth cap rather than a visited-inode set: it needs no allocation, and it bounds
-# every cause (symlink loop, bind mount, Windows directory junction — `fs_win.cyr:146`
+# every cause (symlink loop, bind mount, Windows directory junction — `fs_win.cyr`'s `is_dir`
 # treats a reparse point as a directory), not just the one we reproduced. O_NOFOLLOW was
 # rejected because it would refuse LEGITIMATE symlinked directories, which real projects
 # use. 64 is far past any real tree (`tests/tcyr/crossos/x.tcyr` is depth 3).
@@ -471,29 +514,19 @@ var DIR_WALK_MAX_DEPTH = 64;
 # agnos ABI errors for months — this is the same class, caught the same way.
 fn is_symlink(path: Str): i64 {
     #ifdef CYRIUS_TARGET_WIN
-    # Widened HERE, bounded by str_len: a Str need not be NUL-terminated (str_sub shares its
-    # parent's bytes), so `_fs_widen`'s read-to-NUL is not safe for an arbitrary Str. Both
-    # buffers are on the STACK — dir_walk calls this for every entry, and a bump-allocated
-    # pair per call leaked ~600 B + 2x the path each time. A path past 519 characters answers
-    # 0: the PE image is not long-path-aware, so GetFileAttributesW fails past MAX_PATH anyway.
-    var pn = str_len(path);
-    var pd = str_data(path);
-    if (pn > 519) { return 0; }
-    var wp[1040];
-    var wi = 0;
-    while (wi < pn) {
-        var wc = load8(pd + wi);
-        if (wc == 0) { break; }
-        if (wc == 47) { wc = 92; }                  # '/' → '\'
-        store16(&wp + wi * 2, wc);
-        wi = wi + 1;
-    }
-    store16(&wp + wi * 2, 0);
-    var attrs = syscall(61465, &wp);                # GetFileAttributesW (no final-link follow)
+    # Exactly the Str's bytes (a Str need not be NUL-terminated), as a NARROW UTF-8 path the
+    # emitter decodes and, past 247 units, `\\?\`-prefixes (6.6.12 — it was widened here with
+    # no prefix and refused past 519 bytes, so a link on a long path answered 0). Both buffers
+    # are on the STACK — dir_walk calls this for every entry, and a bump-allocated pair per call
+    # leaked ~600 B + 2x the path each time. A path that is not valid UTF-8 answers 0.
+    var zb[32776];
+    var p = _fs_zpath(path, 0, &zb, 32776);
+    if (p == 0) { return 0; }
+    var attrs = syscall(61465, p);                  # GetFileAttributesW (no final-link follow)
     if (attrs == 4294967295) { return 0; }          # INVALID_FILE_ATTRIBUTES
     if ((attrs & 1024) == 0) { return 0; }          # not FILE_ATTRIBUTE_REPARSE_POINT
     var fd[592];                                    # WIN32_FIND_DATAW
-    var h = syscall(61462, &wp, &fd);               # FindFirstFileW on the name itself
+    var h = syscall(61462, p, &fd);                 # FindFirstFileW on the name itself
     if (h == 0 - 1) { return 0; }
     syscall(61464, h);                              # FindClose
     if ((load32(&fd + 36) & 0x20000000) != 0) { return 1; }   # dwReserved0 = tag; name surrogate
@@ -501,13 +534,15 @@ fn is_symlink(path: Str): i64 {
     #endif
     #ifndef CYRIUS_TARGET_WIN
     var lbuf[8];
+    var cpath[4096];
+    var cn = _fs_cpath(path, &cpath, 4096);             # 6.6.11: exactly the Str's bytes
+    if (cn < 0) { return 0; }
     #ifdef CYRIUS_TARGET_AGNOS
-    var pd = str_data(path);
-    if (sys_readlink(pd, strlen(pd), &lbuf, 8) >= 0) { return 1; }
+    if (sys_readlink(&cpath, cn, &lbuf, 8) >= 0) { return 1; }
     return 0;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    if (sys_readlink(str_data(path), &lbuf, 8) >= 0) { return 1; }
+    if (sys_readlink(&cpath, &lbuf, 8) >= 0) { return 1; }
     return 0;
     #endif
     #endif

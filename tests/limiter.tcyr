@@ -97,5 +97,23 @@ dhvani_lim_process(l8, b8);
 var cl8 = db_to_amplitude(f64_neg(6.0));
 assert(f64_le(dhvani_buffer_peak(b8), f64_add(cl8, 0.02)), "stereo peak <= ceiling");
 
+# ---- release_time_constant_uses_sample_rate (regression, 2.2.7) ----
+# Same defect as compressor.tcyr's attack_time_constant_uses_sample_rate: the
+# integer rate reached abaco's f64 time_constant raw. Frame 0 at 0 dB snaps env
+# to 0 (instant attack); 480 silent frames (input floors at -120 dB) through a
+# 100 ms release at 48 kHz then give env = -120 * (1 - c^480), c = exp(-1/4800),
+# i.e. -120 * (1 - exp(-0.1)). The collapsed coefficient lands at ~-120 instead.
+test_group("release_time_constant_uses_sample_rate");
+var l9 = dhvani_lim_new(dhvani_limparams_new(0, 100.0, 0, 1.0), 48000);
+var v9 = vec_new();
+vec_push(v9, 1.0);
+var i9 = 0;
+while (i9 < 480) { vec_push(v9, 0); i9 = i9 + 1; }
+var b9 = dhvani_buffer_from_interleaved(v9, 1, 48000);
+dhvani_lim_process(l9, b9);
+var want9 = f64_mul(f64_neg(120.0), f64_sub(1.0, f64_exp(f64_neg(0.1))));
+var err9 = f64_abs(f64_sub(dhvani_lim_envelope_db(l9), want9));
+assert(f64_lt(err9, 0.000001), "100 ms release @48k: env -120*(1-exp(-0.1)) after 10 ms");
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -5,7 +5,13 @@
 
 ## Version
 
-**2.2.3** (in progress) — **P-1 hardening sweep** (2 device-buffer overruns, 2
+**2.2.7** — toolchain **6.6.20** + the **6.6.20 dependency batch** (every dep on
+its 6.6.20 release; hisab 2.11.2 → **3.3.7**), and the compressor/limiter
+**time-constant fix**: the integer sample rate reached abaco's f64
+`time_constant` raw, so every attack/release had collapsed to one sample (abaco
+2.4.9+ answers NaN for it, which is how the bump surfaced it). **2.2.4–2.2.6** —
+toolchain 6.6.3 → 6.6.10, vani device glue on the value form, and no committed
+`path` deps (a local resolve reads the same tags as CI). **2.2.3** — **P-1 hardening sweep** (2 device-buffer overruns, 2
 alloc-path leaks, 1 process-abort, + sentinel/saturation repairs) and the
 **vendored → real `[deps]` migration**: all 16 sibling bundles are now declared,
 tag-pinned and hash-locked instead of hand-copied. `cyrius audit` fmt+lint gates
@@ -28,7 +34,9 @@ zero per-block allocation, as the free-less bump allocator requires.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.41` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`). Five deps — sakshi,
+  sankoch, patra, yukti, vani — are stdlib folds whose `lib/` copy comes from this
+  pin's snapshot; their tags are kept equal to it (see `dependency-watch.md`).
 - Build: `cyrius build src/main.cyr build/dhvani` (smoke binary — builds green).
 - Test ONE suite: `cyrius test tests/<mod>.tcyr` (explicit path — no discovery).
 - ⚠ **`cyrius test` discovery is RECURSIVE as of 6.5.x** — it walks `tests/`
@@ -50,7 +58,7 @@ zero per-block allocation, as the free-less bump allocator requires.
 
 **As of 2.2.3 all of these are real `[deps.X]` entries** (`git`+`tag`; no committed `path` since 2.2.6),
 resolved by `cyrius deps` into `lib/` and hash-locked in `cyrius.lock` — 18
-declared, 74 locked, 100% tag-pinned. The ordered `include` lines still govern
+declared, 80 locked, 100% tag-pinned (versions below as of 2.2.7). The ordered `include` lines still govern
 compile order. Bump a version via its `tag`, never by hand-copying into `lib/`.
 Cost of the migration: `lib/` grew ~5.4 MB → 8.5 MB, because the siblings'
 declared stdlib closure (bayan, chrono, mmap, slice, sync, thread*, sankoch, …)
@@ -61,22 +69,22 @@ Direct (declared in `cyrius.cyml`):
 - **stdlib** — base set + the DSP-math set (`math`, `ganita`, `tagged`,
   `fnptr`, `callback`, `bench`) + the g2p set (`hashmap`, `atomic`, `mmap` — for
   shabdakosh's dictionary; **not** `bayan`, 0 reachable calls).
-- **Math**: ✅ **abaco 2.4.5 wired** (`[deps.abaco]`, `path=../abaco` local +
-  git/tag for CI; vendored `lib/abaco.cyr`, `cyrius.lock` written). DSP helpers
+- **Math**: ✅ **abaco 2.4.13** (`[deps.abaco]`, git+tag; `lib/abaco.cyr`,
+  hash-locked). DSP helpers
   verified (poly_blep/amplitude_to_db/constant_power_pan/…). abaco's unused
   json/http/net helpers DCE-prune (benign warnings).
-- **Synthesis stack** (Wave F): naad **2.2.2**, svara **3.5.4**, prani **2.0.12**,
-  nidhi **2.1.1**, garjan **2.5.1**, ghurni **2.6.0**, goonj **2.0.4** + sakshi
-  **2.4.12** (logging) + hisab **2.11.2** (HVec3 for goonj) + shravan **2.8.0**
-  (WAV codec for nidhi) —
-  **vendored into `lib/` (committed), included in dependency order**, NOT `[deps]`.
-- **g2p stack**: **shabda 3.0.4** (G2P engine, ported 2.2.0) + shabdakosh **3.0.6**
-  (dictionary) + varna **2.4.1** (phoneme inventories) — same vendored-include pattern
+- **Synthesis stack** (Wave F): naad **2.2.5**, svara **3.5.6**, prani **2.0.14**,
+  nidhi **2.1.3**, garjan **2.5.3**, ghurni **2.6.2**, goonj **2.0.6** + sakshi
+  **2.5.7** (logging) + hisab **3.3.7** (HVec3 for goonj) + shravan **2.8.2**
+  (WAV codec for nidhi) + sankoch **2.8.1** (codec substrate) — real `[deps]`
+  since 2.2.3, still included in dependency order.
+- **g2p stack**: **shabda 3.0.6** (G2P engine, ported 2.2.0) + shabdakosh **3.0.8**
+  (dictionary) + varna **2.4.3** (phoneme inventories) — same vendored-include pattern
   as Wave F (`… svara → varna → shabdakosh → shabda`), externalized from the dist.
-- **Device I/O**: vani **1.2.2** (ALSA PCM; 1.2.x dropped the per-call scratch
+- **Device I/O**: vani **1.2.9** (ALSA PCM; 1.2.x dropped the per-call scratch
   `alloc()` in the ring paths — an unbounded leak under the bump allocator) + yukti
-  **2.3.8** (device enumeration, separate module — not in the dist) + patra
-  **1.13.11** (yukti 2.3.8 reads `/proc/asound` through patra's `read_procfs_text`,
+  **2.3.15** (device enumeration, separate module — not in the dist) + patra
+  **1.15.2** (yukti reads `/proc/asound` through patra's `read_procfs_text`,
   so patra now leads the include chain in `tests/playback.tcyr` too).
 - **Blocked** (not ported): bhava (→ bhava-voice). shabda is now ported ✅.
 
@@ -106,7 +114,8 @@ externalized from the dist like the Wave F siblings; stdlib gained only `hashmap
 (the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
 `tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
 suites, all green on 6.4.12** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
-**As of 2.2.3: 65 suites / 1,712 assertions green on 6.5.41** (the +17 are the
+**As of 2.2.7: 65 suites / 1,719 assertions green on 6.6.20** (+2: the
+compressor-attack / limiter-release time-constant regressions). **As of 2.2.3: 65 suites / 1,712 assertions green on 6.5.41** (the +17 are the
 hardening regression tests: S24 storage-width + round-trip, convolution
 block-spanning / alloc-free / set_ir-grows-partitions, graph alloc-free, and the
 NaN-ignoring peak fold). The alloc-free assertions are

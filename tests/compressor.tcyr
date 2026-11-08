@@ -83,5 +83,24 @@ dhvani_comp_reset(c6);
 assert(f64_lt(f64_abs(f64_sub(dhvani_comp_envelope_db(c6), f64_neg(120.0))), 0.0000001), "envelope reset to -120");
 assert(f64_lt(f64_abs(dhvani_comp_gain_reduction_db(c6)), 0.0000001), "gain reduction reset to 0");
 
+# ---- attack_time_constant_uses_sample_rate (regression, 2.2.7) ----
+# abaco's time_constant takes the rate as an f64 (rust-old: `sample_rate as f32`
+# inside abaco::dsp::time_constant); the compressor stores an integer. Through
+# 2.2.6 the raw int was passed, read as a subnormal, and every attack/release
+# collapsed to the one-sample exp(-1); abaco >= 2.4.9 answers NaN for it. None of
+# the six ported tests can tell those apart from a real envelope, so pin the
+# one-pole step itself: from -120 dB, N frames at 0 dB through a 10 ms attack at
+# 48 kHz leave env = -120 * c^N with c = exp(-1/480). N = 48 -> -120 * exp(-0.1).
+test_group("attack_time_constant_uses_sample_rate");
+var c7 = dhvani_comp_new(dhvani_compparams_new(f64_neg(20.0), 4.0, 10.0, 100.0, 0, 0, 1.0), 48000);
+var v7 = vec_new();
+var i7 = 0;
+while (i7 < 48) { vec_push(v7, 1.0); i7 = i7 + 1; }
+var b7 = dhvani_buffer_from_interleaved(v7, 1, 48000);
+dhvani_comp_process(c7, b7);
+var want7 = f64_mul(f64_neg(120.0), f64_exp(f64_neg(0.1)));
+var err7 = f64_abs(f64_sub(dhvani_comp_envelope_db(c7), want7));
+assert(f64_lt(err7, 0.000001), "10 ms attack @48k: env -120*exp(-0.1) after 1 ms");
+
 var rc = assert_summary();
 syscall(60, rc);

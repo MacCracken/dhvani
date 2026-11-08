@@ -5,7 +5,7 @@ description = "dhvani — core audio engine (buffers, format conversion, mixing,
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/dhvani"
 language = "cyrius"
-cyrius = "6.6.10"
+cyrius = "6.6.20"
 
 [build]
 entry = "src/main.cyr"
@@ -131,7 +131,7 @@ stdlib = [
 # they resolve as unreachable-undefined and are DCE-pruned (benign warnings).
 [deps.abaco]
 git = "https://github.com/MacCracken/abaco.git"
-tag = "2.4.6"
+tag = "2.4.13"
 modules = ["dist/abaco.cyr"]
 
 # ── Sibling bundles — WIRED AS REAL `[deps]` as of 2.2.3 ────────────────────
@@ -175,110 +175,114 @@ modules = ["dist/abaco.cyr"]
 # logging base — goonj/garjan/ghurni/prani call sakshi_*
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.5.2"
+tag = "2.5.7"
 modules = ["dist/sakshi.cyr"]
 
 # math; goonj needs its HVec3 (hvec3_*/HVec3_*) — REACHABLE, not DCE
-# No `path` line: the ../hisab checkout is on the 3.x line, where num_fft /
-# num_ifft return a `: stack` Result, and `path` wins over `tag`. With it, a
-# local resolve vendored hisab 3.x instead of this 2.11.2 pin and naad 2.2.4's
-# int-returning FFT calls stopped compiling — local != CI (fixed 2.2.5).
+# 3.x since 2.2.7: the whole 6.6.20 batch (naad 2.2.5, goonj 2.0.6, svara 3.5.6,
+# …) pins hisab 3.3.7. 2.2.5 had held 2.11.2 because naad 2.2.4 used the 2.x
+# int-returning num_fft / num_ifft. dhvani itself calls only hvec3_new.
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "2.11.2"
+tag = "3.3.7"
 modules = ["dist/hisab.cyr"]
 
 # acoustics; defines CoupledRooms (naad sizeof's it)
 [deps.goonj]
 git = "https://github.com/MacCracken/goonj.git"
-tag = "2.0.5"
+tag = "2.0.6"
 modules = ["dist/goonj.cyr"]
 
 # synthesis; sizeof(CoupledRooms) from goonj. Owns NAAD_FILTER_*
 [deps.naad]
 git = "https://github.com/MacCracken/naad.git"
-tag = "2.2.4"
+tag = "2.2.5"
 modules = ["dist/naad.cyr"]
 
 # codec substrate under shravan/nidhi. Declared explicitly so the whole closure
 # is TAG-pinned: left implicit, `cyrius deps` resolves it to a bare commit hash.
 # dhvani makes 0 direct sankoch_* calls — it DCE-prunes — but it must still be
 # declared to be auditable and reproducible.
+# STDLIB FOLDS — sakshi, sankoch, patra, yukti, vani: the cyrius snapshot ships
+# these and `cyrius deps` keeps the snapshot's copy over a same-named dep, so the
+# [package].cyrius pin decides what lands in lib/. Keep each tag EQUAL to the
+# snapshot's version (6.6.20: sakshi 2.5.7, sankoch 2.8.1, patra 1.15.2,
+# yukti 2.3.15, vani 1.2.9) so this file says what is vendored.
 [deps.sankoch]
 git = "https://github.com/MacCracken/sankoch.git"
-tag = "2.7.15"
+tag = "2.8.1"
 modules = ["dist/sankoch.cyr"]
 
 # THE audio codec — nidhi needs its STREAM_EVT_*/wav_*
 [deps.shravan]
 git = "https://github.com/MacCracken/shravan.git"
-tag = "2.8.1"
+tag = "2.8.2"
 modules = ["dist/shravan.cyr"]
 
 # voice; references naad's NOISE_WHITE etc.
 [deps.svara]
 git = "https://github.com/MacCracken/svara.git"
-tag = "3.5.5"
+tag = "3.5.6"
 modules = ["dist/svara.cyr"]
 
 # sampler engine; needs naad + shravan
 [deps.nidhi]
 git = "https://github.com/MacCracken/nidhi.git"
-tag = "2.1.2"
+tag = "2.1.3"
 modules = ["dist/nidhi.cyr"]
 
 # mechanical; naad + sakshi
 [deps.ghurni]
 git = "https://github.com/MacCracken/ghurni.git"
-tag = "2.6.1"
+tag = "2.6.2"
 modules = ["dist/ghurni.cyr"]
 
 # environment; sakshi + goonj
 [deps.garjan]
 git = "https://github.com/MacCracken/garjan.git"
-tag = "2.5.2"
+tag = "2.5.3"
 modules = ["dist/garjan.cyr"]
 
 # creature; svara + sakshi
 [deps.prani]
 git = "https://github.com/MacCracken/prani.git"
-tag = "2.0.13"
+tag = "2.0.14"
 modules = ["dist/prani.cyr"]
 
 # g2p: phoneme inventories (shared singletons — READ-ONLY)
 [deps.varna]
 git = "https://github.com/MacCracken/varna.git"
-tag = "2.4.2"
+tag = "2.4.3"
 modules = ["dist/varna.cyr"]
 
 # g2p: pronunciation dictionary (the hashmap map_*)
 [deps.shabdakosh]
 git = "https://github.com/MacCracken/shabdakosh.git"
-tag = "3.0.7"
+tag = "3.0.8"
 modules = ["dist/shabdakosh.cyr"]
 
 # g2p engine; needs varna + shabdakosh + svara
 [deps.shabda]
 git = "https://github.com/MacCracken/shabda.git"
-tag = "3.0.5"
+tag = "3.0.6"
 modules = ["dist/shabda.cyr"]
 
-# device I/O: procfs/text reads — yukti 2.3.8 reads /proc/asound through it
+# device I/O: procfs/text reads — yukti reads /proc/asound through it
 [deps.patra]
 git = "https://github.com/MacCracken/patra.git"
-tag = "1.14.2"
+tag = "1.15.2"
 modules = ["dist/patra.cyr"]
 
 # device I/O: PCM endpoint discovery
 [deps.yukti]
 git = "https://github.com/MacCracken/yukti.git"
-tag = "2.3.11"
+tag = "2.3.15"
 modules = ["dist/yukti.cyr"]
 
 # device I/O: raw /dev/snd ALSA PCM — drives src/playback.cyr
 [deps.vani]
 git = "https://github.com/MacCracken/vani.git"
-tag = "1.2.5"
+tag = "1.2.9"
 modules = ["dist/vani.cyr"]
 
 # ── BLOCKED — dependency not yet ported to Cyrius (still Rust) ──────────────

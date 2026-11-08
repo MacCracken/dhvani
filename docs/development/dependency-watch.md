@@ -4,8 +4,8 @@ Direct dependencies to monitor for updates, CVEs, and breaking changes.
 
 dhvani is a Cyrius engine. **As of 2.2.3 every bundle below is a real `[deps.X]`
 entry** in `cyrius.cyml` (`git` + `tag`; no committed `path` since 2.2.6), resolved by `cyrius deps` into
-`lib/` and hash-locked in `cyrius.lock` — 18 declared deps, 74 locked files, and
-the closure is **100% tag-pinned** (no commit-pins). The `include "lib/<x>.cyr"`
+`lib/` and hash-locked in `cyrius.lock` — 18 declared deps, 80 locked files, and
+the closure is **100% tag-pinned** (18 commit pins, one per dep). The `include "lib/<x>.cyr"`
 lines still govern **compile order**; `[deps]` governs **vendoring**. Bump a
 version by editing its `tag` and re-running `cyrius deps` — never by hand-copying
 a bundle into `lib/`, which the next `cyrius build/test` silently overwrites.
@@ -17,28 +17,28 @@ deleted upstream symbol rebinds instead of erroring — see the Upgrade Policy b
 
 | Bundle | Version | Role | Notes |
 |--------|---------|------|-------|
-| **abaco** | 2.4.5 | DSP math (amplitude/dB, poly_blep, panning, filters) | AGNOS bundle — the one `[deps]`-wired dep; coordinate upgrades with consumers |
+| **abaco** | 2.4.13 | DSP math (amplitude/dB, poly_blep, panning, filters) | AGNOS bundle — the one `[deps]`-wired dep; coordinate upgrades with consumers |
 
 ## Synthesis-Stack Siblings (vendored in `lib/`, included in dep order)
 
 | Bundle | Version | Layer | Notes |
 |--------|---------|-------|-------|
-| **naad** | 2.2.2 | `synthesis` | AGNOS synthesis — ⚠ 2.2.0 renamed `FILTER_*` → `NAAD_FILTER_*`; naad/svara/prani/ghurni/garjan must move TOGETHER |
-| **svara** | 3.5.4 | `voice` | AGNOS voice synthesis — depends on naad; 3.5.4 fixes a crash at `sample_rate <= 1200 Hz` |
-| **goonj** | 2.0.4 | `acoustics` | AGNOS acoustics — depends on hisab |
-| **prani** | 2.0.12 | `creature` | AGNOS creature vocals |
-| **garjan** | 2.5.1 | `environment` | AGNOS environmental sounds — depends on naad |
-| **ghurni** | 2.6.0 | `mechanical` | AGNOS mechanical sounds — depends on naad |
-| **nidhi** | 2.1.1 | `sampler` | AGNOS sample playback — needs shravan (WAV codec); render path alloc-free; `n_engine_note_on` is `#must_use` |
-| **sakshi** | 2.4.12 | (support) | Logging used across the stack |
-| **hisab** | 2.11.2 | (support) | HVec3 math for goonj |
-| **shravan** | 2.8.0 | (support) | WAV codec, needed by nidhi |
+| **naad** | 2.2.5 | `synthesis` | AGNOS synthesis — ⚠ 2.2.0 renamed `FILTER_*` → `NAAD_FILTER_*`; naad/svara/prani/ghurni/garjan must move TOGETHER |
+| **svara** | 3.5.6 | `voice` | AGNOS voice synthesis — depends on naad; 3.5.4 fixes a crash at `sample_rate <= 1200 Hz` |
+| **goonj** | 2.0.6 | `acoustics` | AGNOS acoustics — depends on hisab |
+| **prani** | 2.0.14 | `creature` | AGNOS creature vocals |
+| **garjan** | 2.5.3 | `environment` | AGNOS environmental sounds — depends on naad |
+| **ghurni** | 2.6.2 | `mechanical` | AGNOS mechanical sounds — depends on naad |
+| **nidhi** | 2.1.3 | `sampler` | AGNOS sample playback — needs shravan (WAV codec); render path alloc-free; `n_engine_note_on` is `#must_use` |
+| **sakshi** | 2.5.7 | (support) | Logging used across the stack — stdlib fold (see below) |
+| **hisab** | 3.3.7 | (support) | HVec3 math for goonj — 3.x since dhvani 2.2.7 (the whole 6.6.20 batch pins it); dhvani itself calls only `hvec3_new` |
+| **shravan** | 2.8.2 | (support) | WAV codec, needed by nidhi |
 
 Include order (dependency order — also the `[deps]` declaration order):
 `sakshi → hisab → goonj → naad → shravan → svara → nidhi → ghurni → garjan → prani`,
 then `varna → shabdakosh → shabda`, then `patra → yukti → vani`.
 
-**sankoch 2.7.10** is declared explicitly too: it arrives transitively under
+**sankoch 2.8.1** is declared explicitly too: it arrives transitively under
 shravan/nidhi, and left implicit `cyrius deps` pins it to a bare commit hash
 instead of a tag. dhvani makes no `sankoch_*` calls (it DCE-prunes).
 
@@ -46,9 +46,9 @@ instead of a tag. dhvani makes no `sankoch_*` calls (it DCE-prunes).
 
 | Bundle | Version | Role | Notes |
 |--------|---------|------|-------|
-| **shabda** | 3.0.4 | G2P engine | 3.0.2+ uses real Unicode tables → pulls the `unicode` stdlib leaf; SSML depth capped at 256 |
-| **shabdakosh** | 3.0.6 | pronunciation dictionary | string→phoneme `map_*` (the `hashmap` leaf) |
-| **varna** | 2.4.1 | phoneme inventories | 2.4.1 made pre-built inventories shared singletons — treat as READ-ONLY, use `phoneme_clone` to mutate |
+| **shabda** | 3.0.6 | G2P engine | 3.0.2+ uses real Unicode tables → pulls the `unicode` stdlib leaf; SSML depth capped at 256 |
+| **shabdakosh** | 3.0.8 | pronunciation dictionary | string→phoneme `map_*` (the `hashmap` leaf) |
+| **varna** | 2.4.3 | phoneme inventories | 2.4.1 made pre-built inventories shared singletons — treat as READ-ONLY, use `phoneme_clone` to mutate |
 
 Include order: `… svara → varna → shabdakosh → shabda`.
 
@@ -56,9 +56,32 @@ Include order: `… svara → varna → shabdakosh → shabda`.
 
 | Bundle | Version | Role | Notes |
 |--------|---------|------|-------|
-| **vani** | 1.2.2 | ALSA PCM via raw `/dev/snd` ioctls | dh(vani)'s sibling — no libpipewire/libasound, no FFI; drives `playback` (S16/S24/S32). 1.2.x caches ring scratch on the handle (no per-call `alloc()`) |
-| **yukti** | 2.3.8 | PCM device discovery | backs `device` enumeration / default-open; 2.3.8 reads `/proc/asound` via patra |
-| **patra** | 1.13.11 | procfs/text reads | pulled in by yukti 2.3.8 — must precede `lib/yukti.cyr` in the include order |
+| **vani** | 1.2.9 | ALSA PCM via raw `/dev/snd` ioctls | dh(vani)'s sibling — no libpipewire/libasound, no FFI; drives `playback` (S16/S24/S32). 1.2.x caches ring scratch on the handle (no per-call `alloc()`) |
+| **yukti** | 2.3.15 | PCM device discovery | backs `device` enumeration / default-open; 2.3.8 reads `/proc/asound` via patra |
+| **patra** | 1.15.2 | procfs/text reads | pulled in by yukti 2.3.8 — must precede `lib/yukti.cyr` in the include order |
+
+## Stdlib folds — the toolchain pin decides these five
+
+**sakshi, sankoch, patra, yukti and vani are folded into the Cyrius stdlib
+snapshot** (`~/.cyrius/versions/<pin>/lib/`). `cyrius deps` keeps the snapshot's
+copy over a same-named `[deps.X]` bundle (`refusing to overwrite stdlib leaf`), so
+their version in `lib/` moves with `[package].cyrius`, not with the `tag`. Keep each
+tag EQUAL to the snapshot's version so the manifest says what `lib/` holds: at
+cyrius 6.6.20 that is sakshi 2.5.7, sankoch 2.8.1, patra 1.15.2, yukti 2.3.15,
+vani 1.2.9 (cyrius CHANGELOG [6.6.19], "All 12 folded stdlibs re-vendored"). On a
+toolchain bump, read the new snapshot's versions first and move these five tags to
+match.
+
+## Known flat-namespace collisions between deps
+
+| Symbol | Defined in | Effect | Status |
+|--------|------------|--------|--------|
+| `DH_SIZE` | goonj (`DhvaniLayout`, **88**) · yukti (`DeviceHealthField`, **24**) | yukti is included after goonj, so every dhvani unit compiles `DH_SIZE = 24`. goonj's `generate_dhvani_ir` (reached by `dhvani_acoustics_generate_ir`) then does `alloc(24)` and writes the rt60 array at offsets 24..88 — a 64-byte heap overrun. | **Open, pre-existing** (goonj 2.0.5 / yukti 2.3.11 carried the same pair). Fix is an upstream rename in goonj or yukti, then a tag bump here. |
+| `detect_format` | sankoch · shravan | shravan's (last) wins over sankoch's inside sankoch too. | Pre-existing; dhvani makes no `sankoch_*` calls. |
+| `DcBlocker_*` accessors | garjan · prani | prani's win; both structs are `x_prev; y_prev; r;` (3 × 8 bytes), so the offsets agree. | Benign. |
+
+The compiler prints each of these as a `duplicate symbol` / `duplicate fn` warning
+on every build; a NEW one after a bump is a finding, not noise.
 
 ## Blocked (not yet ported to Cyrius — still Rust)
 
@@ -86,6 +109,10 @@ Include order: `… svara → varna → shabdakosh → shabda`.
   green, and the rounding quietly stopped matching `rust-old`. On any bump, diff
   the bundle's exported symbols against the previous version and grep dhvani for
   each removed name.
+- **Regenerate `cyrius.lock` after a tag bump.** `cyrius deps` (and `--relock`)
+  keep each dep's OLD commit pin beside the new one, so an in-place resolve leaves
+  two pins per bumped dep. Move the lock aside, re-run `cyrius deps`, check the
+  file-hash lines are unchanged and `cyrius deps --verify` passes (2.2.7).
 - **Minor versions**: Review changelog, test, apply within a week.
 - **Major versions**: Plan migration, update CHANGELOG with breaking section.
 - **AGNOS bundles**: Coordinate across the stack (abaco → naad/svara/goonj → dhvani → shruti/jalwa).

@@ -45,6 +45,39 @@ months apart on a box whose load was not pinned, and 6.5.41 subtracts a measured
 1.34 µs timer floor per clock read. The three 512-block SIMD kernels moving
 together by ~27 % is the only delta large enough to be structural.
 
+## 2.2.7 re-measure (cycc 6.6.20 vs 6.6.10, same box, back to back)
+
+Captured for the toolchain 6.6.10 → 6.6.20 bump and the 6.6.20 dependency batch.
+Unlike the 2.2.2 row this is a same-session A/B: a clean `git archive` of 2.2.6 on its
+own pin (6.6.10) against the 2.2.7 tree, interleaved base/new/base/new; each cell is the
+mean of the two runs. **No path regressed.**
+
+| hot path (`tests/hotpath.bcyr`) | 2.2.6 (6.6.10) | 2.2.7 (6.6.20) | delta |
+|----------|--------------:|---------------:|------:|
+| `osc_sample` (sine, per-sample) | 17.4 ns | **14.0 ns** | −20 % |
+| `biquad_process_sample` (per-sample) | 25.2 ns | 25.9 ns | +3 % (run 2: equal) |
+| `svf_process_sample` (per-sample) | 28.3 ns | 28.2 ns | 0 % |
+| `simd_peak_abs` (512-block) | 5.92 µs | 5.89 µs | 0 % |
+| `simd_apply_gain` (512-block) | 5.14 µs | 5.15 µs | 0 % |
+| `simd_i16_to_f32` (512-block) | 5.14 µs | 5.07 µs | −1 % |
+| `fft_spectrum` (1024-radix-2) | 666 µs | 680 µs | +2 % (within max spread) |
+
+| per second of audio (`tests/bench_compare.bcyr`) | 2.2.6 (6.6.10) | 2.2.7 (6.6.20) | delta |
+|----------|--------------:|---------------:|------:|
+| compressor stereo_1s | 5.40 ms | **5.18 ms** | −4 % |
+| limiter stereo_1s | 3.58 ms | **3.47 ms** | −3 % |
+| gain / peak / biquad_lp / r128 / dynamics stereo_1s | — | — | each within ±2 % |
+| fft 4096 mono | 3.18 ms | 3.26 ms | +2.5 % avg, +1 % min |
+
+The compressor and limiter rows matter most: 2.2.7 also fixes their attack/release
+coefficients (see CHANGELOG), and abaco's `amplitude_to_db`, which both call per frame,
+gained input checks upstream. They still came out faster. The coefficients are computed
+once per block, so fixing them costs nothing per sample.
+
+The per-sample figures sit well under the 2.2.2 table's (59 → 14 ns for `osc_sample`).
+That gap spans ~60 toolchain releases and different box load, so compare only within a
+table.
+
 Notes:
 - Per-sample DSP (osc/biquad/svf) benched with `bench_run_batch` (200k calls,
   batched to amortize the ~240 ns/pair `clock_gettime` overhead).

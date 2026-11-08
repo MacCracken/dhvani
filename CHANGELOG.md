@@ -5,6 +5,138 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.7] — cyrius 6.6.20 and its dependency batch; compressor and limiter time constants
+
+Toolchain `cyrius` 6.6.10 → **6.6.20**, with every dependency moved to the release pinned
+to 6.6.20 — hisab included, which leaves the 2.x line.
+
+### Dependencies
+
+| dep | was | now | pinned by |
+|---|---|---|---|
+| abaco | 2.4.6 | **2.4.13** | its 6.6.20 tag |
+| sakshi | 2.5.2 | **2.5.7** | 6.6.20 stdlib snapshot (fold) |
+| hisab | 2.11.2 | **3.3.7** | its 6.6.20 tag |
+| goonj | 2.0.5 | **2.0.6** | its 6.6.20 tag |
+| naad | 2.2.4 | **2.2.5** | its 6.6.20 tag |
+| sankoch | 2.7.15 | **2.8.1** | 6.6.20 stdlib snapshot (fold) |
+| shravan | 2.8.1 | **2.8.2** | its 6.6.20 tag |
+| svara | 3.5.5 | **3.5.6** | its 6.6.20 tag |
+| nidhi | 2.1.2 | **2.1.3** | its 6.6.20 tag |
+| ghurni | 2.6.1 | **2.6.2** | its 6.6.20 tag |
+| garjan | 2.5.2 | **2.5.3** | its 6.6.20 tag |
+| prani | 2.0.13 | **2.0.14** | its 6.6.20 tag |
+| varna | 2.4.2 | **2.4.3** | its 6.6.20 tag |
+| shabdakosh | 3.0.7 | **3.0.8** | its 6.6.20 tag |
+| shabda | 3.0.5 | **3.0.6** | its 6.6.20 tag |
+| patra | 1.14.2 | **1.15.2** | 6.6.20 stdlib snapshot (fold) |
+| yukti | 2.3.11 | **2.3.15** | 6.6.20 stdlib snapshot (fold) |
+| vani | 1.2.5 | **1.2.9** | 6.6.20 stdlib snapshot (fold) |
+
+Thirteen deps have a tag whose own `cyrius.cyml` pins exactly 6.6.20 — the batch. The
+other five have no 6.6.20 tag because they are stdlib folds: the toolchain snapshot carries
+them, and `cyrius deps` keeps the snapshot's copy over a same-named dep. Their tags are set
+to the versions 6.6.20's snapshot ships (cyrius CHANGELOG [6.6.19] lists the same commits),
+which are also what the batch siblings' manifests pin (garjan, ghurni, prani and hisab pin
+sakshi 2.5.7; nidhi and shravan pin sankoch 2.8.1). Through 2.2.6 three of these tags
+lagged what `lib/` actually held; now the manifest says what is vendored. Every bundle in
+`lib/` is byte-identical to its tag's `dist/<x>.cyr`, and the five folds to the snapshot's.
+
+**hisab 2.11.2 → 3.3.7.** 2.2.5 held hisab at 2.11.2 because naad 2.2.4 used the 2.x
+int-returning FFT. naad 2.2.5, goonj 2.0.6, svara 3.5.6 and the rest of the batch all pin
+hisab 3.3.7, so the reason is gone. dhvani itself names one hisab symbol, `hvec3_new`, and
+its body is unchanged.
+
+**Symbol audit** (the flat-namespace rebind check): 71 top-level names left the bundles.
+None is named in `src/`, `tests/` or `docs/examples/` except three that moved into cycc
+builtins at 6.6.13 — `f64_le`, `f64_ge`, `f64_trunc`, called across ~25 dhvani files. A
+throwaway probe ran the builtins against the retired `lib/math.cyr` bodies on 16 boundary
+values (±0, ±0.5, ±3.75, ±inf, ±NaN, the smallest subnormal, both sides of 2^52, the
+largest finite): 528 comparisons, **0 differences**, and a mutated reference is caught (35).
+(`f64_tan` left hisab for ganita; dhvani mentions it only in a comment in `src/error.cyr` —
+its filters call their own `dhvani_tan`.)
+
+### Fixed — compressor and limiter ran a one-sample envelope at any attack/release time
+
+abaco's `time_constant(time_ms, sample_rate)` takes both arguments as f64 bit patterns
+(rust-old's abaco takes `sample_rate: u32` and converts it). The compressor and limiter
+store the rate as an integer and passed it raw, so 48000 read as a subnormal (~2.4e-319),
+the sample count floored to 1, and every attack and release coefficient was `exp(-1)` =
+0.368 — whatever `attack_ms` / `release_ms` said. abaco 2.4.9 answers NaN for that input
+rather than a plausible coefficient (its upgrade note names these two call sites), so this
+bump surfaced it: on the new abaco `compressor.tcyr` failed "above threshold compressed"
+and "makeup gain boosts", and `limiter.tcyr` failed "gain reduction applied". Both call
+sites now pass `f64_from(sr)`.
+
+The 14 ported tests cannot tell a collapsed envelope from a real one — they passed through
+2.2.6. Two regression tests pin the one-pole step in closed form:
+`attack_time_constant_uses_sample_rate` (10 ms attack at 48 kHz, 48 frames at 0 dB from
+-120 dB → `-120·e^-0.1`) and `release_time_constant_uses_sample_rate` (100 ms release at
+48 kHz, 480 silent frames after a 0 dB frame → `-120·(1 − e^-0.1)`). Mutations: the raw
+integer back makes both fail (NaN) along with the three above; `f64_from(1)` in its place,
+which reproduces 2.2.6's numbers, makes **only** these two fail.
+
+For a consumer: compressor and limiter envelopes now move at the configured speed, as
+rust-old's do. Transients get less gain reduction in their first milliseconds than 2.2.6
+gave them, and limiter release is audible as a release rather than instant.
+
+### Changed — upstream answers that reach dhvani (each toward rust-old)
+
+- **dB constants.** abaco's `DB_SCALE` (20/ln 10) and `DB_EXP` (ln 10/20) each moved one
+  ulp, and both are now the correctly rounded f64 (checked against a 60-digit reference).
+  dB results move by an ulp or two.
+- **`amplitude_to_db(NaN)` is NaN** (was -inf), which is what rust-old's abaco returns
+  (`amplitude <= 0.0` is false for NaN). `dynamics.cyr`'s per-channel peak / RMS / true-peak
+  dB of a NaN-poisoned buffer now read NaN instead of reporting silence. The compressor,
+  limiter and `analysis` silence check feed it a NaN-ignoring peak, so they do not move.
+- **`time_constant`** refuses a sample rate below 1 or non-finite, and a negative or
+  non-finite time, with NaN — reachable only through the defect fixed above.
+- **`f64_round_half_away`** is exact at 0.49999999999999994 and leaves values ≥ 2^52 alone;
+  no dhvani call site reaches either input.
+
+### Changed — lock and lib
+
+- `cyrius.lock` rebuilt from an empty lock. `cyrius deps` — and `--relock` — keep a dep's
+  old commit pin next to the new one, so the in-place resolve left 36 pins for 18 deps. The
+  rebuilt lock has 18; its file-hash lines are identical to the in-place resolve's, and
+  `cyrius deps --verify` passes 80/80.
+- `lib/` re-vendored from the 6.6.20 snapshot. `lib/poison.cyr` is new (6.6.18's
+  allocator-poisoning seam for `cyrius fuzz --poison`) and unreachable from dhvani.
+- `dist/dhvani.cyr` regenerated (version header + the two fixes above). **`dist/dhvani.deps`
+  is gone**: 6.6.18's distlib derives a sidecar only from compile-verify, seeded by the
+  `lib/` includes the bundled modules keep — dhvani's keep none, and abaco 2.4.13 now opens
+  with its own `# Requires` stdlib block, so every leaf the bundle needs arrives through a
+  named dep and the verify leaves nothing to list (`sidecar: removed … (no stdlib leaves
+  remain)`). The old sidecar's 19 leaves were mostly the `[deps] stdlib` union, `assert` and
+  `bench` included, which that release stopped publishing. The seven suites that link
+  `dist/dhvani.cyr` (bundle, bundle_synth, bundle_g2p, integration, integration_advanced,
+  dsp_reference, proptest — 428 assertions) pass against the regenerated bundle.
+- distlib now names one symbol it cannot resolve: `is_err` on **x86_64-windows only**.
+  shravan calls the stdlib `is_err`, which the Linux, macOS and agnos syscall layers define
+  and `syscalls_windows.cyr` does not. dhvani does not build for Windows (device I/O is
+  ALSA); 6.6.18 is simply the first distlib that prints such names.
+
+### Known — not fixed here
+
+- **`DH_SIZE` collides between goonj and yukti.** goonj's `DhvaniLayout` sets it to 88,
+  yukti's `DeviceHealthField` to 24, and yukti comes later in the include order, so every
+  dhvani unit compiles `DH_SIZE = 24`. goonj's `generate_dhvani_ir`, which
+  `dhvani_acoustics_generate_ir` calls, then allocates 24 bytes and writes the rt60 array
+  at offsets 24..88 — a 64-byte heap overrun. goonj 2.0.5 and yukti 2.3.11 carried the same
+  pair, so this release neither introduces nor changes it. The fix is a rename upstream;
+  tracked in `docs/development/dependency-watch.md`.
+
+### Verified
+
+- `cyrius deps` → `cyrius build` → `cyrius test` (the CI sequence) on 6.6.20: **65 suites,
+  1,719 assertions, 0 failed** (+2: the regression tests above). On the new deps before the
+  fix it was 63/65, the two failures being `compressor` and `limiter`.
+- A 2.2.6 checkout on its own pin (6.6.10) printed a shadowed-stdlib warning
+  (`vani 1.2.5 (pinned: 1.2.7), sankoch 2.7.15 (pinned: 2.8.0)`); 2.2.7 prints none.
+- Benchmarks, same box, a clean 2.2.6 checkout on 6.6.10 against 2.2.7, interleaved: no
+  path regressed. `osc_sample` 17.4 → 14.0 ns (−20 %), compressor stereo 1 s 5.40 →
+  5.18 ms, limiter 3.58 → 3.47 ms; the rest within ±2–3 %. Tables in `BENCHMARKS.md`.
+
 ## [2.2.6] — no committed `path` deps: a local resolve reads the same tags as CI
 
 Toolchain `cyrius` stays **6.6.10**. Every dependency tag is unchanged.

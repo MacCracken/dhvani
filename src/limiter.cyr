@@ -57,7 +57,8 @@ fn dhvani_lim_process(self, buf) {
     var ch = DhAudioBuffer_channels(buf);
     var samples = DhAudioBuffer_samples(buf);
     var frames = DhAudioBuffer_frames(buf);
-    var release_coeff = time_constant(DhLimiterParams_release_ms(p), DhEnvelopeLimiter_sample_rate(self));
+    # f64 rate for abaco's time_constant (see dhvani_comp_process).
+    var release_coeff = time_constant(DhLimiterParams_release_ms(p), f64_from(DhEnvelopeLimiter_sample_rate(self)));
     var ceiling_lin = db_to_amplitude(DhLimiterParams_ceiling_db(p));
     var neg_ceiling = f64_neg(ceiling_lin);
     var mix = f64_clamp(DhLimiterParams_mix(p), 0, 1.0);
