@@ -168,7 +168,12 @@ deliberate deviation from "matches what Rust did":
   `cyrius.lock`. Parallel-porting agents MUST serialize every `cyrius …` call
   behind a shared file lock: `flock <scratch>/dhvani-build.lock cyrius …`.
 
-## Math dependency — open decision (ADR candidate)
+## Math dependency — decided: abaco (ADR 006)
+
+> **Decided at Wave B and recorded in
+> [`docs/decisions/006-math-base-abaco.md`](../decisions/006-math-base-abaco.md).**
+> abaco is dhvani's math base. hisab stays, because the siblings depend on it. dhvani's
+> own use is `hvec3_new`. The text below is the original question, kept for the record.
 
 Rust dhvani used `abaco::dsp` (`amplitude_to_db`, `db_to_amplitude`, `poly_blep`,
 `constant_power_pan`, `equal_power_crossfade`, `angular_frequency`,

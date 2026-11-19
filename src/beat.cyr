@@ -1,7 +1,7 @@
 # beat.cyr -- Beat and tempo detection via autocorrelation of the onset
 # strength function. Ports rust-old/src/analysis/beat.rs. L1: deps error +
-# simd + buffer + abaco + analysis + fft + stft (dhvani_stft) + onset
-# (dhvani_spectral_flux).
+# simd + buffer + abaco + analysis + fft + stft + onset
+# (dhvani_spectral_flux_from_buffer).
 #
 # BeatResult had bpm (f32), confidence (f32), beat_positions (Vec<usize>).
 # Here bpm/confidence are f64 slots and beat_positions is a `vec` of integer
@@ -55,9 +55,7 @@ fn dhvani_beat_zero_result() {
 # (null) on STFT error, or an empty vec (non-null) when < 2 frames.
 #must_use
 fn dhvani_beat_onset_strength_envelope(buf, window_size, hop_size) {
-    var sg = dhvani_stft(buf, window_size, hop_size);
-    if (sg == 0) { return 0; }
-    return dhvani_spectral_flux(sg);
+    return dhvani_spectral_flux_from_buffer(buf, window_size, hop_size);
 }
 
 # Autocorrelation of a signal over a lag range. result has length max_lag+1;

@@ -5,6 +5,10 @@
 
 ## Version
 
+**Unreleased (on 2.3.3)** — onset and tempo detection compute the spectral flux one STFT
+frame at a time (`dhvani_spectral_flux_from_buffer`), bit for bit with the spectrogram
+path: 10 s of audio allocates 72.5 KB, not 7.1 MB. ADR 006 records abaco as the math base.
+The AVX2 OS-check gap is filed in cyrius. `VERSION` is still 2.3.3.
 **2.3.3** — **P(-1) sweep**: a seven-group audit of all of `src/`. It fixed two
 regressions in 2.3.2's new code (the biquad fast path's frame count, the resample default
 path's unchecked raw stores), 9 P-1s, about 30 P-2s and the parity P-3s. It also added
@@ -131,6 +135,8 @@ externalized from the dist like the Wave F siblings; stdlib gained only `hashmap
 (the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
 `tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
 suites, all green on 6.4.12** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
+**Unreleased (on 2.3.3): 65 suites green on 6.7.18**: 2,637 assertions headless (the CI
+shape; +22 onset, +3 beat for the streamed flux).
 **As of 2.3.3: 65 suites green on 6.7.18**: 2,612 assertions headless (the CI shape).
 Every new regression group fails on the 2.3.2 sources. **As of 2.3.2: 65 suites green on 6.7.18** — 1,759 assertions headless (the CI shape),
 1,760 with audio hardware (+23 simd, +4 biquad, +5 resample, +1 g2p). **As of 2.3.1: 65 suites green on 6.7.18** — 1,726 assertions headless, 1,727 with
@@ -188,8 +194,8 @@ Per-module parity ledger + conventions: [`port-audit.md`](port-audit.md).
 
 One `tests/<module>.tcyr` per ported module, each Rust `#[test]` ported one-for-one
 (serde round-trip + Display tests dropped), plus the integration / dsp-reference /
-proptest / bundle suites and `tests/hw/device.tcyr` (self-gating). **65 suites, 2,612
-assertions headless at 2.3.3** (1,759 at 2.3.2). The oracle's five SIMD-vs-scalar
+proptest / bundle suites and `tests/hw/device.tcyr` (self-gating). **65 suites, 2,637
+assertions headless** (2,612 at 2.3.3, 1,759 at 2.3.2). The oracle's five SIMD-vs-scalar
 tests, dropped while only the scalar path existed, are ported since 2.3.2.
 
 ## Next
@@ -203,5 +209,10 @@ I/O, 2.2.0 g2p, and 2.3.2 the SIMD kernels. What is left:
 - **Consumers:** none on the Cyrius bundle yet.
 - **SIMD, demand-gated:** `peak_abs` / `clamp` / `noise_gate` vectorize once Cyrius has
   packed min/max/compare verbs; today they are walked.
-- **Open from the 2.3.3 sweep:** the stdlib `simd_has_avx2` lacks an OSXSAVE/XCR0 check
-  (upstream). (Convolution streaming was decided: one block of latency, ADR 005.)
+- **Open from the 2.3.3 sweep:**
+  - The stdlib `simd_has_avx2` lacks an OSXSAVE/XCR0 check. Upstream, filed 2026-11-19 as
+    cyrius `docs/development/issues/2026-11-19-simd-has-avx2-skips-the-os-check.md`.
+  - MIDI 2.0 upscaling is bit replication, not the spec's min-center-max rule. It is an
+    oracle divergence, so it waits on a decision (ADR 005, "Not changed").
+  - Closed since: convolution streaming (one block of latency, ADR 005) and the streamed
+    onset/beat flux.

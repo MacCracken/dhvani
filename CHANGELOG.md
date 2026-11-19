@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Onset detection and tempo detection no longer build the whole spectrogram.**
+  - **The change.**
+    - The new `dhvani_spectral_flux_from_buffer(buf, window_size, hop_size)` computes the
+      flux one STFT frame at a time, keeping two magnitude frames.
+    - `dhvani_detect_onsets` and `dhvani_beat_onset_strength_envelope` (so
+      `dhvani_detect_tempo`) now use it.
+  - **Memory.**
+    - Was O(window_size × frames), now O(window_size + frames).
+    - For 10 s at 2048/512, the spectrogram held 858 frames of 1,024 bins: 7,114,872
+      bytes. The stream allocates 72,544 bytes, measured as an `alloc_used()` delta.
+    - A 3-minute track held about 127 MB, which the bump allocator never gives back.
+  - **Output.** It is `dhvani_spectral_flux(dhvani_stft(...))`, bit for bit, for every
+    window, hop and frame-count edge tested. It refuses exactly what `dhvani_stft` refuses.
+  - **Unchanged.** `dhvani_spectral_flux(sg)` keeps its signature and output, for callers
+    that already hold a spectrogram.
+  - **Speed.** Measured interleaved against 2.3.3 (`BENCHMARKS.md`), it is slightly faster,
+    with no per-frame vecs: `detect_onsets` 17.23 → 16.97 ms and `detect_tempo`
+    17.28 → 16.98 ms for 1 s of stereo.
+- **The STFT frame is one shared step.** `dh_stft_frame` windows, transforms and writes
+  one frame's magnitudes into a caller-owned row.
+  - `dhvani_stft` and the streamed flux both call it.
+  - `dh_stft_args_ok` and `dh_stft_frame_count` hold the validation and frame count the
+    two paths share.
+  - The spectrogram path's output is unchanged.
+
+### Added
+
+- **`tests/onset.tcyr`, two new groups** (42 assertions, was 20):
+  - `flux_from_buffer_matches_spectrogram` covers the bit-for-bit match against the
+    spectrogram path (stereo, odd hop, hop 1, hop past the window, silence), the
+    frame-count edges and every refusal.
+  - `flux_memory_is_per_frame` puts an `alloc_used()` bound on the stream and checks the
+    spectrogram path's size for contrast.
+- **`tests/beat.tcyr`, `envelope_streams_the_flux`.**
+- **Mutation check.** Two mutants of the stream are each caught:
+  - dropping the frame swap;
+  - stepping frames by one sample instead of the hop.
+- **`tests/bench_dsp.bcyr`: `onsets 1s 2048/512` and `tempo 1s` rows.**
+- **ADR 006** (`docs/decisions/006-math-base-abaco.md`) records the Wave B decision that
+  abaco is dhvani's math base. This closes the last open 2.0.0 criterion that was
+  dhvani's own to close.
+  - dhvani calls eight abaco helpers and one hisab function (`hvec3_new`).
+  - hisab stays as the siblings' dependency, not as a second math base.
+
+### Upstream
+
+- **Filed in cyrius:** `docs/development/issues/2026-11-19-simd-has-avx2-skips-the-os-check.md`.
+  - `simd_has_avx2()` and `simd_has_fma()` skip the OSXSAVE/XCR0 check and the
+    maximum-leaf check.
+  - Under `qemu-x86_64 -cpu max,-xsave` the gate says yes and the next `f64v256_*`
+    raises SIGILL. dhvani's 256-bit path inherits this until the stdlib is fixed.
+
 ## [2.3.3] — P(-1) sweep: audit, hardening, refactor, optimization
 
 A full audit of `src/` (58 files, 10.3k lines) in seven module groups, each read against

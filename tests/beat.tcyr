@@ -169,5 +169,32 @@ assert(f64_lt(tb0_gap, 0.001) == 1, "min_bpm 0 == min_bpm 60 on the 120 BPM trac
 assert_eq(dhvani_beat_bpm(dhvani_detect_tempo(eb, 60.0, 0)), 0, "max_bpm 0 -> bpm 0");
 assert(dhvani_detect_tempo(eb, f64_neg(60.0), 200.0) != 0, "negative min_bpm -> no abort");
 
+# ---- envelope_streams_the_flux ----
+# onset_strength_envelope streams the STFT (dhvani_spectral_flux_from_buffer). It must
+# give the spectrogram path's flux bit for bit.
+test_group("envelope_streams_the_flux");
+var ev = vec_new();
+var evi = 0;
+while (evi < 88200) {
+    var evt = f64_div(f64_from(evi), 44100.0);
+    var evs = f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, 330.0), evt)), 0.2);
+    if ((evi % 22050) < 300) { evs = f64_add(evs, 0.7); }
+    vec_push(ev, evs);
+    evi = evi + 1;
+}
+var evb = dhvani_buffer_from_interleaved(ev, 1, 44100);
+var env_s = dhvani_beat_onset_strength_envelope(evb, 2048, 512);
+var env_r = dhvani_spectral_flux(dhvani_stft(evb, 2048, 512));
+var env_same = 1;
+if (vec_len(env_s) != vec_len(env_r)) { env_same = 0; }
+var evk = 0;
+while (env_same == 1 && evk < vec_len(env_s)) {
+    if (vec_get(env_s, evk) != vec_get(env_r, evk)) { env_same = 0; }
+    evk = evk + 1;
+}
+assert_eq(env_same, 1, "envelope == spectrogram flux, bit for bit");
+assert(vec_len(env_s) > 4, "envelope has frames");
+assert_eq(dhvani_beat_onset_strength_envelope(evb, 2048, 0), 0, "hop 0 -> 0");
+
 var rc = assert_summary();
 syscall(60, rc);

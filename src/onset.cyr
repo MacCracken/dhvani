@@ -1,8 +1,10 @@
 # onset.cyr -- Onset detection via spectral flux.
 # Ports rust-old/src/analysis/onset.rs. L1: deps error + simd + buffer +
-# abaco + analysis + fft + stft (dhvani_stft). Frames the signal, computes the
+# abaco + analysis + fft + stft (dh_stft_frame). Frames the signal, computes the
 # per-frame spectral difference (sum of positive bin-to-bin increases), normalizes
-# the flux by its peak, and peak-picks local maxima above a threshold.
+# the flux by its peak, and peak-picks local maxima above a threshold. The flux is
+# computed one frame at a time (dhvani_spectral_flux_from_buffer), never holding the
+# whole spectrogram.
 #
 # OnsetResult.positions was Vec<usize> (sample positions), strengths Vec<f32>.
 # Here each is a `vec`: positions holds integer sample offsets, strengths holds
@@ -72,17 +74,70 @@ fn dhvani_spectral_flux(sg) {
         i = i + 1;
     }
 
-    # Normalize flux by its peak (fold over 0.0, so >= 0). Storage taken after
-    # the last push (a push may move it).
-    var flux_len = vec_len(flux);
-    var fd = dh_vec_data(flux);
+    # Storage taken after the last push (a push may move it).
+    dh_flux_normalize(dh_vec_data(flux), vec_len(flux));
+    return flux;
+}
+
+# Normalize n flux values at fd by their peak, in place. The peak is folded from 0.0,
+# NaN-ignoring like the oracle's f32::max, so it is >= 0; a peak of 0 leaves them as is.
+fn dh_flux_normalize(fd, n) {
     var max_flux = 0;
     var m = 0;
-    while (m < flux_len) { max_flux = dh_max_ignore_nan(max_flux, load64(fd + m * 8)); m = m + 1; }
+    while (m < n) { max_flux = dh_max_ignore_nan(max_flux, load64(fd + m * 8)); m = m + 1; }
     if (f64_gt(max_flux, 0) == 1) {
-        var n = 0;
-        while (n < flux_len) { store64(fd + n * 8, f64_div(load64(fd + n * 8), max_flux)); n = n + 1; }
+        var k = 0;
+        while (k < n) { store64(fd + k * 8, f64_div(load64(fd + k * 8), max_flux)); k = k + 1; }
     }
+    return 0;
+}
+
+# spectral_flux_from_buffer(buf, window_size, hop_size) -- the flux of
+# dhvani_spectral_flux(dhvani_stft(buf, window_size, hop_size)), bit for bit, computed
+# one STFT frame at a time. It keeps two magnitude frames, not the spectrogram, so its
+# memory is O(window_size + frames) rather than O(window_size * frames). (A 3-minute
+# track at 2048/512 held about 127 MB of spectrogram, which the bump allocator never
+# gives back.) Returns 0 on the STFT's errors, and an empty vec when < 2 frames.
+#must_use
+fn dhvani_spectral_flux_from_buffer(buf, window_size, hop_size) {
+    if (dh_stft_args_ok(buf, window_size, hop_size) == 0) { return 0; }
+    var count = dh_stft_frame_count(buf, window_size, hop_size);
+    if (count < 2) { return vec_new(); }
+    var num_bins = window_size / 2;
+    var window = dhvani_stft_hann_window(window_size);
+    var real = dh_vec_zeros(window_size);
+    var imag = dh_vec_zeros(window_size);
+    var prevv = dh_vec_zeros(num_bins);
+    var curv = dh_vec_zeros(num_bins);
+    var flux = dh_vec_zeros(count); # flux[0] = 0: the first frame has no predecessor
+    if (vec_len(imag) != window_size) { return 0; }
+    if (vec_len(curv) != num_bins) { return 0; }
+    if (vec_len(flux) != count) { return 0; }
+    var sd = dh_vec_data(DhAudioBuffer_samples(buf));
+    var wd = dh_vec_data(window);
+    var stride = DhAudioBuffer_channels(buf) * 8;
+    var prev = dh_vec_data(prevv);
+    var cur = dh_vec_data(curv);
+    var fd = dh_vec_data(flux);
+
+    dh_stft_frame(sd, stride, wd, real, imag, window_size, prev);
+    var i = 1;
+    while (i < count) {
+        dh_stft_frame(sd + i * hop_size * stride, stride, wd, real, imag, window_size, cur);
+        var diff_sum = 0;
+        var bin = 0;
+        while (bin < num_bins) {
+            var diff = f64_sub(load64(cur + bin * 8), load64(prev + bin * 8));
+            if (f64_gt(diff, 0) == 1) { diff_sum = f64_add(diff_sum, diff); }
+            bin = bin + 1;
+        }
+        store64(fd + i * 8, diff_sum);
+        var t = prev;
+        prev = cur;
+        cur = t;
+        i = i + 1;
+    }
+    dh_flux_normalize(fd, count);
     return flux;
 }
 
@@ -101,12 +156,10 @@ fn dhvani_onset_make_result(positions, strengths) {
 # more sensitive).
 #must_use
 fn dhvani_detect_onsets(buf, window_size, hop_size, threshold) {
-    var sg = dhvani_stft(buf, window_size, hop_size);
-    if (sg == 0) { return 0; }
-
     # Spectral flux: sum of positive differences between consecutive frames,
-    # normalized by its peak (dhvani_spectral_flux, shared with beat).
-    var flux = dhvani_spectral_flux(sg);
+    # normalized by its peak (shared with beat), streamed frame by frame.
+    var flux = dhvani_spectral_flux_from_buffer(buf, window_size, hop_size);
+    if (flux == 0) { return 0; }
     var flux_len = vec_len(flux);
     if (flux_len < 2) {
         return dhvani_onset_make_result(vec_new(), vec_new());

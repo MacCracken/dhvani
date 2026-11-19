@@ -66,67 +66,87 @@ fn dhvani_stft_hann_window(window_size) {
     return window;
 }
 
+# The usable mono frame count of buf for an STFT: its frames field, clamped to what the
+# sample storage holds (never read past it, whatever the field says). 0 for ch < 1.
+#must_use
+fn dh_stft_avail_frames(buf) {
+    var ch = DhAudioBuffer_channels(buf);
+    if (ch < 1) { return 0; }
+    var total = DhAudioBuffer_frames(buf);
+    var avail = vec_len(DhAudioBuffer_samples(buf)) / ch;
+    if (total > avail) { total = avail; }
+    if (total < 0) { return 0; }
+    return total;
+}
+
+# How many frames an STFT of buf yields: one per pos = 0, hop, 2*hop, ... while
+# pos <= avail - window_size. 0 when the window does not fit once, or hop_size < 1.
+#must_use
+fn dh_stft_frame_count(buf, window_size, hop_size) {
+    if (hop_size < 1) { return 0; }
+    var last_pos = dh_stft_avail_frames(buf) - window_size;
+    if (last_pos < 0) { return 0; }
+    return last_pos / hop_size + 1;
+}
+
+# One STFT frame. Windows window_size samples of channel 0, starting at sp and stepping
+# stride bytes, into the real/imag scratch vecs (each window_size long). It FFTs them
+# and writes the window_size/2 magnitudes, |X[k]| / window_size, to md. If the FFT
+# refuses, it writes zeros. imag is re-zeroed here; real is fully overwritten.
+# Allocation-free once the FFT's twiddle table for this size exists.
+fn dh_stft_frame(sp, stride, wd, real, imag, window_size, md) {
+    var num_bins = window_size / 2;
+    var rd = dh_vec_data(real);
+    var id = dh_vec_data(imag);
+    var z = 0;
+    while (z < window_size) { store64(id + z * 8, 0); z = z + 1; }
+    var i = 0;
+    while (i < window_size) {
+        store64(rd + i * 8, f64_mul(load64(sp), load64(wd + i * 8)));
+        sp = sp + stride;
+        i = i + 1;
+    }
+    if (dhvani_fft_in_place(real, imag) == 0) {
+        var c = 0;
+        while (c < num_bins) { store64(md + c * 8, 0); c = c + 1; }
+        return 0;
+    }
+    var ws_f = f64_from(window_size);
+    var k = 0;
+    while (k < num_bins) {
+        var re = load64(rd + k * 8);
+        var im = load64(id + k * 8);
+        store64(md + k * 8, f64_div(f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im))), ws_f));
+        k = k + 1;
+    }
+    return 1;
+}
+
 # shared STFT core: given a precomputed window (len window_size), a buffer, and a
-# hop_size (> 0), build the frames vec. Preallocates real/imag scratch ONCE and
-# walks raw storage; per frame only imag is re-zeroed (real is fully overwritten
-# by the windowed samples). Bit-identical to the vec-accessor loop it replaced.
-# The loop bound is `pos <= frames - window_size`, so pos + window_size never
-# overflows however large hop_size is (pos <= frames before every add).
+# hop_size (> 0), build the frames vec. The real/imag scratch is allocated ONCE, and
+# each frame is one dh_stft_frame into its own magnitude vec. Bit-identical to the
+# vec-accessor loop it replaced. The frame count is computed up front (pos <= frames
+# - window_size), so pos + window_size never overflows however large hop_size is.
 #must_use
 fn dhvani_stft_run(window, window_size, buf, hop_size) {
     var num_bins = window_size / 2;
-    var samples = DhAudioBuffer_samples(buf);
-    var ch = DhAudioBuffer_channels(buf);
-    var total_mono_frames = DhAudioBuffer_frames(buf);
-
     var frames = vec_new();
-    if (ch < 1) { return frames; }
-    if (hop_size < 1) { return frames; }
-    # never read past the sample storage, whatever the frames field says
-    var avail = vec_len(samples) / ch;
-    if (total_mono_frames > avail) { total_mono_frames = avail; }
-    var last_pos = total_mono_frames - window_size;
-    var pos = 0;
+    var count = dh_stft_frame_count(buf, window_size, hop_size);
+    if (count == 0) { return frames; }
     # Pre-allocate scratch buffers ONCE to avoid per-frame heap allocation.
     var real = dh_vec_zeros(window_size);
     var imag = dh_vec_zeros(window_size);
     if (vec_len(real) != window_size) { return frames; }
     if (vec_len(imag) != window_size) { return frames; }
-    var sd = dh_vec_data(samples);
+    var sd = dh_vec_data(DhAudioBuffer_samples(buf));
     var wd = dh_vec_data(window);
-    var rd = dh_vec_data(real);
-    var id = dh_vec_data(imag);
-    var stride = ch * 8;
-    var ws_f = f64_from(window_size);
-
-    while (pos <= last_pos) {
-        # imag.fill(0.0); real is overwritten below
-        var z = 0;
-        while (z < window_size) { store64(id + z * 8, 0); z = z + 1; }
-
-        var sp = sd + pos * stride;
-        var i = 0;
-        while (i < window_size) {
-            store64(rd + i * 8, f64_mul(load64(sp), load64(wd + i * 8)));
-            sp = sp + stride;
-            i = i + 1;
-        }
-
-        if (dhvani_fft_in_place(real, imag) == 0) {
-            vec_push(frames, dh_vec_zeros(num_bins));
-        } else {
-            var magnitudes = dh_vec_zeros(num_bins);
-            var md = dh_vec_data(magnitudes);
-            var k = 0;
-            while (k < num_bins) {
-                var re = load64(rd + k * 8);
-                var im = load64(id + k * 8);
-                store64(md + k * 8, f64_div(f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im))), ws_f));
-                k = k + 1;
-            }
-            vec_push(frames, magnitudes);
-        }
-        pos = pos + hop_size;
+    var stride = DhAudioBuffer_channels(buf) * 8;
+    var f = 0;
+    while (f < count) {
+        var magnitudes = dh_vec_zeros(num_bins);
+        dh_stft_frame(sd + f * hop_size * stride, stride, wd, real, imag, window_size, dh_vec_data(magnitudes));
+        vec_push(frames, magnitudes);
+        f = f + 1;
     }
     return frames;
 }
@@ -143,17 +163,24 @@ fn dhvani_stft_make_spectrogram(frames, num_bins, sample_rate, window_size, hop_
     return self;
 }
 
+# 1 if (buf, window_size, hop_size) is a valid STFT request, else 0: the errors below.
+#must_use
+fn dh_stft_args_ok(buf, window_size, hop_size) {
+    if (vec_len(DhAudioBuffer_samples(buf)) == 0) { return 0; }
+    if (dh_is_pow2(window_size) == 0) { return 0; }
+    if (window_size < 4) { return 0; }
+    if (window_size > DH_MAX_FFT) { return 0; }
+    if (hop_size <= 0) { return 0; }
+    return 1;
+}
+
 # stft(buf, window_size, hop_size) -- Hann-windowed spectrogram, or 0 on error.
 # Errors: empty buffer, window_size not a power of two, window_size < 4 or
 # > DH_MAX_FFT, hop_size <= 0 (rust-old's usize hop could not be negative; a
 # negative hop here walked pos below 0 and aborted the process in vec_get).
 #must_use
 fn dhvani_stft(buf, window_size, hop_size) {
-    if (vec_len(DhAudioBuffer_samples(buf)) == 0) { return 0; }
-    if (dh_is_pow2(window_size) == 0) { return 0; }
-    if (window_size < 4) { return 0; }
-    if (window_size > DH_MAX_FFT) { return 0; }
-    if (hop_size <= 0) { return 0; }
+    if (dh_stft_args_ok(buf, window_size, hop_size) == 0) { return 0; }
     var num_bins = window_size / 2;
     var window = dhvani_stft_hann_window(window_size);
     var frames = dhvani_stft_run(window, window_size, buf, hop_size);

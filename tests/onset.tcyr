@@ -140,5 +140,100 @@ assert_eq(fmax, 1.0, "normalized to peak 1.0");
 var fone = dhvani_stft(dhvani_buffer_silence(1, 2048, 44100), 2048, 512);
 assert_eq(vec_len(dhvani_spectral_flux(fone)), 0, "1 frame -> empty flux");
 
+# ---- flux_from_buffer_matches_spectrogram ----
+# dhvani_spectral_flux_from_buffer streams the STFT frame by frame. It must give the
+# spectrogram path's flux bit for bit, refuse what dhvani_stft refuses, and match its
+# frame count at every edge (one frame, a hop past the window, an odd hop).
+test_group("flux_from_buffer_matches_spectrogram");
+
+# 1 if vecs a and b hold the same bits (and the same length).
+fn bits_equal(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    var i = 0;
+    while (i < vec_len(a)) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# A stereo test signal: tones, a chirp and two clicks on the left, a different tone on
+# the right (only channel 0 feeds the STFT, as in the oracle).
+fn flux_signal(frames, sr) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var t = f64_div(f64_from(i), f64_from(sr));
+        var l = f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, 440.0), t)), 0.3);
+        l = f64_add(l, f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, f64_mul(200.0, f64_add(1.0, t))), t)), 0.2));
+        if (i > 9000 && i < 9100) { l = f64_add(l, 0.8); }
+        if (i > 30000 && i < 30040) { l = f64_sub(l, 0.7); }
+        vec_push(v, l);
+        vec_push(v, f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, 1500.0), t)), 0.4));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, sr);
+}
+
+# 1 if both paths agree on (buf, ws, hop): both refuse, or both give the same bits.
+fn flux_paths_agree(buf, ws, hop) {
+    var sg = dhvani_stft(buf, ws, hop);
+    var streamed = dhvani_spectral_flux_from_buffer(buf, ws, hop);
+    if (sg == 0) { return streamed == 0; }
+    if (streamed == 0) { return 0; }
+    return bits_equal(dhvani_spectral_flux(sg), streamed);
+}
+
+var fsig = flux_signal(44100, 44100);
+assert_eq(flux_paths_agree(fsig, 2048, 512), 1, "stereo 2048/512: bit for bit");
+assert_eq(flux_paths_agree(fsig, 1024, 300), 1, "odd hop 300: bit for bit");
+assert_eq(flux_paths_agree(flux_signal(4096, 44100), 512, 1), 1, "hop 1: bit for bit");
+assert_eq(flux_paths_agree(fsig, 2048, 4096), 1, "hop past the window: bit for bit");
+assert_eq(flux_paths_agree(nh, 2048, 512), 1, "mono impulse: bit for bit");
+var fsil = dhvani_buffer_silence(2, 8192, 44100);
+assert_eq(flux_paths_agree(fsil, 2048, 512), 1, "silence (peak 0, no normalize): bit for bit");
+var fs2 = dhvani_spectral_flux_from_buffer(fsig, 2048, 512);
+assert_eq(vec_len(fs2), dhvani_spectrogram_num_frames(dhvani_stft(fsig, 2048, 512)), "one value per frame");
+assert_eq(vec_get(fs2, 0), 0, "flux[0] = 0");
+# frame-count edges: exactly one frame, exactly two
+# the flux length for a mono silent buffer of n frames at 2048/512
+fn flux_len_of(n) {
+    return vec_len(dhvani_spectral_flux_from_buffer(dhvani_buffer_silence(1, n, 44100), 2048, 512));
+}
+assert_eq(flux_len_of(2048), 0, "1 frame -> empty");
+assert_eq(flux_len_of(2560), 2, "2 frames -> 2 values");
+assert_eq(flux_len_of(1000), 0, "window longer than buffer -> empty");
+# refusals match dhvani_stft's
+assert_eq(dhvani_spectral_flux_from_buffer(fsig, 2048, 0), 0, "hop 0 -> 0");
+assert_eq(dhvani_spectral_flux_from_buffer(fsig, 2048, 0 - 512), 0, "hop -512 -> 0");
+assert_eq(dhvani_spectral_flux_from_buffer(fsig, 1000, 512), 0, "window not pow2 -> 0");
+assert_eq(dhvani_spectral_flux_from_buffer(fsig, 2, 1), 0, "window < 4 -> 0");
+var fempty = dhvani_buffer_from_interleaved(vec_new(), 1, 44100);
+assert_eq(dhvani_spectral_flux_from_buffer(fempty, 2048, 512), 0, "empty buffer -> 0");
+# detect_onsets runs on the streamed flux and still finds the impulse
+assert(dhvani_onset_count(dhvani_detect_onsets(fsig, 2048, 512, 0.2)) > 0, "detect_onsets on the stream finds onsets");
+
+# ---- flux_memory_is_per_frame ----
+# The streamed flux keeps two magnitude frames plus one value per frame. The
+# spectrogram path keeps every frame: 10 s at 2048/512 is 858 frames of 1024 bins,
+# about 7 MB. Measured after one warm call, so the FFT's twiddle table already exists.
+test_group("flux_memory_is_per_frame");
+var flong = dhvani_buffer_silence(1, 441000, 44100);
+var fwarm = dhvani_spectral_flux_from_buffer(flong, 2048, 512);
+assert_eq(vec_len(fwarm), 858, "10 s at 2048/512 -> 858 frames");
+var fu0 = alloc_used();
+var fl2 = dhvani_spectral_flux_from_buffer(flong, 2048, 512);
+var fu1 = alloc_used();
+# window + real + imag (3 x 2048) + two frames (2 x 1024) + flux (858), in f64 words,
+# plus vec headers
+var fbound = (3 * 2048 + 2 * 1024 + 858) * 8 + 1024;
+assert(fu1 - fu0 <= fbound, "streamed flux allocates O(window + frames)");
+assert(fu1 - fu0 >= 858 * 8, "and does hold its flux values");
+var fu2 = alloc_used();
+var fsg2 = dhvani_stft(flong, 2048, 512);
+var fu3 = alloc_used();
+assert(fu3 - fu2 > 858 * 1024 * 8, "the spectrogram path holds every frame");
+assert_eq(bits_equal(fl2, dhvani_spectral_flux(fsg2)), 1, "same bits on the long buffer");
+
 var rc = assert_summary();
 syscall(60, rc);

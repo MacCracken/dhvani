@@ -2,7 +2,8 @@
 # noise reduction, pan, waveform and resampler. Run:
 #   cyrius bench tests/bench_dsp.bcyr
 # Added in 2.3.3 for the P(-1) sweep's rewrites (storage walks, hoisted coefficients,
-# compare-and-wrap rings), which hotpath.bcyr and bench_compare.bcyr did not cover. Every
+# compare-and-wrap rings), which hotpath.bcyr and bench_compare.bcyr did not cover; the
+# onset and tempo rows since the streamed flux (after 2.3.3). Every
 # call here has the same signature in 2.3.2, so the file A/Bs across the two. Inputs
 # are in-band sines so the in-place, repeated processing stays bounded. Links abaco +
 # the assembled bundle, as a consumer does.
@@ -39,6 +40,8 @@ fn b_nr()   { return dhvani_noise_reducer_process(_nr, _st4096, F64_HALF); }
 fn b_pan()  { return dhvani_pan_process(_pan, _st512); }
 fn b_wave() { return dhvani_waveform_compute(_st1s, 100); }
 fn b_rsmp() { return dhvani_resample_sinc(_st1s, 48000, DH_RESAMPLE_GOOD); }
+fn b_ons()  { return dhvani_detect_onsets(_st1s, 2048, 512, 0.3); }
+fn b_tmpo() { return dhvani_detect_tempo(_st1s, 60.0, 200.0); }
 
 fn stereo_sine(frames, sr) {
     var v = vec_new();
@@ -86,6 +89,8 @@ fn main() {
     bench_block("pan stereo 512      ", &b_pan, 20000);
     bench_block("waveform 1s stereo  ", &b_wave, 100);
     bench_block("resample 1s st 48k  ", &b_rsmp, 10);
+    bench_block("onsets 1s 2048/512  ", &b_ons, 50);
+    bench_block("tempo 1s            ", &b_tmpo, 50);
     return 0;
 }
 

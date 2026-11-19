@@ -15,9 +15,9 @@
       clean (one flat namespace)
 - [x] Hot-path benchmarks captured (`BENCHMARKS.md`, `tests/hotpath.bcyr`,
       `docs/benchmarks-rust-v-cyrius.md`)
-- [ ] `abaco`-vs-`hisab` math decision recorded as an ADR; loser pruned from
-      `cyrius.cyml`. Decided (keep abaco; see the manifest and `port-audit.md`),
-      but not as an ADR. hisab cannot be pruned: goonj needs its HVec3.
+- [x] `abaco`-vs-`hisab` math decision recorded as an ADR: **ADR 006** (2026-11-19),
+      keep abaco. hisab is not pruned: it is the siblings' dependency, not a second
+      math base (goonj's geometry is built on its HVec3).
 - [x] CHANGELOG `[2.0.0]` complete; `VERSION` = 2.0.0
 - [ ] At least one downstream consumer (shruti / jalwa / aethersafta) builds
       against the Cyrius bundle. **Still open**: no consumer is on the bundle yet.
@@ -157,8 +157,13 @@ Parity first; these resume once the port is green. Demand-gated.
   - MIDI 2.0 upscaling is bit replication, not min-center-max, so the pitch-bend centre
     8192 does not map to `0x80000000`.
   - upstream (cyrius stdlib): `simd_has_avx2` should also check OSXSAVE/XCR0 and the
-    maximum CPUID leaf.
-  - streaming onset/beat flux (memory proportional to bins, not to the track length).
+    maximum CPUID leaf. Filed 2026-11-19 as cyrius
+    `docs/development/issues/2026-11-19-simd-has-avx2-skips-the-os-check.md`, with a
+    qemu repro: under `-cpu max,-xsave` the gate says yes and the ymm kernel SIGILLs.
+  - ✅ streaming onset/beat flux (memory proportional to bins, not to the track length):
+    done after 2.3.3. `dhvani_spectral_flux_from_buffer` computes the flux one STFT
+    frame at a time, bit for bit with the spectrogram path; onset and tempo detection
+    use it.
 
 ## Out of scope (unchanged from Rust)
 

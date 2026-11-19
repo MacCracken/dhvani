@@ -132,6 +132,29 @@ each cell is the mean of the two runs. **No path regressed**; every delta is wit
 | dynamics mono_1s | 4.52 ms | 4.47 ms | −1.2 % |
 | fft 4096 mono | 3.08 ms | 3.10 ms | +0.6 % |
 
+## Unreleased (on 2.3.3) — the streamed spectral flux (same box, one session, interleaved)
+
+The 2.3.3 tag against the working tree, each run twice in the order 2.3.3 → new → 2.3.3 →
+new; every cell is the mean of its two runs. The two rows were added to
+`tests/bench_dsp.bcyr` for this change, and their calls exist with the same signatures in
+2.3.3, so the same file runs on both trees. The output is bit-identical (the tests compare
+the stream against the spectrogram path).
+
+| per call (`tests/bench_dsp.bcyr`, 1 s stereo at 44.1 kHz) | 2.3.3 | new | change |
+|----------|------:|------:|--------:|
+| `detect_onsets`, 2048/512 | 17.23 ms | **16.97 ms** | −1.5 % |
+| `detect_tempo`, 60–200 BPM | 17.28 ms | **16.98 ms** | −1.8 % |
+
+The point of the change is memory, not time: the per-frame magnitude vecs are gone.
+
+| allocated per call (`alloc_used()` delta, 10 s mono, 2048/512, 858 frames) | bytes |
+|----------|------:|
+| `dhvani_stft` (the spectrogram the old path built) | 7,114,872 |
+| `dhvani_spectral_flux_from_buffer` | **72,544** |
+
+The other rows of the file did not move: conv 527.9 → 527.2 µs, waveform 422.4 →
+417.7 µs, resample 147.8 → 148.7 ms (one 10-iteration sample each run).
+
 ## 2.3.3 — the P(-1) sweep (same box, one session, interleaved)
 
 2.3.2 (the tagged tree) against 2.3.3, each run twice in the order 2.3.2 → 2.3.3 → 2.3.2
