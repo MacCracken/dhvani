@@ -190,11 +190,11 @@ while (band < NUM_BANDS) {
 }
 assert_eq(rt_ok, 1, "all bathroom rt60 bands > 0");
 
-# ---- multiband_tail (2.3.2) ----
-# The reverb only emits whole 512-frame blocks, so through 2.3.1 the last
-# frames % 512 frames of a one-shot convolve_multiband came back RAW (rust-old has
-# the same gap). The buffer is now run zero-padded: the full blocks are
-# bit-identical to a direct process, the tail is convolved, the length is kept.
+# ---- multiband_tail (2.3.2; 2.3.3) ----
+# Through 2.3.1 the last frames % 512 frames of a one-shot convolve_multiband came
+# back RAW (rust-old has the same gap). Since 2.3.3 it runs dhvani_conv_render: every
+# frame convolved, aligned with the input (no latency), the length kept; and its
+# output is exactly a streamed process of x ++ one block of zeros, one block later.
 test_group("multiband_tail");
 var room10 = acoustic_room_shoebox(f64_from(5), f64_from(4), f64_from(3), acoustic_material_concrete());
 var dir10 = dhvani_acoustics_generate_ir(f64_from(2), 1.5, f64_from(2), f64_from(3), 1.5, f64_from(2), room10,
@@ -213,17 +213,26 @@ while (ti < tail_frames * 2) {
     ti = ti + 1;
 }
 assert_eq(raw_tail, 0, "no raw (unprocessed) tail samples");
-var ref10 = dhvani_buffer_from_interleaved(const_vec(4096 * 2, 0.5), 2, 44100);
+# the streamed reference: process x, then one block of zeros, and read it B later
 var rev10 = dhvani_acoustics_convolution_from_multiband(mb10, 0.3);
 assert(rev10 != 0, "convolution_from_multiband builds a reverb");
+var lat10 = dhvani_conv_latency_frames(rev10);
+assert_eq(lat10, 512, "streaming latency is one 512-frame block");
+var ref10 = dhvani_buffer_from_interleaved(const_vec(tail_frames * 2, 0.5), 2, 44100);
 dhvani_conv_process(rev10, ref10);
-var head_same = 1;
+var pad10 = dhvani_buffer_from_interleaved(const_vec(lat10 * 2, 0), 2, 44100);
+dhvani_conv_process(rev10, pad10);
+var stream_same = 1;
 var hi = 0;
-while (hi < 4096 * 2) {
-    if (vec_get(dhvani_buffer_samples(ref10), hi) != vec_get(dhvani_buffer_samples(buf10), hi)) { head_same = 0; }
+while (hi < tail_frames * 2) {
+    var want = 0;
+    var src_i = hi + lat10 * 2;
+    if (src_i < tail_frames * 2) { want = vec_get(dhvani_buffer_samples(ref10), src_i); }
+    else { want = vec_get(dhvani_buffer_samples(pad10), src_i - tail_frames * 2); }
+    if (want != vec_get(dhvani_buffer_samples(buf10), hi)) { stream_same = 0; }
     hi = hi + 1;
 }
-assert_eq(head_same, 1, "whole blocks bit-identical to a direct reverb process");
+assert_eq(stream_same, 1, "one-shot = streamed output one block later, bit for bit");
 
 # ---- convolution_from_multiband (2.3.2) ----
 # the reusable per-block form: one reverb, many blocks, tail carried across.

@@ -322,36 +322,151 @@ dhvani_conv_process(sw_rev_c, ma_r);
 dhvani_conv_process(fresh_r5, mb_r);
 assert_eq(cv_ndiff(ma_r, mb_r), 0, "and a later channel switch still matches");
 
-# ---- streaming_timing_is_the_oracles (pins documented behavior, 2.3.2) ----
-# process() writes a block's output only when the block completes, back over that
-# block's frames (zero added latency, as rust-old). Frames of a block completing
-# in a later call come back RAW. With IR = [0.5] and mix 1.0 a processed frame is
-# exactly 0.5x; 256-frame calls against the 512 block: odd calls raw, even
-# processed; a one-shot 1000-frame call leaves frames 512..999 raw.
-test_group("streaming_timing_is_the_oracles");
+fn const_vec(n, x) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, x); i = i + 1; }
+    return v;
+}
+fn vec_bits_equal(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    var i = 0;
+    while (i < vec_len(a)) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---- streaming with one block of latency (2.3.3) ----
+# Through 2.3.2 process() kept the oracle's zero-latency timing: a block was written
+# back only into the call that completed it, so 256-frame calls against the 512 block
+# returned every other call raw, and a one-shot call left its last frames % 512 raw.
+# process() now streams one block behind: frame t = dry * x[t - B] + mix * wet[t - B].
+
+# exact latency: an impulse through IR = [1.0] at full wet comes out B frames later
+test_group("latency_is_one_block");
+var ir_l = vec_new(); vec_push(ir_l, 1.0);
+var rev_l = dhvani_conv_with_block_size(ir_l, 64, 1.0, 44100);
+assert_eq(dhvani_conv_latency_frames(rev_l), 64, "latency_frames = block_size");
+var lv = dh_vec_zeros(200);
+vec_set(lv, 5, 1.0);
+dhvani_conv_process(rev_l, dhvani_buffer_from_interleaved(lv, 1, 44100));
+var l_ok = 1;
+var li = 0;
+while (li < 200) {
+    var lwant = 0;
+    if (li == 69) { lwant = 1.0; }
+    if (f64_gt(f64_abs(f64_sub(vec_get(lv, li), lwant)), 0.000000000001) == 1) { l_ok = 0; }
+    li = li + 1;
+}
+assert_eq(l_ok, 1, "impulse at 5 comes out at 5 + 64, nothing else");
+assert_eq(dhvani_conv_latency_frames(dhvani_conv_new(vec_new(), 1.0, 44100)), 0, "empty IR: no latency");
+
+# small host blocks: every frame is processed once the latency has passed
+# (IR = [0.5], mix 1: a processed frame is exactly 0.5x; 256-frame calls, B = 512)
+test_group("small_host_blocks_fully_processed");
 var ir_t = vec_new(); vec_push(ir_t, 0.5);
 var rev_t = dhvani_conv_new(ir_t, 1.0, 44100);
-var t1 = dhvani_buffer_silence(1, 256, 44100);
-var t2 = dhvani_buffer_silence(1, 256, 44100);
-var ti = 0;
-while (ti < 256) {
-    vec_set(dhvani_buffer_samples(t1), ti, 0.25);
-    vec_set(dhvani_buffer_samples(t2), ti, 0.25);
-    ti = ti + 1;
+var t_ok = 1;
+var t_call = 0;
+while (t_call < 6) {
+    var tb = dhvani_buffer_from_interleaved(const_vec(256, 0.25), 1, 44100);
+    dhvani_conv_process(rev_t, tb);
+    var tw = 0.125;
+    if (t_call < 2) { tw = 0; }          # the first block of output is the latency fill
+    var tq = 0;
+    while (tq < 256) {
+        if (f64_gt(f64_abs(f64_sub(vec_get(dhvani_buffer_samples(tb), tq), tw)), 0.0000000001) == 1) { t_ok = 0; }
+        tq = tq + 1;
+    }
+    t_call = t_call + 1;
 }
-dhvani_conv_process(rev_t, t1);
-dhvani_conv_process(rev_t, t2);
-assert_eq(vec_get(dhvani_buffer_samples(t1), 10), 0.25, "call 1 (block incomplete) returns raw input");
-var t2v = vec_get(dhvani_buffer_samples(t2), 10);
-assert(f64_lt(f64_abs(f64_sub(t2v, 0.125)), 0.0000000001), "call 2 completes the block: 0.5x");
-var rev_t2 = dhvani_conv_new(ir_t, 1.0, 44100);
-var t3 = dhvani_buffer_silence(1, 1000, 44100);
-var tk = 0;
-while (tk < 1000) { vec_set(dhvani_buffer_samples(t3), tk, 0.25); tk = tk + 1; }
-dhvani_conv_process(rev_t2, t3);
-var t3v = vec_get(dhvani_buffer_samples(t3), 100);
-assert(f64_lt(f64_abs(f64_sub(t3v, 0.125)), 0.0000000001), "one-shot: frame 100 processed");
-assert_eq(vec_get(dhvani_buffer_samples(t3), 700), 0.25, "one-shot: frame 700 (partial last block) raw");
+assert_eq(t_ok, 1, "calls 1-2 silent (latency), calls 3-6 every frame 0.5x");
+
+# any split of the input into calls gives the same bits
+fn cv_stream(ir, bs, sig, frames, ch, split) {
+    var rev = dhvani_conv_with_block_size(ir, bs, 0.7, 44100);
+    var src = dhvani_buffer_samples(sig);
+    var out = vec_new();
+    var f = 0;
+    var piece = 0;
+    while (f < frames) {
+        var n = vec_get(split, piece % vec_len(split));
+        if (n > frames - f) { n = frames - f; }
+        var v = vec_new();
+        var i = 0;
+        while (i < n * ch) { vec_push(v, vec_get(src, f * ch + i)); i = i + 1; }
+        dhvani_conv_process(rev, dhvani_buffer_from_interleaved(v, ch, 44100));
+        i = 0;
+        while (i < n * ch) { vec_push(out, vec_get(v, i)); i = i + 1; }
+        f = f + n;
+        piece = piece + 1;
+    }
+    return out;
+}
+test_group("split_invariance");
+var ir_v = vec_new();
+var vk = 0;
+while (vk < 700) { vec_push(ir_v, f64_mul(f64_exp(f64_neg(f64_div(f64_from(vk), 90.0))), 0.4)); vk = vk + 1; }
+var sig_v = cv_sig(3000, 2, 41);
+var sp_one = vec_new(); vec_push(sp_one, 3000);
+var sp_256 = vec_new(); vec_push(sp_256, 256);
+var sp_odd = vec_new(); vec_push(sp_odd, 300); vec_push(sp_odd, 77); vec_push(sp_odd, 1); vec_push(sp_odd, 913);
+var sp_1 = vec_new(); vec_push(sp_1, 1);
+var o_one = cv_stream(ir_v, 128, sig_v, 3000, 2, sp_one);
+var o_256 = cv_stream(ir_v, 128, sig_v, 3000, 2, sp_256);
+var o_odd = cv_stream(ir_v, 128, sig_v, 3000, 2, sp_odd);
+var o_1 = cv_stream(ir_v, 128, sig_v, 3000, 2, sp_1);
+assert_eq(vec_bits_equal(o_one, o_256), 1, "one call == 256-frame calls, bit for bit");
+assert_eq(vec_bits_equal(o_one, o_odd), 1, "one call == 300/77/1/913 calls, bit for bit");
+assert_eq(vec_bits_equal(o_one, o_1), 1, "one call == frame-at-a-time, bit for bit");
+
+# the stream is the actual convolution, one block late: out[t + B] = dry * x[t] +
+# mix * sum_k h[k] x[t - k], against a direct time-domain sum
+test_group("matches_direct_convolution");
+var dsrc = dhvani_buffer_samples(sig_v);
+var d_ok = 1;
+var dworst = 0;
+var dt = 0;
+while (dt < 3000 - 128) {
+    var dc = 0;
+    while (dc < 2) {
+        var acc = 0;
+        var dk = 0;
+        while (dk < 700) {
+            if (dt - dk >= 0) { acc = f64_add(acc, f64_mul(vec_get(ir_v, dk), vec_get(dsrc, (dt - dk) * 2 + dc))); }
+            dk = dk + 1;
+        }
+        var dwant = f64_add(f64_mul(vec_get(dsrc, dt * 2 + dc), 0.3), f64_mul(acc, 0.7));
+        var derr = f64_abs(f64_sub(vec_get(o_one, (dt + 128) * 2 + dc), dwant));
+        if (f64_gt(derr, dworst) == 1) { dworst = derr; }
+        dc = dc + 1;
+    }
+    dt = dt + 7;     # every 7th frame keeps the O(n * taps) reference quick
+}
+assert(f64_lt(dworst, 0.000000001), "within 1e-9 of the direct sum on every checked frame");
+var d_first = 1;
+var dz = 0;
+while (dz < 128 * 2) { if (vec_get(o_one, dz) != 0) { d_first = 0; } dz = dz + 1; }
+assert_eq(d_first, 1, "the first block is the latency fill (silence)");
+
+# render() is the aligned, offline form: the stream of x ++ one block of zeros, read
+# one block later, with every frame (the last partial block too) convolved
+test_group("render_is_aligned");
+var rsig = cv_sig(1000, 1, 7);
+var rx = dh_vec_copy(dhvani_buffer_samples(rsig));
+var rrev = dhvani_conv_new(ir_t, 1.0, 44100);
+assert_eq(dhvani_conv_render(rrev, rsig), DHVANI_ERR_NONE, "render ok");
+var r_ok = 1;
+var ri = 0;
+while (ri < 1000) {
+    var rwant = f64_mul(vec_get(rx, ri), 0.5);
+    if (f64_gt(f64_abs(f64_sub(vec_get(dhvani_buffer_samples(rsig), ri), rwant)), 0.0000000001) == 1) { r_ok = 0; }
+    ri = ri + 1;
+}
+assert_eq(r_ok, 1, "render: every one of 1000 frames 0.5x, no latency, no raw tail");
+assert_eq(dhvani_buffer_frames(rsig), 1000, "render keeps the frame count");
 
 # ---- zero_channel_buffer (hardening, 2.3.2) ----
 test_group("zero_channel_buffer");

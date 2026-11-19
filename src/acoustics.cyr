@@ -47,8 +47,9 @@ fn dhvani_acoustics_convolution_from_dhvani_ir(ir, mix) {
 
 # ── Bridge: MultibandIr (collapsed to broadband) -> ConvolutionReverb ──
 # The reusable form of convolve_multiband: build once, then dhvani_conv_process
-# per block -- the reverb carries its tail across blocks and allocates nothing in
-# steady state. 0 for a multiband <= 0.
+# per block -- the reverb carries its tail across blocks, allocates nothing in
+# steady state, and delays its output by dhvani_conv_latency_frames (one block).
+# 0 for a multiband <= 0.
 #must_use
 fn dhvani_acoustics_convolution_from_multiband(multiband, mix) {
     if (multiband <= 0) { return 0; }
@@ -59,56 +60,22 @@ fn dhvani_acoustics_convolution_from_multiband(multiband, mix) {
 
 # ── Multiband convolution (OFFLINE) ──
 # Collapse the MultibandIr to a broadband IR, build a ConvolutionReverb, and
-# process the buffer in place. OFFLINE / one-shot: it builds a reverb (IR
-# partitions + per-channel delay line, megabytes for a long IR) on EVERY call,
-# which the bump allocator never reclaims, and each call starts with an empty tail.
-# For per-block use build one with dhvani_acoustics_convolution_from_multiband.
+# convolve the buffer in place, aligned with its input. OFFLINE / one-shot: it builds
+# a reverb (IR partitions + per-channel delay line, megabytes for a long IR) on EVERY
+# call, which the bump allocator never reclaims, and each call starts with an empty
+# tail. For per-block use build one with dhvani_acoustics_convolution_from_multiband
+# and stream it with dhvani_conv_process (one block of latency).
 #
-# The reverb only emits whole blocks, so the last frames % block_size frames of a
-# one-shot buffer used to come back RAW (neither dry-scaled nor wet-mixed; rust-old
-# has the same gap). The buffer is now run zero-padded to a whole number of blocks
-# and exactly its own frames are copied back: frames before the last partial block
-# are bit-identical to before, and the tail is convolved like the rest (causal --
-# the padding cannot reach an earlier frame). Returns DHVANI_ERR_NONE, or
-# DHVANI_ERR_INVALID_PARAMETER for a null buffer, a multiband <= 0, or a buffer
-# whose samples do not cover frames * channels.
+# It runs dhvani_conv_render: every frame is convolved, the last partial block
+# included, with no added latency. rust-old returned the last frames % 512 frames raw
+# (2.3.2 padded to whole blocks to fix that; 2.3.3's render does it for any length).
+# Returns DHVANI_ERR_NONE, or DHVANI_ERR_INVALID_PARAMETER for a null buffer, a
+# multiband <= 0, or a buffer whose samples do not cover frames * channels.
 fn dhvani_acoustics_convolve_multiband(buf, multiband, mix) {
     if (buf == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
     if (multiband <= 0) { return DHVANI_ERR_INVALID_PARAMETER; }
-    var ch = DhAudioBuffer_channels(buf);
-    var frames = DhAudioBuffer_frames(buf);
-    if (ch < 1) { return DHVANI_ERR_NONE; }
-    if (frames <= 0) { return DHVANI_ERR_NONE; }
-    var samples = DhAudioBuffer_samples(buf);
-    var n = frames * ch;
-    if (n > vec_len(samples)) { return DHVANI_ERR_INVALID_PARAMETER; }
     var reverb = dhvani_acoustics_convolution_from_multiband(multiband, mix);
-    var bs = DhConvolutionReverb_block_size(reverb);
-    var padded = ((frames + bs - 1) / bs) * bs;
-    if (padded == frames) {
-        dhvani_conv_process(reverb, buf);
-        return DHVANI_ERR_NONE;
-    }
-    var pv = dh_vec_zeros(padded * ch);
-    if (vec_len(pv) != padded * ch) { return DHVANI_ERR_INVALID_PARAMETER; }
-    var src = dh_vec_data(samples);
-    var dst = dh_vec_data(pv);
-    var end = src + n * 8;
-    var s = src;
-    var d = dst;
-    while (s < end) { store64(d, load64(s)); s = s + 8; d = d + 8; }
-    var tmp = dhvani_buffer_from_interleaved(pv, ch, DhAudioBuffer_sample_rate(buf));
-    if (tmp == 0) {
-        # the caller's buffer carries a rate from_interleaved rejects: run it as is
-        dhvani_conv_process(reverb, buf);
-        return DHVANI_ERR_NONE;
-    }
-    dhvani_conv_process(reverb, tmp);
-    s = dst;
-    d = src;
-    end = dst + n * 8;
-    while (s < end) { store64(d, load64(s)); s = s + 8; d = d + 8; }
-    return DHVANI_ERR_NONE;
+    return dhvani_conv_render(reverb, buf);
 }
 
 # ── FDN reverb over an AudioBuffer ──

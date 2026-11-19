@@ -49,8 +49,10 @@ at runtime from CPUID, so there is nothing to toggle (`simd.md`). Capture hot-pa
 - `Graph::compile()`: the topological sort and the node-table snapshot allocate
 - `dhvani_buffer_from_interleaved()` / `silence()` / `clone()` / `mix()` / `resample_*()`
 - The allocating forms of the MIDI clip queries and translators (use `_into`)
-- `dhvani_acoustics_convolve_multiband()`: builds a convolver per call (offline only;
-  keep one from `dhvani_acoustics_convolution_from_multiband()` for per-block use)
+- `dhvani_acoustics_convolve_multiband()` and `dhvani_conv_render()`: offline, aligned
+  (they allocate a padded copy, and the former builds a convolver per call). For
+  per-block use, keep one convolver and stream it with `dhvani_conv_process()`, which is
+  0 bytes per block and delays by `dhvani_conv_latency_frames()` (one block)
 - `dhvani_devices_list()`: enumerates endpoints via yukti (/dev/snd, /proc/asound, sysfs)
 
 Under the free-less bump allocator these never reclaim their memory, so keep

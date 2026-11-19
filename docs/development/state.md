@@ -9,7 +9,8 @@
 regressions in 2.3.2's new code (the biquad fast path's frame count, the resample default
 path's unchecked raw stores), 9 P-1s, about 30 P-2s and the parity P-3s. It also added
 allocation-free forms of every per-call-allocating RT path, and optimized loops that stay
-bit-identical (FFT 6.2×, graph cycle 4–9×, LRA 600×). Deliberate oracle divergences are in
+bit-identical (FFT 6.2×, graph cycle 4–9×, LRA 600×). Convolution now streams with one
+block of latency, so every frame is processed for any host block size. Deliberate oracle divergences are in
 `docs/decisions/005-hardening-divergences.md`. No dependency change.
 **2.3.2** — **SIMD kernels restored** and every dep on its newest tag, abaco included. The
 14 `src/simd.cyr` kernels run on Cyrius's packed verbs (`f64v_*` / `f64v256_*`), each
@@ -130,7 +131,7 @@ externalized from the dist like the Wave F siblings; stdlib gained only `hashmap
 (the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
 `tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
 suites, all green on 6.4.12** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
-**As of 2.3.3: 65 suites green on 6.7.18**: 2,603 assertions headless (the CI shape).
+**As of 2.3.3: 65 suites green on 6.7.18**: 2,612 assertions headless (the CI shape).
 Every new regression group fails on the 2.3.2 sources. **As of 2.3.2: 65 suites green on 6.7.18** — 1,759 assertions headless (the CI shape),
 1,760 with audio hardware (+23 simd, +4 biquad, +5 resample, +1 g2p). **As of 2.3.1: 65 suites green on 6.7.18** — 1,726 assertions headless, 1,727 with
 audio hardware. **As of 2.3.0: 65 suites green on 6.7.9** — 1,726 assertions headless (the CI
@@ -187,7 +188,7 @@ Per-module parity ledger + conventions: [`port-audit.md`](port-audit.md).
 
 One `tests/<module>.tcyr` per ported module, each Rust `#[test]` ported one-for-one
 (serde round-trip + Display tests dropped), plus the integration / dsp-reference /
-proptest / bundle suites and `tests/hw/device.tcyr` (self-gating). **65 suites, 2,603
+proptest / bundle suites and `tests/hw/device.tcyr` (self-gating). **65 suites, 2,612
 assertions headless at 2.3.3** (1,759 at 2.3.2). The oracle's five SIMD-vs-scalar
 tests, dropped while only the scalar path existed, are ported since 2.3.2.
 
@@ -202,7 +203,5 @@ I/O, 2.2.0 g2p, and 2.3.2 the SIMD kernels. What is left:
 - **Consumers:** none on the Cyrius bundle yet.
 - **SIMD, demand-gated:** `peak_abs` / `clamp` / `noise_gate` vectorize once Cyrius has
   packed min/max/compare verbs; today they are walked.
-- **Open decisions from the 2.3.3 sweep:**
-  - convolution `process` streaming timing: the oracle's, so a host block that is not a
-    multiple of 512 returns some frames dry. Fixing it needs one block of latency.
-  - the stdlib `simd_has_avx2` lacks an OSXSAVE/XCR0 check (upstream).
+- **Open from the 2.3.3 sweep:** the stdlib `simd_has_avx2` lacks an OSXSAVE/XCR0 check
+  (upstream). (Convolution streaming was decided: one block of latency, ADR 005.)

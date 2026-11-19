@@ -8,6 +8,11 @@
 # f32 samples stored as f64 slots (lossless for the tested values). serde +
 # Display + Clone dropped. IFFT via the conjugate trick, exactly as the oracle.
 #
+# LATENCY (2.3.3, docs/decisions/005): process() streams one block behind
+# (dhvani_conv_latency_frames = block_size), so every frame is processed for any host
+# block size; render() is the aligned offline form. The oracle has zero latency but
+# returns some frames raw whenever a call does not end on a block boundary.
+#
 # Memory (free-less bump allocator): every buffer is struct-owned and only grows.
 # - Partition accumulators: struct-owned, zeroed in place per block.
 # - Per-channel buffers (input block, overlap, frequency delay line): allocated
@@ -363,25 +368,35 @@ fn dhvani_conv_process_block(self, channel) {
     return 0;
 }
 
-# process(buf) -- convolution reverb in place. No-op if the IR is empty or the
-# buffer has no channels.
+# latency_frames() -- how far process() delays its output: one block (block_size
+# frames) once an IR is loaded, 0 for an empty IR (process is then a no-op). Report it
+# to the graph's latency compensation.
+#must_use
+fn dhvani_conv_latency_frames(self) {
+    if (vec_len(DhConvolutionReverb_ir_partitions(self)) == 0) { return 0; }
+    return DhConvolutionReverb_block_size(self);
+}
+
+# process(buf) -- convolution reverb in place, streaming with ONE BLOCK of latency.
+# No-op if the IR is empty or the buffer has no channels.
 #
-# OUTPUT TIMING (the oracle's, kept as-is -- zero added latency, block-granular):
-# input frames are collected into block_size blocks (write_pos carries across
-# calls). Only when a block COMPLETES inside this call is its output written, and
-# it is written back over that block's own frames: frame f gets
-# f*(1-mix) + wet*mix. So, with B = block_size:
-# - A buffer whose frame count is a multiple of B, called while write_pos == 0
-#   (every call, if every call is such a buffer), is fully processed.
-# - Frames of a block that completes in a LATER call are returned UNPROCESSED --
-#   raw input, not even scaled by 1-mix -- and when that later call completes the
-#   block, only the frames inside it are written; the wet output for the earlier
-#   call's frames is discarded. E.g. B = 512 with 256-frame host buffers: odd
-#   calls come back raw, even calls fully processed.
-# - A one-shot call leaves its last (frames % B) frames raw, and the IR tail past
-#   the end of the buffer is never emitted.
-# Nothing here aborts: the write-back skips frames that belong to an earlier call
-# (negative block_start), and `frames` is clamped to the sample storage.
+# OUTPUT TIMING (2.3.3). Output frame t is dry * x[t - B] + mix * wet[t - B], with
+# B = block_size, the dry path delayed with the wet one so they stay aligned. The
+# first B frames after construction, reset() or a channel-count change are silence.
+# Every frame of every call is processed, whatever the host block size, and how the
+# input is split into calls does not change a single bit of the output.
+# - The sample one block back is read from the input block's own slot, which still
+#   holds it until this block's sample overwrites it. Its wet output is the
+#   overlap's slot. At each block boundary the overlap is shifted first (dropping the
+#   frames just emitted), and only then is the new block's convolution added.
+# - The overlap therefore goes through the oracle's exact sequence of adds and
+#   shifts. For calls whose frame count is a multiple of B, the output is the
+#   oracle's, bit for bit, B frames later.
+# Through 2.3.2 the port kept the oracle's zero-latency timing. A block was written
+# back only into the call that completed it, so with a host block that is not a
+# multiple of B some frames came back raw (with 256-frame calls against B = 512,
+# every other call was dry), and a one-shot call left its last frames % B raw.
+# Nothing here aborts: `frames` is clamped to the sample storage.
 fn dhvani_conv_process(self, buf) {
     var ir_partitions = DhConvolutionReverb_ir_partitions(self);
     if (vec_len(ir_partitions) == 0) { return 0; }
@@ -409,62 +424,87 @@ fn dhvani_conv_process(self, buf) {
 
     var frame = 0;
     while (frame < frames) {
-        # Fill input block.
         var write_pos = DhConvolutionReverb_write_pos(self);
         var to_copy = dh_imin(block_size - write_pos, frames - frame);
 
+        # Emit the delayed frame and store the new one, per channel.
         var c0 = 0;
         while (c0 < ch) {
-            var dst = dh_vec_data(vec_get(input_buffers, c0)) + write_pos * 8;
-            var src = d + (frame * ch + c0) * 8;
-            var dend = dst + to_copy * 8;
-            while (dst < dend) { store64(dst, load64(src)); dst = dst + 8; src = src + stride; }
+            var ib = dh_vec_data(vec_get(input_buffers, c0)) + write_pos * 8;
+            var ov = dh_vec_data(vec_get(overlap, c0)) + write_pos * 8;
+            var sp = d + (frame * ch + c0) * 8;
+            var iend = ib + to_copy * 8;
+            while (ib < iend) {
+                var x = load64(sp);
+                store64(sp, f64_add(f64_mul(load64(ib), dry), f64_mul(load64(ov), mix)));
+                store64(ib, x);
+                ib = ib + 8;
+                ov = ov + 8;
+                sp = sp + stride;
+            }
             c0 = c0 + 1;
         }
         write_pos = write_pos + to_copy;
         DhConvolutionReverb_set_write_pos(self, write_pos);
 
-        # When the block is full, process it.
+        # A full block: retire the emitted overlap, then convolve the new block.
         if (write_pos >= block_size) {
             var cb = 0;
             while (cb < ch) {
+                var ovb = dh_vec_data(vec_get(overlap, cb));
+                var ti = 0;
+                while (ti < tail) { store64(ovb + ti, load64(ovb + bspan + ti)); ti = ti + 8; }
+                var tj = tail;
+                while (tj < fspan) { store64(ovb + tj, 0); tj = tj + 8; }
                 dhvani_conv_process_block(self, cb);
                 cb = cb + 1;
             }
             DhConvolutionReverb_set_fdl_pos(self, (DhConvolutionReverb_fdl_pos(self) + 1) % num_partitions);
             DhConvolutionReverb_set_write_pos(self, 0);
-
-            # Write output: overlap[0..block_size] is the just-completed block's
-            # output, aligned to that block's frames. block_start goes NEGATIVE
-            # when the block began in an earlier process() call (write_pos carries
-            # across calls); those frames are gone with that call's buffer, so the
-            # write starts at oi = -block_start (overlap[0..-block_start) is
-            # dropped). rust-old computes block_start in usize: release builds wrap,
-            # and its `src_idx < len` check then skips exactly the same frames.
-            var block_start = frame + to_copy - block_size;
-            var cw = 0;
-            while (cw < ch) {
-                var ov = dh_vec_data(vec_get(overlap, cw));
-                var oi = 0;
-                if (block_start < 0) { oi = 0 - block_start; }
-                while (oi < block_size) {
-                    var src_idx = (block_start + oi) * ch + cw;
-                    if (src_idx < samples_len) {
-                        var sp = d + src_idx * 8;
-                        store64(sp, f64_add(f64_mul(load64(sp), dry), f64_mul(load64(ov + oi * 8), mix)));
-                    }
-                    oi = oi + 1;
-                }
-                # Shift overlap: move tail forward, zero the vacated end.
-                var ti = 0;
-                while (ti < tail) { store64(ov + ti, load64(ov + bspan + ti)); ti = ti + 8; }
-                var tj = tail;
-                while (tj < fspan) { store64(ov + tj, 0); tj = tj + 8; }
-                cw = cw + 1;
-            }
         }
 
         frame = frame + to_copy;
     }
     return 0;
+}
+
+# render(buf) -- OFFLINE, latency-compensated: reset, then convolve `buf` as a whole
+# signal so its output is aligned with its input (frame t = dry * x[t] + mix * wet[t]
+# for every frame, the last partial block included). It runs a copy padded with one
+# block of trailing zeros through process() and copies frames [B, B + frames) back.
+# The IR tail past the end of `buf` is not emitted. Allocates the padded copy per
+# call: not for the RT path (use process() there and compensate its latency). Returns
+# DHVANI_ERR_NONE, or DHVANI_ERR_INVALID_PARAMETER for a buffer whose samples do not
+# cover frames * channels or whose padded copy cannot be allocated.
+fn dhvani_conv_render(self, buf) {
+    if (vec_len(DhConvolutionReverb_ir_partitions(self)) == 0) { return DHVANI_ERR_NONE; }
+    var ch = DhAudioBuffer_channels(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    if (ch < 1) { return DHVANI_ERR_NONE; }
+    if (frames <= 0) { return DHVANI_ERR_NONE; }
+    var samples = DhAudioBuffer_samples(buf);
+    var n = frames * ch;
+    if (n > vec_len(samples)) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var lat = DhConvolutionReverb_block_size(self);
+    var total = (frames + lat) * ch;
+    var pv = dh_vec_zeros(total);
+    if (vec_len(pv) != total) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var src = dh_vec_data(samples);
+    var dst = dh_vec_data(pv);
+    var end = src + n * 8;
+    var s = src;
+    var t = dst;
+    while (s < end) { store64(t, load64(s)); s = s + 8; t = t + 8; }
+    var tmp = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(tmp, pv);
+    DhAudioBuffer_set_channels(tmp, ch);
+    DhAudioBuffer_set_sample_rate(tmp, DhAudioBuffer_sample_rate(buf));
+    DhAudioBuffer_set_frames(tmp, frames + lat);
+    dhvani_conv_reset(self);
+    dhvani_conv_process(self, tmp);
+    s = dst + lat * ch * 8;
+    t = src;
+    end = s + n * 8;
+    while (s < end) { store64(t, load64(s)); s = s + 8; t = t + 8; }
+    return DHVANI_ERR_NONE;
 }

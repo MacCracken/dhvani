@@ -146,7 +146,7 @@ kept reference implementations or golden checksums.
 |----------|------:|------:|--------:|
 | `pan_process`, stereo 512 | 10.66 µs | **1.57 µs** | 6.8× |
 | `noise_reducer_process`, stereo 4096 | 24.0 ms | **3.94 ms** | 6.1× |
-| `conv_process`, 4096-tap IR, stereo 512 | 3.03 ms | **558 µs** | 5.4× |
+| `conv_process`, 4096-tap IR, stereo 512 | 3.03 ms | **547 µs** | 5.5× (the one-block-latency stream; the zero-latency form measured 558 µs) |
 | `reverb_process`, stereo 512 | 178.6 µs | **67.4 µs** | 2.7× |
 | `delay_process`, stereo 512 | 39.2 µs | **15.6 µs** | 2.5× |
 | `svf_process` (lowpass), stereo 512 | 33.5 µs | **15.0 µs** | 2.2× |

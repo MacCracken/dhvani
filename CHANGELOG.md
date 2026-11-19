@@ -186,6 +186,8 @@ golden checksums:
     `dhvani_player_push_from` (resume a partial push by frame), `dhvani_*_render_into`
     for the synthesis, sampler, voice, environment and mechanical bridges;
   - `dhvani_acoustics_convolution_from_multiband`, a reusable convolver for per-block use.
+- **Convolution:** `dhvani_conv_latency_frames` and `dhvani_conv_render` (the
+  latency-compensated offline form).
 - **Helpers:**
   - `dhvani_biquad_design_into`;
   - `dh_in_range`, `dh_fmod1` and `dh_min_ignore_nan` (error / simd);
@@ -199,7 +201,18 @@ golden checksums:
 ### Verified
 
 - `cyrius distlib` → `cyrius test` with `/dev/snd` hidden, the way CI runs: **65 suites,
-  2,603 assertions, 0 failed** (2.3.2: 1,759).
+  2,612 assertions, 0 failed** (2.3.2: 1,759).
+- **Convolution streaming:**
+  - With aligned calls, the output hashes identically to 2.3.2's output read one block
+    later.
+  - `tests/convolution.tcyr` checks:
+    - the exact one-block latency;
+    - full processing of 256-frame calls;
+    - bit-identical output across four ways of splitting a stereo signal;
+    - agreement within 1e-9 with a direct time-domain convolution;
+    - `render`'s alignment.
+  - Mutation-checked: an undelayed dry path fails 2 groups. Convolving before retiring
+    the emitted overlap (the oracle's order under the new timing) fails 5.
 - Every new regression group fails on the 2.3.2 sources, each in the way it should. That
   includes the resample SIGSEGV, the dither and moddelay aborts and the allocation counts.
   It was checked by running the new tests against a snapshot of the tagged tree, and each
@@ -209,7 +222,7 @@ golden checksums:
   `integration_advanced`, `proptest`) still carry their earlier lint warnings.
 - No name added to `src/` collides with the 19 bundles in `lib/`. One internal function
   was removed (`dh_midi_event_alloc`, no callers).
-- `dist/dhvani.cyr` regenerated: 12,682 lines. distlib still names `is_err` on
+- `dist/dhvani.cyr` regenerated: 12,689 lines. distlib still names `is_err` on
   x86_64-windows only (see 2.2.7).
 - **Benchmarks:** 2.3.2 against 2.3.3, interleaved twice, in `BENCHMARKS.md`.
   - pan 7.0×, noise reduction 6.2×, convolution 5.5×, FFT 4.2×, reverb 2.7×, waveform
@@ -217,6 +230,22 @@ golden checksums:
   - The 2.3.2 kernels and per-sample paths are within ±3 %.
 
 ### Changed — API (behaviour visible to callers)
+
+- **Convolution reverb `process` streams with one block of latency** (ADR 005; user
+  decision).
+  - Before, the oracle's zero-latency timing wrote a block only into the call that
+    completed it. So a host block that was not a multiple of 512 returned some frames
+    dry: with 256-frame calls, every other call was dry.
+  - Now output frame t is `dry * x[t - B] + mix * wet[t - B]`, with B = `block_size`
+    (512 by default). The first block after construction, `reset()` or a channel-count
+    change is silence.
+  - Every frame is processed for any host block size, and the output is bit-identical
+    however the input is split into calls.
+  - For aligned calls the output is 2.3.2's, bit for bit, one block later.
+  - Report `dhvani_conv_latency_frames(self)` to latency compensation. Use
+    `dhvani_conv_render(self, buf)` for an aligned offline result.
+  - `dhvani_acoustics_convolve_multiband` now runs `render`, which convolves every frame
+    of any length.
 
 - `dhvani_meter_level_new(channels, sample_rate)` takes an integer rate.
 - `dhvani_swap_handle_swap` returns an error code.
@@ -236,13 +265,6 @@ golden checksums:
 
 ### Known
 
-- **Convolution `process` keeps the oracle's streaming timing.**
-  - Output is written only when a 512-frame block completes, and only into the current
-    call's buffer.
-  - So a host block that is not a multiple of 512 returns some frames dry. The pattern
-    repeats at the buffer rate: with 256-frame calls, every other call is dry.
-  - The fix is to stream with one block of latency, which callers would see. It is left
-    as a decision. The one-shot `acoustics_convolve_multiband` is fixed.
 - **`simd_has_avx2()`** (stdlib `lib/simd.cyr`) reads CPUID.7.EBX[5] only. It does not
   check OSXSAVE/XCR0 or the maximum CPUID leaf. A hypervisor that hides YMM state but
   reports AVX2 would SIGILL in dhvani's 256-bit path on rows of 64 or more. This is an

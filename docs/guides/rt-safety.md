@@ -18,6 +18,7 @@ Cyrius runs a **free-less bump allocator**: an allocation is never reclaimed, so
 | `EnvelopeLimiter` | `dsp::limiter` | `process()` — fixed state |
 | `DelayLine` | `dsp::delay` | `process()` — pre-allocated ring buffer |
 | `Reverb` | `dsp::reverb` | `process()` — pre-allocated delay lines |
+| `ConvolutionReverb` | `dsp::convolution` | `process()`: struct-owned buffers, 0 bytes per block. It streams with one block of latency (`dhvani_conv_latency_frames`), so report it to compensation |
 | `StereoPanner` | `dsp::pan` | `process()` — stateless |
 | `Envelope` | `dsp::envelope` | `tick()` — pure arithmetic |
 | `Lfo` | `dsp::lfo` | `tick()` — pure arithmetic |

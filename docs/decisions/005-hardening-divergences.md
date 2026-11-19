@@ -144,13 +144,25 @@ the CHANGELOG `[2.3.3]` section.
 - **Level meter:** `dhvani_meter_level_new` takes an integer sample rate, like every
   other constructor, and refuses a window under one frame or a rate past 768 kHz.
 
-### Not changed (parity kept, documented)
+### Convolution streams with one block of latency (user decision, 2026-11-18)
 
-- **Convolution `process`** keeps the oracle's streaming timing. Output is written only
-  when a 512-frame block completes, and only into the current call's buffer. So a host
-  block that is not a multiple of the convolution block returns some frames raw. Fixing
-  that needs a block of latency, which is an API-visible change left for a decision
-  (CHANGELOG *Known*).
+- **The oracle's timing.** It writes a block's output only when that block completes,
+  and only into the call that completed it. With zero latency this is correct only when
+  every call ends on a block boundary. Otherwise some frames come back raw: with
+  256-frame calls against the 512-frame block, every other call was dry.
+- **`dhvani_conv_process` now streams one block behind.** Output frame t is
+  `dry * x[t - B] + mix * wet[t - B]`. The dry path is delayed with the wet one so the
+  two stay aligned, and the first block after construction or `reset()` is silence.
+  - Every frame is processed for any host block size, and how the input is split into
+    calls does not change a bit.
+  - For calls that do end on block boundaries, the output is the oracle's, bit for bit,
+    one block later.
+- **The latency is reported** by `dhvani_conv_latency_frames` (`block_size`, or 0 for an
+  empty IR), for the graph's latency compensation.
+- **`dhvani_conv_render`** is the aligned, offline form. `acoustics_convolve_multiband`
+  uses it.
+
+### Not changed (parity kept, documented)
 - **Translate upscaling** stays bit replication, not the MIDI 2.0 min-center-max rule.
   The pitch-bend centre (8192) therefore does not map to `0x80000000`.
 - **clamp / noise_gate** pass NaN through, as the oracle's scalar and NEON paths do. Its
@@ -169,7 +181,8 @@ the CHANGELOG `[2.3.3]` section.
   - The non-finite guards cost a compare per sample in a few loops, or per block in the
     filters.
 - **Neutral:**
-  - The convolution streaming question stays open as a user decision.
+  - Convolution consumers now see one block (512 frames, about 11.6 ms at 44.1 kHz) of
+    latency, and must compensate for it like any other latent node.
   - min-center-max scaling is a candidate for a later ADR.
 
 ## Alternatives considered
