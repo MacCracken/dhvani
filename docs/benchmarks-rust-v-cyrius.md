@@ -4,42 +4,45 @@
 >
 > - **Rust**: criterion 0.8, `cargo bench --release`, run 2026-07-05 on `rust-old/`
 >   (dhvani 1.1.0, abaco 1.1.0). f32 samples, autovectorized (AVX2).
-> - **Cyrius**: cc 6.4.5, `cyrius bench` (`tests/bench_compare.bcyr`), run 2026-07-05
->   against `abaco + dist/dhvani.cyr`. f64 samples, **scalar fallbacks only** (the
->   x86/aarch64 SIMD arms are platform-blocked — an accepted regression until Cyrius
->   has a SIMD story; dhvani is the ecosystem's SIMD owner).
+> - **Cyrius 2.0.0**: cc 6.4.5, `cyrius bench` (`tests/bench_compare.bcyr`), run
+>   2026-07-05 against `abaco + dist/dhvani.cyr`. f64 samples, **scalar fallbacks only**
+>   (the x86/aarch64 SIMD arms were platform-blocked).
+> - **Cyrius 2.3.2**: cc 6.7.18, same bench, run 2026-11-18. The buffer kernels run on
+>   Cyrius's packed verbs (`f64v_*` / `f64v256_*`, AVX2 here), and the stereo biquad takes
+>   the oracle's fast path. That session ran ~25 % slow (see `BENCHMARKS.md`), so the
+>   2.3.2 column is if anything pessimistic.
 > - **Platform**: x86_64 Linux. Inputs: 1 s @ 44100 (`stereo_1s` = 88200 samples;
 >   `mono_1s` = 44100), 4096-point mono FFT.
 
 The port trades speed for correctness and portability: everything is f64 (the
-hisab/ganita math is f64-only) and scalar, on a young toolchain. The numbers below
-are the honest cost of that, and the baseline every future optimization measures
-against.
+hisab/ganita math is f64-only), on a young toolchain, and through 2.3.1 everything was
+scalar too. The 2.0.0 column is the honest cost of that, and the 2.3.2 column is what
+restoring the SIMD kernels bought back.
 
 ## Head-to-Head (same operation, same size)
 
-| Operation (stereo_1s unless noted) | Rust | Cyrius | Ratio | Why |
-|-----------|-----:|-------:|------:|------|
-| **SIMD kernels** | | | | |
-| `apply_gain` | 4.86 µs | 865 µs | **178×** | f32 AVX2 vs f64 scalar + per-element `vec` access |
-| `peak_abs` | 2.76 µs | 694 µs | **251×** | pure reduction — best case for SIMD, worst ratio |
-| **DSP (per-sample)** | | | | |
-| `biquad_lp` | 124 µs | 4.21 ms | 34× | Direct-Form-II per sample; some Rust vectorization |
-| `compressor` | 884 µs | 5.43 ms | **6.1×** | envelope math per sample — doesn't vectorize, so f32 gains little |
-| `limiter` | 558 µs | 3.44 ms | **6.2×** | peak-hold + release per sample; same story |
-| **Analysis** | | | | |
-| `fft` (4096) | 347 µs | 3.25 ms | 9.4× | scalar radix-2 Cooley-Tukey |
-| `measure_r128` | 414 µs | 12.5 ms | 30× | K-weighting biquads + block RMS |
-| `dynamics` (mono_1s) | 357 µs | 5.68 ms | 16× | crest/true-peak (cubic interp) |
+| Operation (stereo_1s unless noted) | Rust | Cyrius 2.0.0 | ratio | Cyrius 2.3.2 | ratio | Why (2.3.2) |
+|-----------|-----:|-------:|------:|-------:|------:|------|
+| **SIMD kernels** | | | | | | |
+| `apply_gain` | 4.86 µs | 865 µs | 178× | **16.3 µs** | **3.4×** | packed scale, 4 f64 lanes vs Rust's 8 f32 |
+| `peak_abs` | 2.76 µs | 694 µs | 251× | **173 µs** | **63×** | walked: Cyrius has no packed max/compare verb |
+| **DSP (per-sample)** | | | | | | |
+| `biquad_lp` | 124 µs | 4.21 ms | 34× | **669 µs** | **5.4×** | the oracle's stereo fast path: L/R in one 2-lane vector |
+| `compressor` | 884 µs | 5.43 ms | 6.1× | 6.57 ms | 7.4× | envelope math per sample; unchanged code, slow session |
+| `limiter` | 558 µs | 3.44 ms | 6.2× | 4.77 ms | 8.5× | same story |
+| **Analysis** | | | | | | |
+| `fft` (4096) | 347 µs | 3.25 ms | 9.4× | 3.17 ms | 9.1× | scalar radix-2 Cooley-Tukey, unchanged |
+| `measure_r128` | 414 µs | 12.5 ms | 30× | **4.87 ms** | **11.8×** | K-weighting biquads now take the stereo fast path |
+| `dynamics` (mono_1s) | 357 µs | 5.68 ms | 16× | 4.60 ms | 13× | crest/true-peak (cubic interp), unchanged |
 
-**Takeaways.** The gap is widest exactly where Rust's f32 autovectorization wins
-most — flat SIMD reductions (`peak`, `gain`) run 180–250× faster in Rust. It
-narrows sharply for per-sample DSP whose inner loop is branchy envelope/gain math
-that doesn't vectorize: the compressor and limiter are only ~6× off, i.e. Cyrius is
-already competitive there. Restoring the SIMD kernels (when Cyrius gains SIMD
-intrinsics) would close most of the top rows; a real-FFT / split-radix would help
-the analysis rows. Correctness parity is exact (1625 assertions); this is purely
-the throughput cost of scalar-f64-on-a-young-toolchain.
+**Takeaways.** At 2.0.0 the gap was widest where Rust's f32 SIMD wins most: the flat
+reductions (`peak`, `gain`) ran 180–250× faster in Rust. 2.3.2's packed kernels close most
+of it. `apply_gain` is 3.4× off, about what 4 f64 lanes against 8 f32 lanes predicts.
+`peak_abs` is still 63× off, because Cyrius has no packed max/compare verb, so it is a
+tight scalar walk. The stereo biquad went from 34× to 5.4× off, and R128 from 30× to 12×
+through its K-weighting. The compressor and limiter were already within ~6× and do not
+vectorize. The analysis rows want a real-FFT / split-radix, not lanes. Correctness parity
+is unchanged: every element-wise kernel is bit-identical to its scalar form.
 
 ## Full Rust benchmark set (2026-07-05)
 

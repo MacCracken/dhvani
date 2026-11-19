@@ -1,21 +1,31 @@
 # ADR 002: SIMD via std::arch Intrinsics
 
 ## Status
-**Superseded / blocked** (2026-07, Cyrius port) — the `std::arch` decision is
-Rust-only; the Cyrius port ships **scalar kernels only**. See below. The
-historical Rust-era decision is kept below as a record.
+**Superseded** (2026-07, Cyrius port). The `std::arch` decision is Rust-only. From 2.0.0
+to 2.3.1 the port shipped **scalar kernels only**. Since 2.3.2 the accelerated arms are
+back, on Cyrius's packed verbs. The historical Rust-era decision is kept below as a
+record.
 
-## Superseded / blocked (Cyrius port)
+## Cyrius port
 
-`std::arch` intrinsics, `#[target_feature]`, and `is_x86_feature_detected!` are
-Rust-specific and have no Cyrius equivalent, so this decision does not carry over.
-The Cyrius port ports **only the scalar fallback path** — the SSE2/AVX2 (`x86.rs`)
-and NEON (`aarch64.rs`) arms are dropped as **platform-blocked** until Cyrius has
-a SIMD story. The scalar kernels live in `src/simd.cyr` (f64 throughout,
-alloc-free/in-place). This is the source of the known Rust-vs-Cyrius throughput
-gap; a future Cyrius SIMD facility could restore the vectorized path. There are no
-Cargo features in Cyrius, so the `simd` feature flag is gone (scalar is the only
-path).
+`std::arch` intrinsics, `#[target_feature]` and `is_x86_feature_detected!` are
+Rust-specific, so this decision does not carry over as written. Its *shape* does.
+
+- **2.0.0 – 2.3.1: blocked.** Cyrius had no vector facility, so only the scalar fallback
+  path was ported. The SSE2/AVX2 (`x86.rs`) and NEON (`aarch64.rs`) arms were dropped as
+  platform-blocked. That was the Rust-vs-Cyrius throughput gap.
+- **2.3.2: restored on the compiler's flat-array packed verbs.** `f64v_*` gives 2 f64 lanes
+  (SSE2 on x86, NEON on aarch64, per-lane loops on cx) and `f64v256_*` gives 4 (AVX2). They
+  play the part `std::arch` played:
+  - **runtime detection** is the stdlib's `simd_has_avx2()` CPUID probe, cached, in place of
+    `is_x86_feature_detected!("avx2")`;
+  - **the scalar fallback** is kept beside each accelerated kernel as `<k>_scalar`, as in the
+    oracle, and is the parity oracle;
+  - **no `unsafe`**, since the verbs are builtins. Their one hazard is that they have no
+    scalar tail. Every call goes through row helpers that finish an odd last element in
+    scalar code (see `docs/guides/simd.md`).
+- There are still no Cargo features, so the `simd` flag is gone. The accelerated path is
+  the only build, and its oracle is the `_scalar` form.
 
 ---
 

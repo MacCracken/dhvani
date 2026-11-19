@@ -5,6 +5,241 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2] — SIMD kernels restored, and the newest dependency tags with nothing held back
+
+Toolchain `cyrius` stays **6.7.18** (still the newest). Two changes:
+
+- **The SIMD arms are back.** `src/simd.cyr`'s 14 kernels run on Cyrius's packed verbs.
+  The oracle's two callers that ran their `not(simd)` code are back on its default path.
+- **Every dependency is on its newest tag.** abaco's 2.3.1 hold lifts, because naad renamed
+  the clashing name. The goonj / yukti `DH_SIZE` heap overrun is closed upstream.
+
+### Added — SIMD acceleration (the roadmap's "SIMD re-acceleration")
+
+The oracle accelerated these kernels with `std::arch` (SSE2/AVX2, NEON) and kept scalar
+fallbacks beside them. Through 2.3.1 the port had only the fallbacks: Cyrius had no vector
+facility. It now has flat-array packed verbs, `f64v_*` (2 f64 lanes: SSE2 / NEON / cx loops)
+and `f64v256_*` (4 lanes, AVX2), which abaco and goonj already use.
+
+- **Two forms per kernel, as in the oracle.** `dhvani_simd_<k>` is the accelerated kernel.
+  `dhvani_simd_<k>_scalar` is the fallback (`rust-old` `<k>_scalar`), kept as its parity
+  oracle. The scalar bodies are the 2.3.1 kernels unchanged.
+- **Packed:** `add_buffers` and `apply_gain` (256-bit from 64 elements on an AVX2 CPU,
+  chosen by CPUID through the stdlib's `simd_has_avx2`, else 128-bit), `sum_of_squares` and
+  `weighted_sum` (128-bit dot), and `biquad_stereo` (an interleaved L/R frame is one 2-lane
+  vector).
+- **Walked:** `peak_abs`, `clamp`, `noise_gate` and the six PCM conversions. There is no
+  packed min/max, compare or convert verb, so these stay scalar, but over the vec's element
+  storage instead of a `vec_get`/`vec_set` call (two bounds checks) per element. `peak_abs`
+  and the clamps test inline, in `dh_max_ignore_nan`'s and `f64_clamp`'s order, so the bits
+  are the same.
+- **No tail overrun.** The packed verbs step 2 or 4 lanes with no scalar tail: an odd `n`
+  writes one element past `dst` (abaco shipped that heap overrun through 2.4.8). Every call
+  goes through the new `dh_simd_row_add` / `_scale` / `_dot` / `_sum` helpers. They run the
+  256-bit prefix, then the 128-bit middle, then the odd element in scalar code.
+- **`dhvani_biquad_process` takes the oracle's stereo fast path again**
+  (`rust-old/src/dsp/biquad.rs:233`). A 2-channel buffer with `|mix - 1| < f32::EPSILON`
+  runs through `dh_simd_biquad_stereo_raw`, which reads the filter's own `DhBiquadCoeffs`
+  and two `DhBiquadState`s in place, so no vec is built. As in the oracle, the output is
+  pure wet, where the dry/wet loop would add `input * (1 - mix)`.
+- **`dhvani_resample_sinc` takes the oracle's default path again** (`simd` is a default
+  feature in `rust-old/Cargo.toml`). Each output frame's kernel weights are computed once
+  and shared by every channel, and each channel's taps are gathered into one row for the
+  packed weighted sum. Through 2.3.1 the port ran the `not(simd)` loop under this name: it
+  recomputed the windowed sinc for every channel and treated `|weight sum| <= 1e-10` as
+  silence. That loop is kept as **`dhvani_resample_sinc_scalar`**. The default path's
+  threshold is the oracle's 1e-6.
+- `cyrius.cyml` declares the stdlib **`simd`** leaf. goonj already pulled it in, but dhvani
+  now calls it itself. **A consumer of `dist/dhvani.cyr` needs `simd` in its own stdlib
+  list.** The packed verbs are compiler builtins and need nothing.
+
+**Parity.**
+
+- Every element-wise kernel is **bit-identical** to its `_scalar` form, on both lane widths.
+  This includes the stereo biquad, which keeps mul then add and never fuses.
+- The two reductions add in lane order (two partial sums, then their total), as the oracle's
+  SSE2 arm did. They therefore differ from the left-to-right scalar sum in the last bits;
+  the oracle tolerates 1e-3 / 1e-2. They use only the 128-bit kernel, so the answer does not
+  depend on whether the CPU has AVX2.
+
+**Throughput** (512-sample block, x86_64 with AVX2, against 2.3.1's kernels on the same deps;
+`BENCHMARKS.md`):
+
+| kernel | speedup | kernel | speedup |
+|---|---:|---|---:|
+| `apply_gain` | 61× | `i16_to_f32` | 5.0× |
+| `add_buffers` | 58× | `clamp` | 4.4× |
+| `sum_of_squares` | 14.7× | `biquad_stereo` (256 frames) | 4.3× |
+| `weighted_sum` | 12.7× | stereo `biquad_process` (256 frames) | 3.8× |
+| `peak_abs` | 5.7× | `f32_to_i16` | 2.8× |
+| | | `noise_gate` | 2.6× |
+
+Per second of stereo audio: gain 54×, peak 5.9×, biquad lowpass 3.85×, and EBU R128 1.82×
+(its K-weighting runs the stereo fast path). The compressor, limiter, dynamics, FFT and
+per-sample paths do not touch the kernels and are flat. Against the Rust oracle,
+`apply_gain` went from 178× slower to 3.4×, and the stereo biquad from 34× to 5.4×
+(`docs/benchmarks-rust-v-cyrius.md`).
+
+### Dependencies
+
+| dep | was | now |
+|---|---|---|
+| abaco | 2.7.0 | **2.8.0** (the 2.3.1 hold lifts; see below) |
+| hisab | 3.4.1 | **3.5.0** |
+| goonj | 2.3.1 | **2.3.2** |
+| naad | 2.3.3 | **2.3.5** |
+| shravan | 2.9.3 | **2.12.6** |
+| svara | 3.6.3 | **3.14.0** |
+| nidhi | 2.2.1 | **2.3.0** |
+| ghurni | 2.7.2 | **2.8.0** |
+| garjan | 2.6.3 | **2.8.0** |
+| prani | 2.1.1 | **2.3.3** |
+| varna | 2.5.2 | **2.6.0** |
+| shabdakosh | 3.1.1 | **3.2.0** |
+| shabda | 3.1.1 | **3.2.0** |
+| sakshi, sankoch, patra, yukti, vani | 2.5.10, 2.8.9, 1.16.6, 2.3.18, 1.2.10 | unchanged (already newest, and equal to the 6.7.18 snapshot) |
+
+The newest tags' manifests agree with each other. The one exception is nidhi 2.3.0, which
+pins shravan 2.12.4; the resolver keeps the root's 2.12.6 and notes it. `abaco 2026.3.18` is
+the pre-port Rust CalVer tag and has no `cyrius.cyml`.
+
+### Fixed upstream — two collisions close, and the 2.3.1 hold lifts
+
+- **`DH_SIZE` heap overrun (open since 2.2.7).** goonj and yukti both defined `DH_SIZE`, and
+  yukti's 24 won in every dhvani unit, so goonj's `generate_dhvani_ir` (reached by
+  `dhvani_acoustics_generate_ir`) reserved 24 bytes and wrote 88. goonj 2.3.2 renamed its
+  family `DHVANI_IR_*`, and the constructor now reserves 88.
+- **abaco 2.8.0.** naad 2.3.4 renamed its `power_spectrum(x)` to `naad_power_spectrum`, so
+  abaco's `power_spectrum(re, im, out, n)` no longer collides, and shravan 2.9.4 renamed its
+  `_fft_pow2`. abaco 2.8.0's new FFT names (`fft`, `ifft`, `rfft`, `irfft`, `stft_frame`,
+  `magnitude_spectrum`, `bin_frequency`, `fft_twiddles`) collide with nothing. dhvani calls
+  none of them.
+- **Duplicate-symbol warnings: 11 → 1.** Besides `DH_SIZE`, garjan 2.8.0 dropped its nine
+  `DcBlocker_*` accessors (prani's remain). Only `detect_format` (sankoch · shravan) is
+  left, as before.
+
+### Audit
+
+- **Resolved from an empty `lib/`** in a scratch copy. Exactly the 13 bumped bundles
+  changed and no file entered or left the footprint. `cyrius.lock` was regenerated: 77 files,
+  19 commit pins (one per dep plus bayan), `cyrius deps --verify` 77/77, identical to the
+  clean resolve.
+- **Removed names.** 158 top-level names and enum members left a bundle: shabda 43,
+  shravan 31, hisab 29, nidhi 18, shabdakosh 17, goonj 13, svara 3, garjan 2, naad 1,
+  prani 1.
+  - Five of them are still defined by another bundle, because each was one side of a
+    collision. Four are the ones closed above: `DH_SIZE` (yukti keeps it), `DcBlocker`
+    (prani), `_fft_pow2` and `power_spectrum` (abaco). The fifth is `LogLevel`, an enum
+    *type* name goonj shared with sakshi (members `LOG_*` against `SK_*`), which never
+    warned. goonj 2.3.2 dropped its copy.
+  - The other 153 are gone from the unit. dhvani's `src/`, `tests/` and `scripts/` name none
+    of them, and every remaining mention in any bundle is a comment, so nothing can rebind
+    to a builtin.
+- **Changed bodies among the 76 upstream functions dhvani calls:** prani
+  `crvoice_vocalize{,_with_intent}`, goonj `generate_dhvani_ir` (the `DH_SIZE` fix), ghurni
+  `ghurni_engine_synthesize`, hisab `hvec3_new` (now through `hisab_alloc`), `shabda_convert`,
+  and svara's glottal source, tract, phoneme and sequence renderers. See *Upstream* below.
+
+### Upstream — output that changes under dhvani's feature layers
+
+dhvani's own DSP is unaffected. abaco 2.8.0 reports no change for the eight helpers dhvani
+calls (its differential moved only `stddev` NaN bits), and naad 2.3.4 / 2.3.5 are
+byte-identical on valid input. garjan 2.7.0 / 2.8.0 reproduce all 21 audio hashes, and hisab
+3.5.0 changes only degenerate-input answers, with goonj reporting dhvani's rt60 and
+occlusion hashes unchanged. The wrapped engines change on purpose:
+
+- **voice_synth (svara 3.6.3 → 3.14.0)**, the largest:
+  - 3.9.0: spectral tilt is Klatt TL in dB at 3 kHz (a tilt above 0 had muted ~33 dB).
+  - 3.10.0: each vowel's tilt is applied in `svara_phoneme_synthesize` / `svara_sequence_render`.
+  - 3.11.0: the Rosenberg pulse gains its closing phase and a ×7.13 gain (+17 dB, darker).
+  - 3.12.0: formant retargets keep resonator state, which changes diphthongs.
+  - 3.13.0: event tone is voiced.
+- **creature (prani 2.1.1 → 2.3.3)**:
+  - 2.1.2 re-solves its gain for svara's new pulse.
+  - 2.3.2 removes the sample-rate dependence of render level.
+  - 2.3.3 renders formants at their specified width (283 of 404 renders move, −3.0 to +8.4 dB).
+  - Renders can now fail with negative codes (alloc refusal, pitch at Nyquist).
+    `dhvani_creature_render_*` already maps a negative `PRANI_ERR_*` to its null sentinel.
+    prani's constructors, which a consumer calls directly, can now return negative codes
+    too.
+- **mechanical (ghurni 2.8.0)**: phase is integrated, so audio differs wherever a speed or
+  rate changes and is byte-identical at a speed held from the first sample. A misfire now
+  silences the whole firing.
+- **sampler (nidhi 2.2.2)**:
+  - filtered voices are tracked from the first frame;
+  - pitch is scaled by `sample_rate / engine_rate`;
+  - polyphony and round-robin are fixed, and the chorus and reverb slots get their own
+    parameters.
+- **g2p (shabda 3.1.1 → 3.2.0, shabdakosh 3.2.0, varna 2.6.0)**:
+  - 3.1.2: IY is /iː/.
+  - 3.1.3: new English letter-to-sound and stress rules, per-language syllabification,
+    letter-name acronyms, the heteronym fix and a 400 ms default SSML break.
+  - 3.2.0: dictionary words take CMUdict stress.
+  - varna 2.6.0 drops and respells some non-English phonemes.
+- **acoustics (goonj 2.3.2)**: the `DH_SIZE` fix above. Its grid solvers moved to f32, but
+  dhvani does not call them.
+
+dhvani's ports of the oracle's feature-layer tests check shape and sanity (non-empty,
+finite, in range), not golden samples, so all of them still pass.
+
+### Changed — tests
+
+- **`tests/g2p.tcyr`: the two heteronym tests assert the rule, not the oracle's numbers.** The
+  oracle asserts `select_variant(read, ["the", "book"]) == 0` and `(..., ["want", "to"]) == 1`.
+  Those indices held only while shabda assumed every rule's default pronunciation comes first.
+  shabdakosh lists `read` as [/riːd/, /rɛd/], so through shabda 3.1.2 "I will read" said
+  /rɛd/. shabda 3.1.3 fixed seven such rules, and `read`'s default is now index 1, so both
+  asserts failed on the bump. They now compare against the rule's own `default_variant` /
+  `context_variant`, which is what the oracle means, plus one new assert that the two
+  differ, so the check cannot pass vacuously.
+- **`tests/simd.tcyr`: 36 → 59 assertions.**
+  - The oracle's five SIMD-vs-scalar tests (`simd_scalar_parity`, `i24_parity`,
+    `u8_parity`, `biquad_stereo_parity`, `various_buffer_sizes`) were dropped through 2.3.1,
+    when they compared the scalar path with itself. They are ported now, with the oracle's
+    tolerances.
+  - New: a sweep of every kernel at sizes 0–20, 63–67, 511–513 and 1025, with NaN / ±Inf /
+    −0.0 inputs. It checks for exact `_scalar` bits and for no write past `vec_len` (six
+    canary slots inside capacity), on the widest path and forced onto 128-bit lanes.
+  - New: an `alloc_used()` check that one call of every kernel allocates 0 bytes.
+- **`tests/biquad.tcyr`** `stereo_fast_path`: two blocks bit-identical to a twin filter's
+  per-channel `process_sample`, 0 bytes allocated, and `mix = 0.5` still on the dry/wet loop.
+- **`tests/resample.tcyr`** `default_path_matches_scalar_path`: the two paths agree within
+  1e-12, up and down (down scales the kernel), at all three qualities, mono and stereo.
+- Mutation-checked: an odd-tail overrun, a swapped biquad coefficient and a channel-swapped
+  resampler gather each fail their groups. The biquad mutant also proves the fast path is
+  the one running, since at full wet the dry/wet loop gives the same bits.
+- **Bench fixtures.** `tests/hotpath.bcyr` and `tests/bench_compare.bcyr` passed
+  `f64_from(44100)` where `dhvani_osc_new` / `_biquad_new` / `_svf_new` take an integer
+  rate. The bit pattern is a ~4.7e18 Hz rate: the oscillator sat at phase ≈ 0 (13.5 ns at
+  2.3.1 against 50 ns for a real sine), and the "1 kHz lowpass" was a near-passthrough.
+  Fixed, and `hotpath` gains eight rows for the kernels it did not cover.
+
+### Docs
+
+- Updated: `docs/guides/simd.md` (rewritten), ADR 002, `performance.md`,
+  `architecture/overview.md`, `threat-model.md`, `migration.md`, `port-audit.md`,
+  `dependency-watch.md`, `state.md`, the README and the roadmap.
+- In the roadmap, "SIMD re-acceleration" is done. The 2.0.0 criteria are ticked where they
+  shipped (two remain open and say why), the 2.0.0 tag is marked done, and the stale
+  "Moving the cyrius pin to 6.6.6" section is gone.
+- Two stale claims are corrected: README and `migration.md` still listed `g2p` as blocked
+  (it shipped in 2.2.0), and `performance.md` said the oracle never vectorized the biquad
+  (its stereo SSE2 arm did).
+- `CLAUDE.md` gains the no-tail rule for packed verbs.
+
+### Verified
+
+- `cyrius deps` → `cyrius distlib` → `cyrius test` with `/dev/snd` hidden, the way CI runs:
+  **65 suites, 1,759 assertions, 0 failed** (2.3.1: 1,726), with `tests/hw/device.tcyr`
+  taking its SKIP. With the sound card visible that suite is 11/11. The one failure the
+  dependency bump alone produced was the g2p heteronym pair above.
+- `cyrius lint` (0 warnings) and `cyrius fmt --check` clean on every changed source and
+  test file.
+- `dist/dhvani.cyr` regenerated (10,191 lines). distlib still names `is_err` on
+  x86_64-windows only (see 2.2.7).
+- Benchmarks: three trees interleaved twice (2.3.1 / the bump alone / 2.3.2). The bump alone
+  is within ±3.8 % on every row, the run-to-run spread. Tables in `BENCHMARKS.md`.
+
 ## [2.3.1] — cyrius 6.7.18 and the newest dependency tags, with abaco held at 2.7.0
 
 Toolchain `cyrius` 6.7.9 → **6.7.18**, and every dependency on its newest tag except abaco.

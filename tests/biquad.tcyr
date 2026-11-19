@@ -148,5 +148,64 @@ test_group("process_sample_out_of_range_channel");
 var f15 = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 1);
 assert(f64_lt(f64_abs(f64_sub(dhvani_biquad_process_sample(f15, 0.75, 5), 0.75)), 0.0000001), "out-of-range channel passthrough");
 
+# ---- stereo_fast_path (2.3.2) ----
+# process() on a stereo buffer at full wet takes the oracle's fast path (the
+# cross-channel simd kernel). It must give the bits the per-channel state update
+# gives -- process_sample on a twin filter -- across two blocks (the state carries),
+# allocate nothing, and stay off for mix < 1.
+fn stereo_block(frames, phase0) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var t = f64_from(i + phase0);
+        vec_push(v, f64_mul(f64_sin(f64_mul(t, 0.0627)), 0.8));            # ~440 Hz
+        vec_push(v, f64_mul(f64_sin(f64_mul(t, 0.4274)), 0.5));            # ~3 kHz
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, 44100);
+}
+fn twin_matches(fast, twin, buf, ref) {
+    var s = dhvani_buffer_samples(buf);
+    var r = dhvani_buffer_samples(ref);
+    var ok = 1;
+    var i = 0;
+    while (i < vec_len(r)) {
+        var want = dhvani_biquad_process_sample(twin, vec_get(r, i), i % 2);
+        if (vec_get(s, i) != want) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+test_group("stereo_fast_path");
+var fp_fast = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 2);
+var fp_twin = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 2);
+var fp_b1 = stereo_block(257, 0);
+var fp_r1 = stereo_block(257, 0);
+dhvani_biquad_process(fp_fast, fp_b1);
+assert_eq(twin_matches(fp_fast, fp_twin, fp_b1, fp_r1), 1, "block 1: bit-identical to per-channel process_sample");
+var fp_b2 = stereo_block(256, 257);
+var fp_r2 = stereo_block(256, 257);
+var fp_used = alloc_used();
+dhvani_biquad_process(fp_fast, fp_b2);
+assert_eq(alloc_used() - fp_used, 0, "block 2: 0 bytes allocated");
+assert_eq(twin_matches(fp_fast, fp_twin, fp_b2, fp_r2), 1, "block 2: the state carried across blocks");
+# mix < 1 keeps the dry/wet loop: half wet = input/2 + filtered/2
+var fp_half = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 2);
+var fp_htwin = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 2);
+dhvani_biquad_set_mix(fp_half, F64_HALF);
+var fp_b3 = stereo_block(64, 0);
+var fp_r3 = dhvani_buffer_samples(stereo_block(64, 0));
+dhvani_biquad_process(fp_half, fp_b3);
+var fp_s3 = dhvani_buffer_samples(fp_b3);
+var fp_hok = 1;
+var fp_i = 0;
+while (fp_i < vec_len(fp_r3)) {
+    var fp_in = vec_get(fp_r3, fp_i);
+    var fp_wet = dhvani_biquad_process_sample(fp_htwin, fp_in, fp_i % 2);
+    if (vec_get(fp_s3, fp_i) != f64_add(f64_mul(fp_in, F64_HALF), f64_mul(fp_wet, F64_HALF))) { fp_hok = 0; }
+    fp_i = fp_i + 1;
+}
+assert_eq(fp_hok, 1, "mix 0.5: the dry/wet loop, unchanged");
+
 var rc = assert_summary();
 syscall(60, rc);

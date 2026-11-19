@@ -107,16 +107,26 @@ assert_eq(streq(shabda_heteronym_rule_word(rule), "read"), 1, "word == read");
 assert(vec_len(shabda_heteronym_rule_triggers(rule)) != 0, "triggers non-empty");
 
 # ---- heteronym_select_variant_default ----
+# The oracle asserts the literal indices 0 (default) and 1 (triggered). Those held only
+# while shabda assumed every rule's default pronunciation is listed first. shabdakosh lists
+# "read" as [/riːd/, /rɛd/], so through shabda 3.1.2 "I will read" said /rɛd/; 3.1.3 fixed
+# the rule, and read's default variant is now 1 and its context variant 0. What the oracle
+# checks -- no trigger picks the rule's default, "to" picks its context variant -- is
+# asserted against the rule's own fields, which is what survives that fix.
 test_group("heteronym_select_variant_default");
 var rule_d = shabda_heteronym_lookup("read");
-# no trigger words -> default variant (0)
-assert_eq(shabda_select_variant(rule_d, g2p_words2("the", "book")), 0, "default variant");
+assert(shabda_heteronym_rule_default_variant(rule_d) != shabda_heteronym_rule_context_variant(rule_d),
+    "read's two variants differ");
+# no trigger words -> default variant
+assert_eq(shabda_select_variant(rule_d, g2p_words2("the", "book")),
+    shabda_heteronym_rule_default_variant(rule_d), "default variant");
 
 # ---- heteronym_select_variant_triggered ----
 test_group("heteronym_select_variant_triggered");
 var rule_t = shabda_heteronym_lookup("read");
-# "to" triggers non-default variant (1)
-assert_eq(shabda_select_variant(rule_t, g2p_words2("want", "to")), 1, "triggered variant");
+# "to" triggers the non-default (context) variant
+assert_eq(shabda_select_variant(rule_t, g2p_words2("want", "to")),
+    shabda_heteronym_rule_context_variant(rule_t), "triggered variant");
 
 # ---- heteronym_unknown_word ----
 test_group("heteronym_unknown_word");

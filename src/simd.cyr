@@ -1,12 +1,33 @@
-# simd.cyr -- scalar audio kernels (the portable path of rust-old/src/simd/mod.rs).
-# L0, no internal deps. Ports ONLY the scalar fallbacks; the SSE2/AVX2 (x86.rs)
-# and NEON (aarch64.rs) SIMD arms have no Cyrius equivalent and are dropped (see
-# docs/development/port-audit.md -- platform-blocked). These scalar kernels are
-# the public compute surface buffer/convert/resample call.
+# simd.cyr -- audio kernels: rust-old/src/simd/{mod,x86,aarch64}.rs.
+# L0, no internal deps. Needs the stdlib `simd` leaf (lib/simd.cyr: the AVX2 probe).
 #
-# Buffers are `vec` handles; f64 samples live directly in the 8-byte slots.
-# Integer-PCM sources (i16/i24/u8) hold their integer value per slot. f32->f64
-# throughout (the whole port is f64). Everything alloc-free (operate in place).
+# Two forms of every kernel, as in the oracle:
+#   dhvani_simd_<k>         -- the accelerated kernel; what buffer/convert/resample/dsp/
+#                              biquad call.
+#   dhvani_simd_<k>_scalar  -- the scalar fallback (rust-old/src/simd/mod.rs `<k>_scalar`),
+#                              the parity oracle the accelerated kernel is tested against.
+#
+# 2.0.0 - 2.3.1 shipped only the scalar form: Cyrius had no vector story, so the SSE2/AVX2
+# (x86.rs) and NEON (aarch64.rs) arms were dropped as platform-blocked. 2.3.2 restores them
+# on the compiler's flat-array packed verbs -- `f64v_*` (2 f64 lanes: SSE2 on x86, NEON on
+# aarch64, per-lane loops on cx) and `f64v256_*` (4 lanes, AVX2) -- the builtins abaco and
+# goonj already use. There are no packed min/max/compare/convert verbs, so peak_abs, clamp,
+# noise_gate and the PCM conversions stay scalar: what they gain is the per-element
+# vec_get/vec_set call (two bounds checks each) replaced by a walk over the element storage.
+#
+# PARITY.
+#   - Element-wise kernels (add_buffers, apply_gain, biquad_stereo, and every walked
+#     kernel) do the same IEEE op per element as the scalar form: BIT-IDENTICAL to it, on
+#     either lane width. biquad_stereo keeps the scalar grouping, mul then add, never fused.
+#   - The two reductions (sum_of_squares, weighted_sum) add in lane order -- two partial
+#     sums, then their total -- as Rust's SSE2 arm did, so they differ from the
+#     left-to-right scalar sum in the last bits (the oracle tolerates 1e-3 / 1e-2). They
+#     use the 128-bit kernel only: f64v256_dot reduces in yet another order, and the answer
+#     must not depend on whether the CPU has AVX2.
+#
+# Buffers are `vec` handles; f64 samples live directly in the 8-byte slots. Integer-PCM
+# sources (i16/i24/u8) hold their integer value per slot. f32->f64 throughout (the whole
+# port is f64). Everything alloc-free (in place, or into the caller's dst).
 
 # -1.0 as an f64 bit pattern. (A bare `-1.0` literal is INTEGER-negated -> wrong;
 # negative floats must come from f64_neg() or an explicit bit pattern.)
@@ -29,42 +50,6 @@ fn dh_sext24(x) {
     return low - 0x1000000;
 }
 
-# ---- gain / mix / dynamics ----
-
-# add_buffers(dst, src) -- dst[i] += src[i] over min length.
-fn dhvani_simd_add_buffers(dst, src) {
-    var len = dh_imin(vec_len(dst), vec_len(src));
-    var i = 0;
-    while (i < len) {
-        vec_set(dst, i, f64_add(vec_get(dst, i), vec_get(src, i)));
-        i = i + 1;
-    }
-    return 0;
-}
-
-# apply_gain(samples, gain) -- multiply every sample by gain.
-fn dhvani_simd_apply_gain(samples, gain) {
-    var len = vec_len(samples);
-    var i = 0;
-    while (i < len) {
-        vec_set(samples, i, f64_mul(vec_get(samples, i), gain));
-        i = i + 1;
-    }
-    return 0;
-}
-
-# clamp(samples, min, max) -- clamp every sample into [min, max].
-fn dhvani_simd_clamp(samples, min, max) {
-    var len = vec_len(samples);
-    var i = 0;
-    while (i < len) {
-        vec_set(samples, i, f64_clamp(vec_get(samples, i), min, max));
-        i = i + 1;
-    }
-    return 0;
-}
-
-# peak_abs(samples) -- max |sample|, 0.0 for empty.
 # Running-max fold that IGNORES NaN, matching Rust's `f32::max` (and the
 # `.fold(0.0f32, f32::max)` the oracle uses). Cyrius's f64_max is ASYMMETRIC on
 # NaN -- f64_max(x, NaN) returns NaN while f64_max(NaN, x) returns x -- so a
@@ -78,8 +63,194 @@ fn dh_max_ignore_nan(acc, x) {
     return f64_max(acc, x);
 }
 
+# ================================================================
+# Element storage + lane plumbing
+# ================================================================
+
+# The element storage of a vec. lib/vec.cyr lays a vec out as { data_ptr, len, cap }.
+# Stale after any push (a push may move the storage): take it after the last one.
+#inline
+#must_use
+fn dh_vec_data(v) {
+    return load64(v);
+}
+
+# 1 = the CPU has AVX2, so long rows take the 256-bit kernels; 0 = 128-bit only;
+# 2 = not probed yet. f64v256_* is an illegal instruction without AVX2 (SIGILL), so this
+# comes from CPUID (simd_has_avx2, which answers 0 on every non-x86 target), never from a
+# guess. Only a test sets it otherwise, to force the 128-bit path.
+var dh_simd_wide = 2;
+
+# Below this a row stays on 128-bit lanes: every 256-bit call pays a vzeroupper, which
+# loses to the 128-bit kernel on short rows (goonj ADR-0008 measured the crossover at ~64).
+var DH_SIMD_WIDE_MIN = 64;
+
+# Elements of an n-long row for the 256-bit kernels: a multiple of 4, or 0.
+#must_use
+fn dh_simd_wide_len(n) {
+    if (n < DH_SIMD_WIDE_MIN) { return 0; }
+    if (dh_simd_wide == 2) { dh_simd_wide = simd_has_avx2(); }
+    if (dh_simd_wide == 0) { return 0; }
+    return n & (0 - 4);
+}
+
+# The packed verbs step 2 (f64v_*) or 4 (f64v256_*) lanes with NO scalar tail:
+# f64v_add(out, a, b, 1) writes TWO elements, one past a 1-long row. These touch exactly
+# n elements -- the 256-bit prefix, the 128-bit middle, then an odd last element in scalar
+# code with the same rounding. `out` may be `a` or `b`, but must not overlap them at an
+# offset.
+
+# out[i] = a[i] + b[i], i < n.
+fn dh_simd_row_add(out, a, b, n) {
+    if (n <= 0) { return 0; }
+    var wide = dh_simd_wide_len(n);
+    if (wide > 0) { f64v256_add(out, a, b, wide); }
+    var even = n & (0 - 2);
+    if (even > wide) {
+        f64v_add(out + wide * 8, a + wide * 8, b + wide * 8, even - wide);
+    }
+    if (even != n) {
+        store64(out + even * 8, f64_add(load64(a + even * 8), load64(b + even * 8)));
+    }
+    return 0;
+}
+
+# out[i] = a[i] * s, i < n.
+fn dh_simd_row_scale(out, a, s, n) {
+    if (n <= 0) { return 0; }
+    var wide = dh_simd_wide_len(n);
+    if (wide > 0) { f64v256_scale(out, a, s, wide); }
+    var even = n & (0 - 2);
+    if (even > wide) {
+        f64v_scale(out + wide * 8, a + wide * 8, s, even - wide);
+    }
+    if (even != n) {
+        store64(out + even * 8, f64_mul(load64(a + even * 8), s));
+    }
+    return 0;
+}
+
+# sum(a[i] * b[i]), i < n: the 128-bit kernel's two partial sums, then the odd last
+# product. 128-bit only, so the bits do not depend on the CPU (see PARITY above).
+#must_use
+fn dh_simd_row_dot(a, b, n) {
+    var sum = 0;              # +0.0
+    if (n <= 0) { return sum; }
+    var even = n & (0 - 2);
+    if (even > 0) { sum = f64v_dot(a, b, even); }
+    if (even != n) {
+        sum = f64_add(sum, f64_mul(load64(a + even * 8), load64(b + even * 8)));
+    }
+    return sum;
+}
+
+# 64 f64 ones, for the weight total: sum(w[i]) = dot(w, ones), exactly, since every
+# product is w[i] * 1.0. Filled on first use (BSS, no alloc).
+var dh_simd_ones[512];
+var dh_simd_ones_ready = 0;
+
+# sum(a[i]), i < n, in the same lane order as dh_simd_row_dot, 64 elements at a time.
+#must_use
+fn dh_simd_row_sum(a, n) {
+    if (dh_simd_ones_ready == 0) {
+        var k = 0;
+        while (k < 64) { store64(&dh_simd_ones + k * 8, 1.0); k = k + 1; }
+        dh_simd_ones_ready = 1;
+    }
+    var sum = 0;              # +0.0
+    var off = 0;
+    while (off < n) {
+        var cnt = n - off;
+        if (cnt > 64) { cnt = 64; }
+        sum = f64_add(sum, dh_simd_row_dot(a + off * 8, &dh_simd_ones, cnt));
+        off = off + cnt;
+    }
+    return sum;
+}
+
+# ================================================================
+# Gain / mix / dynamics
+# ================================================================
+
+# add_buffers(dst, src) -- dst[i] += src[i] over min length.
+fn dhvani_simd_add_buffers(dst, src) {
+    var len = dh_imin(vec_len(dst), vec_len(src));
+    var d = dh_vec_data(dst);
+    dh_simd_row_add(d, d, dh_vec_data(src), len);
+    return 0;
+}
+
+fn dhvani_simd_add_buffers_scalar(dst, src) {
+    var len = dh_imin(vec_len(dst), vec_len(src));
+    var i = 0;
+    while (i < len) {
+        vec_set(dst, i, f64_add(vec_get(dst, i), vec_get(src, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# apply_gain(samples, gain) -- multiply every sample by gain.
+fn dhvani_simd_apply_gain(samples, gain) {
+    var d = dh_vec_data(samples);
+    dh_simd_row_scale(d, d, gain, vec_len(samples));
+    return 0;
+}
+
+fn dhvani_simd_apply_gain_scalar(samples, gain) {
+    var len = vec_len(samples);
+    var i = 0;
+    while (i < len) {
+        vec_set(samples, i, f64_mul(vec_get(samples, i), gain));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# clamp(samples, min, max) -- clamp every sample into [min, max]. Walked (no packed
+# min/max), with f64_clamp's two tests inline: below min -> min, else above max -> max,
+# else as it is (so a NaN sample passes through, as it does through f64_clamp).
+fn dhvani_simd_clamp(samples, min, max) {
+    var p = dh_vec_data(samples);
+    var end = p + vec_len(samples) * 8;
+    while (p < end) {
+        var x = load64(p);
+        if (f64_lt(x, min) == 1) { store64(p, min); }
+        else { if (f64_gt(x, max) == 1) { store64(p, max); } }
+        p = p + 8;
+    }
+    return 0;
+}
+
+fn dhvani_simd_clamp_scalar(samples, min, max) {
+    var len = vec_len(samples);
+    var i = 0;
+    while (i < len) {
+        vec_set(samples, i, f64_clamp(vec_get(samples, i), min, max));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# peak_abs(samples) -- max |sample|, 0.0 for empty, NaN ignored. Walked, with
+# dh_max_ignore_nan's fold inline: a sample replaces the peak only when it compares
+# GREATER, and f64_gt is 0 for a NaN, so a NaN never enters. The answer is the same bits:
+# the peak is never NaN, and |x| is never -0.0, so an equal sample is the same value.
 #must_use
 fn dhvani_simd_peak_abs(samples) {
+    var p = dh_vec_data(samples);
+    var end = p + vec_len(samples) * 8;
+    var peak = 0;              # +0.0
+    while (p < end) {
+        var x = f64_abs(load64(p));
+        if (f64_gt(x, peak) == 1) { peak = x; }
+        p = p + 8;
+    }
+    return peak;
+}
+
+#must_use
+fn dhvani_simd_peak_abs_scalar(samples) {
     var len = vec_len(samples);
     var peak = 0;              # +0.0
     var i = 0;
@@ -90,9 +261,15 @@ fn dhvani_simd_peak_abs(samples) {
     return peak;
 }
 
-# sum_of_squares(samples) -- sum(s*s) as f64.
+# sum_of_squares(samples) -- sum(s*s) as f64, in lane order (see PARITY).
 #must_use
 fn dhvani_simd_sum_of_squares(samples) {
+    var d = dh_vec_data(samples);
+    return dh_simd_row_dot(d, d, vec_len(samples));
+}
+
+#must_use
+fn dhvani_simd_sum_of_squares_scalar(samples) {
     var len = vec_len(samples);
     var sum = 0;              # +0.0
     var i = 0;
@@ -104,8 +281,18 @@ fn dhvani_simd_sum_of_squares(samples) {
     return sum;
 }
 
-# noise_gate(samples, threshold) -- zero samples with |s| < threshold.
+# noise_gate(samples, threshold) -- zero samples with |s| < threshold. Walked.
 fn dhvani_simd_noise_gate(samples, threshold) {
+    var p = dh_vec_data(samples);
+    var end = p + vec_len(samples) * 8;
+    while (p < end) {
+        if (f64_lt(f64_abs(load64(p)), threshold) == 1) { store64(p, 0); }
+        p = p + 8;
+    }
+    return 0;
+}
+
+fn dhvani_simd_noise_gate_scalar(samples, threshold) {
     var len = vec_len(samples);
     var i = 0;
     while (i < len) {
@@ -117,10 +304,26 @@ fn dhvani_simd_noise_gate(samples, threshold) {
     return 0;
 }
 
-# ---- format conversion (integer PCM <-> f32) ----
+# ================================================================
+# Format conversion (integer PCM <-> f32). Walked: no packed int<->float verb. The
+# float->PCM forms test f64_clamp's bounds inline, in its order (below lo, else above hi).
+# ================================================================
 
 # i16_to_f32(src, dst) -- src[i] / 32768.0.
 fn dhvani_simd_i16_to_f32(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(dst);
+    var end = s + len * 8;
+    while (s < end) {
+        store64(d, f64_div(f64_from(load64(s)), 32768.0));
+        s = s + 8;
+        d = d + 8;
+    }
+    return 0;
+}
+
+fn dhvani_simd_i16_to_f32_scalar(src, dst) {
     var len = dh_imin(vec_len(src), vec_len(dst));
     var i = 0;
     while (i < len) {
@@ -132,6 +335,22 @@ fn dhvani_simd_i16_to_f32(src, dst) {
 
 # f32_to_i16(src, dst) -- (clamp(src,-1,1) * 32767) truncated to i16.
 fn dhvani_simd_f32_to_i16(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(dst);
+    var end = s + len * 8;
+    while (s < end) {
+        var c = load64(s);
+        if (f64_lt(c, DH_NEG_ONE) == 1) { c = DH_NEG_ONE; }
+        else { if (f64_gt(c, 1.0) == 1) { c = 1.0; } }
+        store64(d, f64_to(f64_trunc(f64_mul(c, 32767.0))));
+        s = s + 8;
+        d = d + 8;
+    }
+    return 0;
+}
+
+fn dhvani_simd_f32_to_i16_scalar(src, dst) {
     var len = dh_imin(vec_len(src), vec_len(dst));
     var i = 0;
     while (i < len) {
@@ -145,6 +364,19 @@ fn dhvani_simd_f32_to_i16(src, dst) {
 # i24_to_f32(src, dst) -- sign-extend low 24 bits, / 8388608.0.
 fn dhvani_simd_i24_to_f32(src, dst) {
     var len = dh_imin(vec_len(src), vec_len(dst));
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(dst);
+    var end = s + len * 8;
+    while (s < end) {
+        store64(d, f64_div(f64_from(dh_sext24(load64(s))), 8388608.0));
+        s = s + 8;
+        d = d + 8;
+    }
+    return 0;
+}
+
+fn dhvani_simd_i24_to_f32_scalar(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
     var i = 0;
     while (i < len) {
         vec_set(dst, i, f64_div(f64_from(dh_sext24(vec_get(src, i))), 8388608.0));
@@ -155,6 +387,22 @@ fn dhvani_simd_i24_to_f32(src, dst) {
 
 # f32_to_i24(src, dst) -- (clamp(src,-1,1) * 8388607) truncated to i32.
 fn dhvani_simd_f32_to_i24(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(dst);
+    var end = s + len * 8;
+    while (s < end) {
+        var c = load64(s);
+        if (f64_lt(c, DH_NEG_ONE) == 1) { c = DH_NEG_ONE; }
+        else { if (f64_gt(c, 1.0) == 1) { c = 1.0; } }
+        store64(d, f64_to(f64_trunc(f64_mul(c, 8388607.0))));
+        s = s + 8;
+        d = d + 8;
+    }
+    return 0;
+}
+
+fn dhvani_simd_f32_to_i24_scalar(src, dst) {
     var len = dh_imin(vec_len(src), vec_len(dst));
     var i = 0;
     while (i < len) {
@@ -168,6 +416,19 @@ fn dhvani_simd_f32_to_i24(src, dst) {
 # u8_to_f32(src, dst) -- (src[i] - 128) / 128.0.
 fn dhvani_simd_u8_to_f32(src, dst) {
     var len = dh_imin(vec_len(src), vec_len(dst));
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(dst);
+    var end = s + len * 8;
+    while (s < end) {
+        store64(d, f64_div(f64_sub(f64_from(load64(s)), 128.0), 128.0));
+        s = s + 8;
+        d = d + 8;
+    }
+    return 0;
+}
+
+fn dhvani_simd_u8_to_f32_scalar(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
     var i = 0;
     while (i < len) {
         vec_set(dst, i, f64_div(f64_sub(f64_from(vec_get(src, i)), 128.0), 128.0));
@@ -179,6 +440,25 @@ fn dhvani_simd_u8_to_f32(src, dst) {
 # f32_to_u8(src, dst) -- ((clamp(src,-1,1)*128)+128) clamped to [0,255], to u8.
 fn dhvani_simd_f32_to_u8(src, dst) {
     var len = dh_imin(vec_len(src), vec_len(dst));
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(dst);
+    var end = s + len * 8;
+    while (s < end) {
+        var c = load64(s);
+        if (f64_lt(c, DH_NEG_ONE) == 1) { c = DH_NEG_ONE; }
+        else { if (f64_gt(c, 1.0) == 1) { c = 1.0; } }
+        var v = f64_add(f64_mul(c, 128.0), 128.0);
+        if (f64_lt(v, 0) == 1) { v = 0; }
+        else { if (f64_gt(v, 255.0) == 1) { v = 255.0; } }
+        store64(d, f64_to(f64_trunc(v)));
+        s = s + 8;
+        d = d + 8;
+    }
+    return 0;
+}
+
+fn dhvani_simd_f32_to_u8_scalar(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
     var i = 0;
     while (i < len) {
         var c = f64_clamp(vec_get(src, i), DH_NEG_ONE, 1.0);
@@ -189,11 +469,22 @@ fn dhvani_simd_f32_to_u8(src, dst) {
     return 0;
 }
 
-# ---- resampling kernel ----
+# ================================================================
+# Resampling kernel
+# ================================================================
 
 # weighted_sum(samples, weights, out_sum, out_weight_sum) -- dot product +
 # weight total, written via store64 (Cyrius has no tuple returns). Returns 0.
+# Both in lane order (see PARITY).
 fn dhvani_simd_weighted_sum(samples, weights, out_sum, out_weight_sum) {
+    var len = dh_imin(vec_len(samples), vec_len(weights));
+    var w = dh_vec_data(weights);
+    store64(out_sum, dh_simd_row_dot(dh_vec_data(samples), w, len));
+    store64(out_weight_sum, dh_simd_row_sum(w, len));
+    return 0;
+}
+
+fn dhvani_simd_weighted_sum_scalar(samples, weights, out_sum, out_weight_sum) {
     var len = dh_imin(vec_len(samples), vec_len(weights));
     var sum = 0;            # +0.0
     var wsum = 0;           # +0.0
@@ -209,11 +500,64 @@ fn dhvani_simd_weighted_sum(samples, weights, out_sum, out_weight_sum) {
     return 0;
 }
 
-# ---- stereo biquad (Direct-Form-I, cross-channel) ----
+# ================================================================
+# Stereo biquad (Direct-Form-I, cross-channel): rust-old x86.rs biquad_stereo_sse2
+# ================================================================
+
+# The kernel over raw storage, so dhvani_biquad_process can run it on its own coeffs and
+# states without building vecs. data = interleaved L/R f64, frames = pairs to process;
+# c -> { b0, b1, b2, a1, a2 } (DhBiquadCoeffs' layout); st_l / st_r -> { z1, z2 }
+# (DhBiquadState's layout), read before and written after. Lane 0 is L, lane 1 is R: one
+# interleaved frame IS one 2-lane vector, so each step is a packed op over the frame.
+fn dh_simd_biquad_stereo_raw(data, frames, c, st_l, st_r) {
+    var b0[16];
+    var b1[16];
+    var b2[16];
+    var a1[16];
+    var a2[16];
+    var z1[16];
+    var z2[16];
+    var out[16];
+    var t[16];
+    var u[16];
+    store64(&b0, load64(c));      store64(&b0 + 8, load64(c));
+    store64(&b1, load64(c + 8));  store64(&b1 + 8, load64(c + 8));
+    store64(&b2, load64(c + 16)); store64(&b2 + 8, load64(c + 16));
+    store64(&a1, load64(c + 24)); store64(&a1 + 8, load64(c + 24));
+    store64(&a2, load64(c + 32)); store64(&a2 + 8, load64(c + 32));
+    store64(&z1, load64(st_l));     store64(&z1 + 8, load64(st_r));
+    store64(&z2, load64(st_l + 8)); store64(&z2 + 8, load64(st_r + 8));
+    var p = data;
+    var end = data + frames * 16;
+    while (p < end) {
+        f64v_mul(&t, &b0, p, 2);
+        f64v_add(&out, &t, &z1, 2);            # out = b0*in + z1
+        f64v_mul(&t, &b1, p, 2);
+        f64v_mul(&u, &a1, &out, 2);
+        f64v_sub(&t, &t, &u, 2);
+        f64v_add(&z1, &t, &z2, 2);             # z1 = (b1*in - a1*out) + z2
+        f64v_mul(&t, &b2, p, 2);
+        f64v_mul(&u, &a2, &out, 2);
+        f64v_sub(&z2, &t, &u, 2);              # z2 = b2*in - a2*out
+        store64(p, load64(&out));
+        store64(p + 8, load64(&out + 8));
+        p = p + 16;
+    }
+    store64(st_l, load64(&z1));     store64(st_r, load64(&z1 + 8));
+    store64(st_l + 8, load64(&z2)); store64(st_r + 8, load64(&z2 + 8));
+    return 0;
+}
 
 # biquad_stereo(samples, coeffs, state) -- process interleaved L/R in place.
 # coeffs = [b0,b1,b2,a1,a2] (vec), state = [z1L,z2L,z1R,z2R] (vec, mutated).
 fn dhvani_simd_biquad_stereo(samples, coeffs, state) {
+    var st = dh_vec_data(state);
+    dh_simd_biquad_stereo_raw(dh_vec_data(samples), vec_len(samples) / 2,
+      dh_vec_data(coeffs), st, st + 16);
+    return 0;
+}
+
+fn dhvani_simd_biquad_stereo_scalar(samples, coeffs, state) {
     var b0 = vec_get(coeffs, 0);
     var b1 = vec_get(coeffs, 1);
     var b2 = vec_get(coeffs, 2);

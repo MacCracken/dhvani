@@ -72,9 +72,10 @@ These Rust features are intentionally not in the current Cyrius port:
 
 - **`ffi`** — deliberate non-goal (Cyrius-native consumers, free-less bump
   allocator breaks the C ownership model).
-- **`simd/x86` + `simd/aarch64` intrinsics** — scalar-f64 only pending a Cyrius
-  SIMD story (the source of the throughput gap).
-- **g2p** (← shabda) and **voice_synth/bhava_bridge** (← bhava) — dep-blocked;
-  shabda/bhava are still Rust.
+- **`simd/x86` + `simd/aarch64` intrinsics**: not ported as intrinsics. Since 2.3.2 the
+  same kernels run on Cyrius's packed verbs (SSE2 / AVX2 / NEON), with the scalar
+  fallbacks kept as `_scalar` (see `docs/guides/simd.md`).
+- **voice_synth/bhava_bridge** (← bhava): dep-blocked, since bhava is still Rust.
+  (**g2p**, over shabda, is ported since 2.2.0.)
 
 Consumers (shruti, jalwa, aethersafta, kiran) migrate up the stack post-port.

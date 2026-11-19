@@ -36,7 +36,7 @@ C callers. Device I/O uses vani's raw ioctl ALSA backend, not libpipewire/libaso
 |--------|-----------|
 | Buffer overrun | Explicit length checks; block loops handle non-aligned tails |
 | Hot-path allocation | Free-less bump allocator ⇒ process loops are alloc-free; RT player/recorder reuse struct-owned scratch (0 bytes/block) |
-| No SIMD widening bugs | Scalar-only DSP for now (no x86/aarch64 intrinsics ported — deliberate non-goal pending a Cyrius SIMD story) |
+| No SIMD tail overruns | The packed verbs have no scalar tail (an odd `n` writes one past `dst`), so every call goes through `dh_simd_row_*`, which finish the odd element in scalar code. `tests/simd.tcyr` sweeps sizes 0–20 / 63–67 / 511–513 / 1025 with canary slots past `len`, on both lane widths. The 256-bit path is CPUID-gated (SIGILL otherwise) |
 
 ### Device I/O (ALSA via vani)
 | Threat | Mitigation |

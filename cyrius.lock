@@ -1,23 +1,23 @@
-commit	17c653c4ef782d41b228dbad3fc06213868a9353	abaco	https://github.com/MacCracken/abaco.git	2.7.0
+commit	1ace4d7ea0afda3353821ab3fd3f69ebeaa77480	abaco	https://github.com/MacCracken/abaco.git	2.8.0
 commit	965298dfaa16587ac1835e1ced8482184bd864a6	bayan	https://github.com/MacCracken/bayan.git	1.11.1
-commit	65b6c0bf07b5e70a2d6822f0ec3f329c94966970	garjan	https://github.com/MacCracken/garjan.git	2.6.3
-commit	257cd0b45c1f01685678a57249701d0d59356205	ghurni	https://github.com/MacCracken/ghurni.git	2.7.2
-commit	3de2e3ce3777dc768972f75ffb4d94f2d6e9b129	goonj	https://github.com/MacCracken/goonj.git	2.3.1
-commit	d6703c5007839da8958a7c46a36039cd9a417a1c	hisab	https://github.com/MacCracken/hisab.git	3.4.1
-commit	51767782ec10e3a894cd224a10f08deabfe5f7bf	naad	https://github.com/MacCracken/naad.git	2.3.3
-commit	c297fb37b0d6bab4b8bd1c9c5b90deabb7e941ff	nidhi	https://github.com/MacCracken/nidhi.git	2.2.1
+commit	a1d2d2dc87fae5cb61ef3ac517fa26472a5b6268	garjan	https://github.com/MacCracken/garjan.git	2.8.0
+commit	42264473cd53dfb8363181109ac8c0ed143bd67a	ghurni	https://github.com/MacCracken/ghurni.git	2.8.0
+commit	575b34808baf3405852ed90dbd1f395f342f49c4	goonj	https://github.com/MacCracken/goonj.git	2.3.2
+commit	96c1d8d9972f52b5dfd87af1c2441ba6819f6fdd	hisab	https://github.com/MacCracken/hisab.git	3.5.0
+commit	bcdb6b4abca1bc022af768b51722747efb7177da	naad	https://github.com/MacCracken/naad.git	2.3.5
+commit	da3960a050581894c271db80033070db41c44192	nidhi	https://github.com/MacCracken/nidhi.git	2.3.0
 commit	efa2e34aefcb1dc65a01e734b2b19bfe18b10c7f	patra	https://github.com/MacCracken/patra.git	1.16.6
-commit	9e452c74b2a8257dcb502102205313fca6074224	prani	https://github.com/MacCracken/prani.git	2.1.1
+commit	2bcd4446adfdf3ce44b354805145ed57a7289b7c	prani	https://github.com/MacCracken/prani.git	2.3.3
 commit	569e9f8d5fbaffa0d68f0271796da4d72d68588d	sakshi	https://github.com/MacCracken/sakshi.git	2.5.10
 commit	21470aee91ae8d02823f68dd84e226a53e16ac70	sankoch	https://github.com/MacCracken/sankoch.git	2.8.9
-commit	e2ebfd8658f78bdcdb94271814def2dbbfcde2fa	shabda	https://github.com/MacCracken/shabda.git	3.1.1
-commit	7642b9b6a4d45ec051ba069aabd61f4d6b36c439	shabdakosh	https://github.com/MacCracken/shabdakosh.git	3.1.1
-commit	cd577bbe3ab1aab57122edebe94ab7cce7d6a778	shravan	https://github.com/MacCracken/shravan.git	2.9.3
-commit	7783d18078e20921b6f1c95533d586eb56d6da3b	svara	https://github.com/MacCracken/svara.git	3.6.3
+commit	9a57f927a59a6c5dc026bb724d10ef4deb53cb28	shabda	https://github.com/MacCracken/shabda.git	3.2.0
+commit	1a67a1259bfc8470f93ef3fa7d9de3cb0483fbc4	shabdakosh	https://github.com/MacCracken/shabdakosh.git	3.2.0
+commit	c0543c86740247c3dd538c002acc5c1d0e0d570f	shravan	https://github.com/MacCracken/shravan.git	2.12.6
+commit	0f34b90872eea94cd47c56e99233546066bd22b7	svara	https://github.com/MacCracken/svara.git	3.14.0
 commit	1eb99ffc88000e0720b22c9356e3a46f7f4201df	vani	https://github.com/MacCracken/vani.git	1.2.10
-commit	716a3405e2b77e8dd71bcaa5d6f5d224cf5d96e7	varna	https://github.com/MacCracken/varna.git	2.5.2
+commit	1c03ff63d115173807133f79c6b440d50c6c0377	varna	https://github.com/MacCracken/varna.git	2.6.0
 commit	3efbba9e49e42619a27d6fefc888b9253c45ffe2	yukti	https://github.com/MacCracken/yukti.git	2.3.18
-f4c1597c7e3da928a619147d273ec3d2d7a8faa4208b6d8a26ebbba032da4c4a  lib/abaco.cyr
+64632fec5f6e7cf23fa22f8de4f2e51cfff86af5cb0ef635eb0b91f0353f7fec  lib/abaco.cyr
 346716377b00f36e58eb16cf7fe1dd62dd8fe577930d0d0429f822795b35817c  lib/alloc.cyr
 5afd5bb7cba4e49fee331f6a2838f4e01d9781defaf531403f6616f42ac7151b  lib/alloc_agnos.cyr
 57af1877c5082793ecfcfb2bf358c81cda79eaaae4feaa12eb7b963c4cbdf739  lib/alloc_cx.cyr
@@ -40,22 +40,22 @@ b99081e633d572569ee63c6a915fe4aa39b3ac4ff5665c08cc4c9416ed2f6928  lib/boxed.cyr
 9d5acefc05994ece25876d98ff19e69e167bf6e41ce830f5e07ee3d11842e74f  lib/fs.cyr
 23746c2e5a4eaf8cbdd2ebc1dfe3ab1d6795164271316a2fa33695fd9500da14  lib/fs_win.cyr
 17a38735e096108e6fca99c0d32ea5501ee4c46593dee4f0f8bb28b4537eae35  lib/ganita.cyr
-824979118f268eb4a6738014823ef4c2da7420376541f655ebc1b628351c4fcf  lib/garjan.cyr
-44032d93073782eced851932b28bc1e1ce6f9a3532e099bc7e9370c22475ad6d  lib/ghurni.cyr
-d0a57436a53d4c909e3c092c0bfee20e9a9f95efc871fdf79670793afbed2855  lib/goonj.cyr
+8becbea58c5977cfbbcddbb81835f70ffdb399198aa6be3a9dfe960d69e672f9  lib/garjan.cyr
+2c23de44460817968238d2e5c81922eea890442c61b7a44d5a2ee77cc07e60ce  lib/ghurni.cyr
+7fcc505225cf4f6d281d74d3cc0da32bac19ff633cbd9e84e5f2e43695ebc291  lib/goonj.cyr
 04b5c84bc8dee67eaa39c7eda98d5e0585d8099953604b851e9cf3236b43be86  lib/hashmap.cyr
 7ed650c49b548d1a1895a2c4a3f08bbe0378248131464b1952e8744821a10ecd  lib/hashseed.cyr
-db332f9a92e405c7c1c0be5eaa257290337a34d192e6b72c69100cf716027af0  lib/hisab.cyr
+6e64c5db09b1fd4fa5ca246b52f56d8526f5619e2ff02d46f65b500367509f83  lib/hisab.cyr
 4b40ccbf5397bf6c2cef1cff8e13d8d689eba48f4d9f65e3efe2f9f00ff6d086  lib/http.cyr
 e532c082ce75b0f18dc8e3c07462300b428e432aa19e6a5fcc2b0b6b174be45d  lib/io.cyr
 3a85748ee6bf83fe72bb310f21341c97232649def8c6064213da5502d86888f4  lib/math.cyr
 6390e2b0611636af94078acc9a6122eaaeab59b31c5cffe95bbcbc77d89748e5  lib/mmap.cyr
-91ffdf4fca517313a4f826b005b8ba8fa64e903516f4ce7a383264a1624366ce  lib/naad.cyr
+4ec9fde3894ae6bb02fd8e0237fc634c53c787a90b906f12512f9237cf1dc1c0  lib/naad.cyr
 69eb81d777646d1b4dbaf69ebc38cb7ed680231d44cc833eb861978ef2255262  lib/net.cyr
-5bbfc6cba4caf5e2bf7facab386c4de0297a00d7d6a042705a5621c5429f417c  lib/nidhi.cyr
+1fb99ce1ee0fd2bd2df7b6dcff881cef4286f6c747c22f2e42b077565acc24ec  lib/nidhi.cyr
 4a8f6db7d99bbc2934c3d36e8d440e7e004d9d2b6566a2a59066063c623d721d  lib/patra.cyr
 52d8879572df7a9ab0c5d1b97eb1f41799b06e684c01876d8023f04a4c63ee0d  lib/poison.cyr
-d355ea0ee37ff7dec04db893bc18b17e993490cdacb32a0c201fceff1e01ed40  lib/prani.cyr
+3501a89e767362a6631fb38c8776d0d255cbebcfe7a798b9669f29b6691d158b  lib/prani.cyr
 ff8ec116ffc0e13ec3d6b7f217fbf6551b0f34853b847f87dfc81d5d97571305  lib/process.cyr
 a31332549bfbe0c2811879ab09d7a2bd40d38d05dfc561292f90d0b4b16528a5  lib/process_agnos.cyr
 5b27e5289d54657fb5bbc0634a34634419b19034cdbf9a04d41745fc13bb6ada  lib/process_win.cyr
@@ -63,14 +63,14 @@ a31332549bfbe0c2811879ab09d7a2bd40d38d05dfc561292f90d0b4b16528a5  lib/process_ag
 8a438b754f1f8faeb7e75396588ef12cb09d90219f538a362e0d0f6155d39fee  lib/result.cyr
 8a819554322481362914adfa5be8a31b49b67ed3ad37a5ed6912eb230b09dbb2  lib/sakshi.cyr
 64cc2f946bd2051e6a15b001eeefc4338b12be58cd45920eeb9250383ba5d2e0  lib/sankoch.cyr
-f9ea6d027e807ae91add79fa8f8b2b215b6ec2591872c84af771ead5e6f19127  lib/shabda.cyr
-bb7e0f9b13c3b213e6ed6afcc9cbd1be185237a2d2e9972d8547c1117847cd22  lib/shabdakosh.cyr
-3b9d0798fccb339adfca408bde50fc2da19ae841f764b0fc37e10ae70fb22af0  lib/shravan.cyr
+e731cf3f87e360ed9e3a061c1a9f3867613a845a25837e45ab6904dbfa87316a  lib/shabda.cyr
+563c68d07f47074ddfe3d22c04e1c0950570ded138eb807866633c63a0d77157  lib/shabdakosh.cyr
+3532e54dbe99e03e4ded30f51365751f1a56a5f1c0935e311a8ddfb8f99b8611  lib/shravan.cyr
 66f131c75ea0b4da09bd6cf08ddd2c58f57bfa3ea1457d49b79b661ee407a49e  lib/simd.cyr
 e544c6dbc67c9a23b2bb1848a7faaa4fc63c90154e3f10b9982f7431357da522  lib/slice.cyr
 e7987a04583ebe8a944b2b2f9ce35dc80f834ca34588c8a8fab139b64208e2f6  lib/str.cyr
 f963c13ec3945a54d7a6c626e75b9f02d2053c60deb4fa987d7fd1fff97b1723  lib/string.cyr
-1c80b3e90a4d682cfef25d085634eb229a08054b2d6fd6473794e56d759103a5  lib/svara.cyr
+6c407825f36c177c7d341ca9cb4705cbc23ad6451d10d453ba1f06e7fc77e0ac  lib/svara.cyr
 5c578a8e02462741cb0232ab68c0634069c8f2b2eb4d1781ab1bc8bdec3c6ea7  lib/sync.cyr
 0064ea95f08490cdac07589bb509a8c76dc09feb4ddb27e9076d2c2d681a2464  lib/sync_macos.cyr
 1327489329f60a7eb6ca27812073bfb14541bb3e5f8b674a7e6de3e97e177567  lib/sync_windows.cyr
@@ -91,7 +91,7 @@ aeeba5627b78ffca6a34ebcbe318f50726a87d4f19713bf9ed070bbbec7ded74  lib/unicode/_d
 34e0d5bc69f7fdf414d3262b2c54e462f243701e68454bad21ad1a1e9f4a6c8b  lib/unicode/categories.cyr
 c1f5dc3cd1aa0be1ce1939a1d9fd1eda83f409e09e301a902ce7fcf65dd4eb40  lib/unicode/normalize.cyr
 44e4acbfa5e75a4bfa9ae01d78739eb3609ccb494857506e70f337cf94e6db6e  lib/vani.cyr
-b869cceccf7d7b29ecfa2818dffc4c076c0f970abb3e87b769ec0184b9163f9a  lib/varna.cyr
+d6bbb97b4abf5d065a8d54969dcc5ee80ddf5bb735b1a50c1adf6fdc33d910b5  lib/varna.cyr
 0566d0b778ac0e41ae27debbb5a7f7e579f14cc9e222a6e367309ea0e1408081  lib/vec.cyr
 c38973eab65126f5cd3026ae11f37f2cc697aa500728a9e2209165b0e09f7b1d  lib/yukti.cyr
 cyrius	6.7.18

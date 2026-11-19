@@ -5,22 +5,23 @@
 > this file is the **sequencing** — what ships, in what order, against what
 > dependency gates.
 
-## 2.0.0 criteria (port complete)
+## 2.0.0 criteria (port complete) — 2.0.0 released 2026-07-05
 
-- [ ] All portable Rust modules ported function-for-function vs `rust-old/`
-      (~55 of 64 — see the blocked list below for the remainder)
-- [ ] Every ported module has a `tests/<mod>.tcyr` suite, all green (each Rust
+- [x] All portable Rust modules ported function-for-function vs `rust-old/`
+      (54 of 64 at 2.0.0, g2p in 2.2.0; the blocked list below has the rest)
+- [x] Every ported module has a `tests/<mod>.tcyr` suite, all green (each Rust
       `#[test]` ported one-for-one, minus serde/Display tests)
-- [ ] `[lib]` distlib bundle `dist/dhvani.cyr` assembled; symbol-collision audit
+- [x] `[lib]` distlib bundle `dist/dhvani.cyr` assembled; symbol-collision audit
       clean (one flat namespace)
-- [ ] Hot-path benchmarks captured (buffer mix/convert/resample, biquad/SVF,
-      FFT, graph render) in `docs/benchmarks.md`
+- [x] Hot-path benchmarks captured (`BENCHMARKS.md`, `tests/hotpath.bcyr`,
+      `docs/benchmarks-rust-v-cyrius.md`)
 - [ ] `abaco`-vs-`hisab` math decision recorded as an ADR; loser pruned from
-      `cyrius.cyml`
-- [ ] CHANGELOG `[2.0.0]` complete; `VERSION` = 2.0.0
+      `cyrius.cyml`. Decided (keep abaco; see the manifest and `port-audit.md`),
+      but not as an ADR. hisab cannot be pruned: goonj needs its HVec3.
+- [x] CHANGELOG `[2.0.0]` complete; `VERSION` = 2.0.0
 - [ ] At least one downstream consumer (shruti / jalwa / aethersafta) builds
-      against the Cyrius bundle
-- [ ] Clean gate: `cyrius fmt` + `lint` + tests + bench green
+      against the Cyrius bundle. **Still open**: no consumer is on the bundle yet.
+- [x] Clean gate: `cyrius fmt` + `lint` + tests + bench green (fmt/lint gate since 2.2.3)
 
 ## Milestones
 
@@ -33,7 +34,7 @@
 
 ### M1 — Foundation (Wave A) — core, always-on — ✅ COMPLETE
 
-`error` · `clock` · `simd` (scalar kernels only) ·
+`error` · `clock` · `simd` (scalar kernels only; packed arms since 2.3.2) ·
 `buffer/{mod,convert,resample,dither,ops}` — **163 parity assertions green**.
 - `BufferPool` landed (the alloc-free convention for the whole crate).
 - Math decision: **keep abaco** (its DSP helpers are ready-made). abaco wiring
@@ -98,7 +99,7 @@
 - ✅ Rust-vs-Cyrius comparison (`tests/bench_compare.bcyr` +
   `docs/benchmarks-rust-v-cyrius.md`): scalar-f64 runs 6–250× the Rust f32-SIMD.
 - ✅ CHANGELOG `[2.0.0]` finalized; `VERSION` = 2.0.0, deps pinned git+tag.
-- ⬜ **Tag 2.0.0** (user handles git) — everything else is release-ready.
+- ✅ **Tagged 2.0.0** (2026-07-05).
 
 ## Blocked from porting — deferred past 2.0.0
 
@@ -119,9 +120,10 @@ now. Two kinds:
 
 ### Waiting on a Cyrius platform primitive (no equivalent yet)
 
+(SIMD acceleration left this table in 2.3.2: see the backlog entry below.)
+
 | Area | Module(s) | Reason | Path forward |
 |------|-----------|--------|--------------|
-| SIMD acceleration | `simd/x86`, `simd/aarch64` | raw SSE2/AVX2/NEON intrinsics, `#[target_feature]` unsafe, CPU feature detection | scalar kernels ship in 2.0.0; accept the throughput regression until Cyrius has a SIMD story. dhvani owns SIMD dispatch for the ecosystem, so this is the natural home for it later. |
 | C-ABI FFI | `ffi` | `extern "C"`/`#[no_mangle]`/raw-pointer handles/`CString`; free-less allocator breaks `*_free` | defer; consumers are Cyrius-native. Re-architect as an in-language handle table only if a C boundary is needed. |
 | PipeWire capture | `capture/pw` | PipeWire/`spa` unsafe FFI | defer behind the `pipewire` gate until Cyrius has an audio-device backend. |
 
@@ -139,52 +141,18 @@ Parity first; these resume once the port is green. Demand-gated.
 - **High sample rate**: validated 44.1k↔…↔768k paths, multi-stage resampling,
   oversampled DSP.
 - **Formats — niche**: a-law/µ-law (G.711), i8, DSD, ambisonic layouts.
-- **SIMD re-acceleration** once Cyrius exposes vector intrinsics.
+- ✅ **SIMD re-acceleration**: shipped in **2.3.2**, on Cyrius's flat-array packed
+  verbs (`f64v_*` SSE2/NEON, `f64v256_*` AVX2). The intrinsic arms (`simd/x86`,
+  `simd/aarch64`) are superseded rather than ported. The 14 kernels plus the oracle's
+  two callers (the stereo biquad fast path, the resampler's weight row) are restored,
+  each with its scalar form kept as the parity oracle. On a 512 block the kernels run
+  2.6–61× their scalar form. See `docs/guides/simd.md`.
+  - Next in this line, demand-gated: packed min/max/compare verbs would let `peak_abs`,
+    `clamp` and `noise_gate` vectorize too (today they are walked), and an f32 lane
+    path (`f32v8_*`, 8 lanes) only if a consumer wants f32 throughput over f64 precision.
 
 ## Out of scope (unchanged from Rust)
 
 - Audio file I/O (shravan / tarang), plugin hosting (shruti), composition /
   sequencing / timeline (shruti), streaming protocols (aethersafta), DAW UI
   (shruti), neural TTS / text-to-phoneme ML models (hoosh).
-
----
-
-## Moving the cyrius pin to 6.6.6
-
-**Current pin: `cyrius = "6.6.3"`.** Nothing must change first — dhvani needs the pin
-bump and a rebuild, nothing else.
-
-**What was checked** (58 `.cyr` under `src/`; vendored `lib/` excluded throughout):
-
-- **Windows write corruption (the 6.6.6 headline): not a dhvani exposure.** `O_APPEND` /
-  `O_TRUNC` appear **39 times, all inside the vendored `lib/` fold and zero times in
-  `src/`** — dhvani opens no files at all (no `file_open` / `sys_open` / `file_read_all` /
-  `file_exists` call site anywhere in `src/`). Device I/O is ALSA ioctls, not file writes.
-- **Struct copies / by-value struct params: nothing to change.** dhvani declares **82
-  `Dh*` structs**, and **not one** of them is a by-value fn parameter, a fn return type, or
-  a `var x: DhT = …` declaration — every one is a heap-offset layout reached through a raw
-  pointer. So 6.6.6's new "copying between two different struct types is a compile error"
-  and "a by-value struct parameter over 8 B is now deep-copied" both touch zero sites here.
-- **Also clean:** no `async fn`, no `operator` fn, no pair-return fn with a mismatched
-  `return` (checked every fn for mixed pair/scalar returns — zero), no `var` inside a
-  top-level block (zero top-level `{` / `if (` / `while (` at column 0, so the new
-  block-scoping rule is a no-op), no raw `SYS_STATFS`, no `lib/regression.cyr` consumer, no
-  `vec_*` of dhvani's own (so the new `assert.cyr` → `vec.cyr` transitive include cannot
-  collide), no duplicate top-level global.
-- **Platform:** CI is `ubuntu-latest` only and `src/` carries no `CYRIUS_TARGET_*` branch
-  at all. No Windows or Mach-O build exists to be affected by the PE or Darwin changes.
-
-**What it gains:** 6.6.5's aggregate-layout fix (silently wrong since 5.8.17 — for a
-library whose whole job is dense buffer layout, this is the one to want) and the three
-corrected ENTRY stack bases, plus 6.6.6's nine new refusals that turn previously-silent
-miscompiles into named compile errors. For a library this size the refusals are the real
-win — they are a free audit of `src/`. **Not** a gain here: 6.6.4's ≥64 KB string-literal
-fix — dhvani's longest literal is 22 bytes (`src/error.cyr`), measured, so that defect was
-never reachable.
-
-**Verify after bumping:** `cyrius deps` (re-vendors the whole `lib/` fold from the 6.6.6
-store, which is where dhvani's 39 `O_APPEND`/`O_TRUNC` sites actually live) → `cyrius build`
-→ `cyrius test` → **regenerate `dist/dhvani.cyr`**. The dist bundle is compiled by each
-consumer's own toolchain, so a consumer still on an older cyrius must keep compiling it;
-confirm the regenerated bundle still builds under the oldest pin in the consumer set before
-tagging.

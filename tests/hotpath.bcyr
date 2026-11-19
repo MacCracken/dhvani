@@ -3,7 +3,7 @@
 #
 # Baseline throughput for the inner loops a real-time consumer runs every
 # sample/block: oscillator + biquad/SVF filters (per-sample), the SIMD buffer
-# kernels + FFT (per-block). These are the alloc-free hot paths the free-less
+# kernels, the stereo biquad block + FFT (per-block). These are the alloc-free hot paths the free-less
 # bump allocator demands stay zero-bytes/sample; the numbers here are the proof
 # the port didn't regress (capture before claiming a win). Links the assembled
 # bundle (abaco + dist/dhvani.cyr) — the same surface a consumer ships.
@@ -34,6 +34,13 @@ var _samples = 0;
 var _i16src = 0;
 var _i16dst = 0;
 var _fftbuf = 0;
+var _other = 0;
+var _coeffs = 0;
+var _state = 0;
+var _bqst = 0;
+var _stbuf = 0;
+var _ws = 0;
+var _stbufb = 0;
 
 # ---- per-sample bodies (state evolves but bounded on constant input) ----
 fn b_osc() { return dhvani_osc_sample(_osc, _freq); }
@@ -44,20 +51,49 @@ fn b_svf() { return dhvani_svf_process_sample(_svf, _half, 0); }
 fn b_peak() { return dhvani_simd_peak_abs(_samples); }
 fn b_gain() { return dhvani_simd_apply_gain(_samples, F64_ONE); }
 fn b_conv() { return dhvani_simd_i16_to_f32(_i16src, _i16dst); }
+fn b_add()   { return dhvani_simd_add_buffers(_samples, _other); }
+fn b_sos()   { return dhvani_simd_sum_of_squares(_samples); }
+fn b_clamp() { return dhvani_simd_clamp(_samples, DH_NEG_ONE, F64_ONE); }
+fn b_gate()  { return dhvani_simd_noise_gate(_samples, 0.001); }
+fn b_wsum()  { return dhvani_simd_weighted_sum(_samples, _samples, _ws, _ws + 8); }
+fn b_f2i()   { return dhvani_simd_f32_to_i16(_samples, _i16dst); }
+fn b_bqk()   { return dhvani_simd_biquad_stereo(_stbuf, _coeffs, _state); }
+fn b_bqst()  { return dhvani_biquad_process(_bqst, _stbufb); }
 fn b_fft()  { return dhvani_fft_spectrum(_fftbuf, 1024); }
 
 fn main() {
     alloc_init();
     _half = F64_HALF;
     _freq = f64_from(440);
-    _osc = dhvani_osc_new(DH_WAVE_SINE, f64_from(44100));
-    _bq  = dhvani_biquad_new(DH_BQ_LOWPASS, 0, f64_from(1000), 0.707106781, f64_from(44100), 1);
-    _svf = dhvani_svf_new(DH_SVF_LOWPASS, f64_from(1000), 0.707106781, 0, f64_from(44100), 1);
+    # the sample rate is an INTEGER for all three (through 2.3.1 this passed
+    # f64_from(44100), whose bit pattern made a ~4.7e18 Hz rate: a degenerate filter)
+    _osc = dhvani_osc_new(DH_WAVE_SINE, 44100);
+    _bq  = dhvani_biquad_new(DH_BQ_LOWPASS, 0, f64_from(1000), 0.707106781, 44100, 1);
+    _svf = dhvani_svf_new(DH_SVF_LOWPASS, f64_from(1000), 0.707106781, 0, 44100, 1);
 
     # 512-sample block for the SIMD kernels
     _samples = vec_new();
     var i = 0;
     while (i < 512) { vec_push(_samples, F64_HALF); i = i + 1; }
+    _other = vec_new();
+    i = 0;
+    while (i < 512) { vec_push(_other, 0); i = i + 1; }   # += 0.0 keeps _samples at 0.5
+    _ws = alloc(16);
+    # 256 stereo frames (512 samples) for the stereo biquad, as the kernel and as a
+    # full-wet 2-channel filter's process() (the fast path)
+    _coeffs = vec_new();
+    vec_push(_coeffs, 0.004836739652368523); vec_push(_coeffs, 0.009673479304737046);
+    vec_push(_coeffs, 0.004836739652368523); vec_push(_coeffs, f64_neg(1.9029109205028356));
+    vec_push(_coeffs, 0.9222578791123097);
+    _state = vec_new();
+    i = 0;
+    while (i < 4) { vec_push(_state, 0); i = i + 1; }
+    _stbuf = vec_new();
+    var sv = vec_new();
+    i = 0;
+    while (i < 512) { vec_push(_stbuf, F64_HALF); vec_push(sv, F64_HALF); i = i + 1; }
+    _stbufb = dhvani_buffer_from_interleaved(sv, 2, 44100);
+    _bqst = dhvani_biquad_new(DH_BQ_LOWPASS, 0, f64_from(1000), 0.707106781, 44100, 2);
     # i16 -> f32 conversion block
     _i16src = vec_new();
     _i16dst = vec_new();
@@ -72,6 +108,14 @@ fn main() {
     bench_block("simd peak_abs 512   ", &b_peak, 20000);
     bench_block("simd apply_gain 512 ", &b_gain, 20000);
     bench_block("simd i16->f32 512   ", &b_conv, 20000);
+    bench_block("simd add 512        ", &b_add, 20000);
+    bench_block("simd sum_sq 512     ", &b_sos, 20000);
+    bench_block("simd clamp 512      ", &b_clamp, 20000);
+    bench_block("simd gate 512       ", &b_gate, 20000);
+    bench_block("simd wsum 512       ", &b_wsum, 20000);
+    bench_block("simd f32->i16 512   ", &b_f2i, 20000);
+    bench_block("simd bq_stereo 256f ", &b_bqk, 20000);
+    bench_block("biquad stereo 256f  ", &b_bqst, 20000);
     bench_block("fft spectrum 1024   ", &b_fft, 5000);
     return 0;
 }

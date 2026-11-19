@@ -5,6 +5,11 @@
 
 ## Version
 
+**2.3.2** — **SIMD kernels restored** and every dep on its newest tag, abaco included. The
+14 `src/simd.cyr` kernels run on Cyrius's packed verbs (`f64v_*` / `f64v256_*`), each
+`_scalar` form kept as its oracle. `biquad` takes the oracle's stereo fast path again, and
+`resample_sinc` its default path. abaco's hold lifts (naad renamed `power_spectrum`), and
+goonj 2.3.2 closes the `DH_SIZE` overrun. Toolchain stays **6.7.18**.
 **2.3.1** — toolchain **6.7.18** + every dep on its newest tag, except **abaco, held at
 2.7.0** because 2.8.0's `power_spectrum` collides with naad's. No dhvani source change.
 **2.3.0** — toolchain **6.7.9** + the **6.7.9 dependency batch** (every dep on its
@@ -63,7 +68,7 @@ zero per-block allocation, as the free-less bump allocator requires.
 
 **As of 2.2.3 all of these are real `[deps.X]` entries** (`git`+`tag`; no committed `path` since 2.2.6),
 resolved by `cyrius deps` into `lib/` and hash-locked in `cyrius.lock` — 18
-declared, 77 locked, 100% tag-pinned (versions below as of 2.3.1). The ordered `include` lines still govern
+declared, 77 locked, 100% tag-pinned (versions below as of 2.3.2). The ordered `include` lines still govern
 compile order. Bump a version via its `tag`, never by hand-copying into `lib/`.
 Cost of the migration: `lib/` grew ~5.4 MB → 8.5 MB, because the siblings'
 declared stdlib closure (bayan, chrono, mmap, slice, sync, thread*, sankoch, …)
@@ -72,19 +77,19 @@ comes along; all of it is unreachable from dhvani and DCE-prunes.
 Direct (declared in `cyrius.cyml`):
 
 - **stdlib** — base set + the DSP-math set (`math`, `ganita`, `tagged`,
-  `fnptr`, `callback`, `bench`) + the g2p set (`hashmap`, `atomic`, `mmap` — for
-  shabdakosh's dictionary; **not** `bayan`, 0 reachable calls).
-- **Math**: ✅ **abaco 2.7.0** (held below 2.8.0; see `dependency-watch.md`) (`[deps.abaco]`, git+tag; `lib/abaco.cyr`,
-  hash-locked). DSP helpers
+  `fnptr`, `callback`, `bench`) + the g2p set (`hashmap`, `unicode`; **not** `bayan`,
+  0 reachable calls) + `simd` (2.3.2: the AVX2 probe the packed kernels gate on).
+- **Math**: ✅ **abaco 2.8.0** (`[deps.abaco]`, git+tag; `lib/abaco.cyr`, hash-locked; 2.3.1's
+  hold at 2.7.0 lifted once naad 2.3.4 renamed its `power_spectrum`). DSP helpers
   verified (poly_blep/amplitude_to_db/constant_power_pan/…). abaco's unused
   json/http/net helpers DCE-prune (benign warnings).
-- **Synthesis stack** (Wave F): naad **2.3.3**, svara **3.6.3**, prani **2.1.1**,
-  nidhi **2.2.1**, garjan **2.6.3**, ghurni **2.7.2**, goonj **2.3.1** + sakshi
-  **2.5.10** (logging) + hisab **3.4.1** (HVec3 for goonj) + shravan **2.9.3**
+- **Synthesis stack** (Wave F): naad **2.3.5**, svara **3.14.0**, prani **2.3.3**,
+  nidhi **2.3.0**, garjan **2.8.0**, ghurni **2.8.0**, goonj **2.3.2** + sakshi
+  **2.5.10** (logging) + hisab **3.5.0** (HVec3 for goonj) + shravan **2.12.6**
   (WAV codec for nidhi) + sankoch **2.8.9** (codec substrate) — real `[deps]`
   since 2.2.3, still included in dependency order.
-- **g2p stack**: **shabda 3.1.1** (G2P engine, ported 2.2.0) + shabdakosh **3.1.1**
-  (dictionary) + varna **2.5.2** (phoneme inventories) — same vendored-include pattern
+- **g2p stack**: **shabda 3.2.0** (G2P engine, ported 2.2.0) + shabdakosh **3.2.0**
+  (dictionary) + varna **2.6.0** (phoneme inventories) — same vendored-include pattern
   as Wave F (`… svara → varna → shabdakosh → shabda`), externalized from the dist.
 - **Device I/O**: vani **1.2.10** (ALSA PCM; 1.2.x dropped the per-call scratch
   `alloc()` in the ring paths — an unbounded leak under the bump allocator) + yukti
@@ -119,7 +124,8 @@ externalized from the dist like the Wave F siblings; stdlib gained only `hashmap
 (the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
 `tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
 suites, all green on 6.4.12** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
-**As of 2.3.1: 65 suites green on 6.7.18** — 1,726 assertions headless, 1,727 with
+**As of 2.3.2: 65 suites green on 6.7.18** — 1,759 assertions headless (the CI shape),
+1,760 with audio hardware (+23 simd, +4 biquad, +5 resample, +1 g2p). **As of 2.3.1: 65 suites green on 6.7.18** — 1,726 assertions headless, 1,727 with
 audio hardware. **As of 2.3.0: 65 suites green on 6.7.9** — 1,726 assertions headless (the CI
 shape), 1,727 with audio hardware. **As of 2.2.7: 65 suites green on 6.6.20** — 1,727 assertions on a box with
 audio hardware, 1,726 headless (CI: 1,716 across the other 64 suites + 10 in
@@ -161,33 +167,31 @@ See the manifest and [`port-audit.md`](port-audit.md).
 | D — Analysis (analysis) | ✅ waveform, zcr, analysis, fft, dynamics, loudness, stft, chroma, convolution, noise_reduction, key, onset, beat | ✅ |
 | E — MIDI/meter/capture/graph | ✅ midi, voice, midi_routing, midi_v2, translate, meter, capture, record, graph | ✅ |
 | F — Synthesis stack | ✅ synthesis(naad), sampler(nidhi), voice_synth(svara), creature(prani), environment(garjan), mechanical(ghurni), acoustics(goonj) | ✅ |
-| G — Assembly | lib facade, dist/dhvani.cyr bundle, tests/{mod,proptest}, benches | ⬜ |
+| G — Assembly | lib facade, dist/dhvani.cyr bundle, tests/{mod,proptest}, benches | ✅ |
 | g2p (2.2.0) | g2p (shabda 3.0.1 + shabdakosh 3.0.2 + varna 2.0.0) | ✅ ported |
 | ⛔ Blocked (dep) | voice_synth/bhava_bridge (bhava) | deferred |
-| ⛔ Blocked (platform) | simd/{x86,aarch64}, ffi, capture/pw | deferred |
+| SIMD (2.3.2) | simd kernels on packed verbs + biquad stereo fast path + resample default path (simd/{x86,aarch64} intrinsics superseded) | ✅ |
+| ⛔ Blocked (platform) | ffi, capture/pw (superseded in practice by vani device I/O) | deferred |
 | ✂ Dropped | tests/serde_tests (no serde) | n/a |
 
 Per-module parity ledger + conventions: [`port-audit.md`](port-audit.md).
 
 ## Tests
 
-No parity suites ported yet. Target: one `tests/<module>.tcyr` per ported
-module, each Rust `#[test]` ported one-for-one (serde round-trip + Display
-tests dropped). ~660 `#[test]` blocks in the oracle; ~570 portable (excludes
-the serde_tests suite and the blocked/platform modules).
+One `tests/<module>.tcyr` per ported module, each Rust `#[test]` ported one-for-one
+(serde round-trip + Display tests dropped), plus the integration / dsp-reference /
+proptest / bundle suites and `tests/hw/device.tcyr` (self-gating). **65 suites, 1,759
+assertions headless / 1,760 with audio hardware at 2.3.2.** The oracle's five SIMD-vs-scalar
+tests, dropped while only the scalar path existed, are ported since 2.3.2.
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). **The port is complete and release-ready** — Waves
-A–G all done: ✅ deferred analysis-gated tests, ✅ `dist/dhvani.cyr` bundle +
-validation, ✅ integration/dsp-reference/proptest suites, ✅ abaco 2.3.2 dB fix,
-✅ hot-path benches + `BENCHMARKS.md` + `docs/benchmarks-rust-v-cyrius.md`,
-✅ CHANGELOG `[2.0.0]` finalized. **Only the git tag remains** (user). Post-2.0.0:
-the blocked modules (g2p/bhava-voice on shabda/bhava; ffi/simd-intrinsics/pipewire
-on platform) unblock as their deps/toolchain land.
-`voice_synth/bhava_bridge` + `g2p` stay dep-blocked (bhava/shabda); `ffi`,
-`simd/{x86,aarch64}`, `capture/pw` stay platform-blocked.
-Then **Wave G** — lib facade + `dist/dhvani.cyr` bundle + integration tests, and
-re-enable the deferred `ops::normalize_to_lufs` + `resample` sine tests (now
-unblocked by fft/loudness). (The abaco↔naad `amplitude_to_db` collision is already
-resolved upstream — naad 2.1.1 dropped its copies.)
+See [`roadmap.md`](roadmap.md). The port shipped as 2.0.0 (2026-07-05); 2.1.x added device
+I/O, 2.2.0 g2p, and 2.3.2 the SIMD kernels. What is left:
+
+- **Dep-blocked:** `voice_synth/bhava_bridge`, until bhava ports (bhava 2.0.0 is still Rust).
+- **Platform-blocked:** `ffi` (deliberate non-goal) and `capture/pw` (superseded in practice
+  by vani device I/O; ADR 004).
+- **Consumers:** none on the Cyrius bundle yet.
+- **SIMD, demand-gated:** `peak_abs` / `clamp` / `noise_gate` vectorize once Cyrius has
+  packed min/max/compare verbs; today they are walked.

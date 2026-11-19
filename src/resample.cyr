@@ -1,7 +1,17 @@
 # resample.cyr -- windowed-sinc resampling with configurable quality.
-# Ports rust-old/src/buffer/resample.rs (scalar path; the SIMD weighted_sum
-# path is dropped -- platform-blocked). L1: depends on error + buffer.
+# Ports rust-old/src/buffer/resample.rs. L1: depends on error + simd + buffer.
 # ResampleQuality enum -> codes. serde dropped. Result -> null-handle sentinel.
+#
+# Both of the oracle's paths, as in simd.cyr:
+#   dhvani_resample_sinc         -- its default (`simd` feature) path: each output frame's
+#                                   kernel weights are computed ONCE and shared by every
+#                                   channel, and each channel's taps are gathered into one
+#                                   contiguous row for the packed weighted-sum kernel.
+#   dhvani_resample_sinc_scalar  -- its `not(simd)` path: the windowed sinc recomputed per
+#                                   channel, summed left to right. The parity oracle.
+# Through 2.3.1 only the second was ported, under the first one's name. The two differ in
+# the last bits (lane-order sums, see simd.cyr) and in the silence threshold the oracle
+# gives each: |weight sum| > 1e-6 on the default path, > 1e-10 on the scalar one.
 
 # Exact-hex stdlib constants (a long decimal literal loses precision vs the oracle).
 var DH_PI  = F64_PI;
@@ -40,9 +50,88 @@ fn dhvani_resample_windowed_sinc(x, half_width) {
 }
 
 # resample_sinc(buf, target_rate, quality) -- buffer handle, or 0 on rate==0.
-# same rate -> clone; empty -> silence.
+# same rate -> clone; empty -> silence. The oracle's default path (see the header).
 #must_use
 fn dhvani_resample_sinc(buf, target_rate, quality) {
+    if (target_rate == 0) { return 0; }
+    var src_rate = DhAudioBuffer_sample_rate(buf);
+    if (target_rate == src_rate) { return dhvani_buffer_clone(buf); }
+    var frames = DhAudioBuffer_frames(buf);
+    var ch = DhAudioBuffer_channels(buf);
+    if (frames == 0) { return dhvani_buffer_silence(ch, 0, target_rate); }
+
+    var ratio = f64_div(f64_from(target_rate), f64_from(src_rate));
+    var new_frames = f64_to(f64_ceil(f64_mul(f64_from(frames), ratio)));
+    var half_width = dhvani_resample_kernel_half_width(quality);
+    # downsampling scales the kernel to avoid aliasing.
+    var filter_scale = 1.0;
+    var kernel_scale = 1.0;
+    if (f64_lt(ratio, 1.0) == 1) {
+        filter_scale = ratio;
+        kernel_scale = ratio;
+    }
+    var out = dh_vec_zeros(new_frames * ch);
+    # The weight row and the gathered-tap row: once per call, like `out`, never per frame.
+    var max_kernel_len = f64_to(f64_ceil(f64_div(f64_from(half_width), filter_scale))) * 2 + 1;
+    var kw = dh_vec_zeros(max_kernel_len);
+    var ks = dh_vec_zeros(max_kernel_len);
+    var wp = dh_vec_data(kw);
+    var kp = dh_vec_data(ks);
+    var sp = dh_vec_data(DhAudioBuffer_samples(buf));
+    var op = dh_vec_data(out);
+    var frame = 0;
+    while (frame < new_frames) {
+        var src_pos = f64_div(f64_from(frame), ratio);
+        var src_center = f64_to(f64_floor(src_pos));
+        var frac = f64_sub(src_pos, f64_from(src_center));
+        var scaled_half = f64_to(f64_ceil(f64_div(f64_from(half_width), filter_scale)));
+        # this frame's weights, for the taps inside the buffer (a contiguous run from
+        # first_valid, since the buffer's indices are)
+        var kernel_len = 0;
+        var first_valid = 0;
+        var i = 0 - scaled_half;
+        while (i <= scaled_half) {
+            var src_idx = src_center + i;
+            if (src_idx >= 0) {
+                if (src_idx < frames) {
+                    if (kernel_len == 0) { first_valid = src_idx; }
+                    var x = f64_mul(f64_sub(f64_from(i), frac), kernel_scale);
+                    store64(wp + kernel_len * 8, dhvani_resample_windowed_sinc(x, f64_from(scaled_half)));
+                    kernel_len = kernel_len + 1;
+                }
+            }
+            i = i + 1;
+        }
+        # the weight total is the same for every channel (the oracle recomputes it per
+        # channel, to the same bits)
+        var weight_sum = dh_simd_row_sum(wp, kernel_len);
+        var c = 0;
+        while (c < ch) {
+            var k = 0;
+            while (k < kernel_len) {
+                store64(kp + k * 8, load64(sp + ((first_valid + k) * ch + c) * 8));
+                k = k + 1;
+            }
+            var sum = dh_simd_row_dot(kp, wp, kernel_len);
+            if (f64_gt(f64_abs(weight_sum), 0.000001) == 1) {
+                store64(op + (frame * ch + c) * 8, f64_div(sum, weight_sum));
+            }
+            c = c + 1;
+        }
+        frame = frame + 1;
+    }
+    var ob = alloc(sizeof(DhAudioBuffer));
+    DhAudioBuffer_set_samples(ob, out);
+    DhAudioBuffer_set_channels(ob, ch);
+    DhAudioBuffer_set_sample_rate(ob, target_rate);
+    DhAudioBuffer_set_frames(ob, new_frames);
+    return ob;
+}
+
+# resample_sinc_scalar(buf, target_rate, quality) -- the oracle's `not(simd)` path: the
+# same contract, the windowed sinc recomputed per channel and summed left to right.
+#must_use
+fn dhvani_resample_sinc_scalar(buf, target_rate, quality) {
     if (target_rate == 0) { return 0; }
     var src_rate = DhAudioBuffer_sample_rate(buf);
     if (target_rate == src_rate) { return dhvani_buffer_clone(buf); }

@@ -198,7 +198,7 @@ confirm the link.
 |--------|----:|:----:|--:|-------|
 | `error` | 108 | A | 2 | `NadaError` → `ERR_*` codes + `flush_denormal`, finite checks, EPSILON/INF consts. Universal base — every entry includes it first. Folds `lib.rs` crate-root helpers. |
 | `clock` | 209 | A | 9 | `AudioClock`; `Option<f64>` → NaN sentinels; u64→i64; drop serde. |
-| `simd` (scalar) | 739 | A | 18 | **Port ONLY the scalar fallbacks** (`*_scalar`) as the public kernels. `(f32,f32)` returns → out-params. Accelerated arms are ⛔ (see Blocked). Parity tests re-anchor to oracle outputs, not SIMD-vs-scalar. |
+| `simd` | 739 | A | 18 | Through 2.3.1: **only the scalar fallbacks** (`*_scalar`), as the public kernels. **2.3.2:** both forms, as in the oracle, with the accelerated kernel on Cyrius packed verbs and `*_scalar` kept as its parity oracle. `(f32,f32)` returns → out-params. All 18 oracle tests ported (the 5 SIMD-vs-scalar ones restored in 2.3.2). |
 | `dsp/oscillator` | 245 | B | 8 | Cleanest hot path — no alloc, register-only. `Waveform`→codes; `poly_blep` (abaco); u32 xorshift mask. Doesn't even use `buffer`. |
 | `dsp/gain_smoother` | 207 | B | 7 | Scalar EMA. Drop serde (has a serde_roundtrip test → remove). |
 | `dsp/envelope` | 324 | B | 7 | ADSR; `Result` only in `set_params`. |
@@ -298,13 +298,18 @@ Reachable stdlib leaf added: `hashmap` (dict `map_*`); `mmap` (dead `shbdk_lazy_
 loader) and `bayan` stay out — unreachable, they DCE-prune like the json/http refs.
 Parity: `tests/g2p.tcyr` (14 tests one-for-one) +
 `tests/bundle_g2p.tcyr` (dist-externalization check).
+2.3.2: the two `heteronym_select_variant_*` tests assert the rule's own
+`default_variant` / `context_variant` instead of the oracle's literal 0 / 1. shabda 3.1.3
+fixed seven rules whose indices assumed the default pronunciation is listed first; the
+dictionary lists `read` as [/riːd/, /rɛd/], so its default is now index 1. The oracle's
+numbers encoded that bug ("I will read" said /rɛd/).
 
 ### Platform-blocked — no Cyrius primitive exists
 
 | Module | LOC | T | Reason | Path forward |
 |--------|----:|--:|--------|--------------|
-| `simd/x86` | 1002 | 0 | SSE2/AVX2 `std::arch` intrinsics + `#[target_feature]` unsafe + `is_x86_feature_detected!` | **Not ported.** Scalar kernels in `simd/mod` supersede. Accepted throughput regression vs oracle. |
-| `simd/aarch64` | 482 | 0 | NEON intrinsics, same class | **Not ported.** Scalar supersedes. |
+| `simd/x86` | 1002 | 0 | SSE2/AVX2 `std::arch` intrinsics + `#[target_feature]` unsafe + `is_x86_feature_detected!` | **Superseded in 2.3.2.** The intrinsics do not port; the kernels they accelerate run on `f64v_*` (SSE2) / `f64v256_*` (AVX2, CPUID-gated by `simd_has_avx2`) in `src/simd.cyr`. See `docs/guides/simd.md`. |
+| `simd/aarch64` | 482 | 0 | NEON intrinsics, same class | **Superseded in 2.3.2.** `f64v_*` lowers to NEON on aarch64. |
 | `ffi` | 417 | 13 | C-ABI `extern "C"` / `#[no_mangle]` / raw-pointer opaque handles / `CString`; free-less allocator also makes `*_free` no-ops (breaks the C ownership model) | **Deferred.** Consumers are Cyrius-native. Re-architect as an in-language handle-table API only if a C boundary is ever needed. |
 | `capture/pw` | 788 | 9 | PipeWire/`spa` unsafe FFI (RT client, POD serialization) | **Deferred** behind the `pipewire` gate until Cyrius has an audio-device story. `capture/mod` + `capture/record` port without it. See `docs/decisions/004-pipewire-feature-gated.md`. |
 
@@ -323,11 +328,11 @@ Parity: `tests/g2p.tcyr` (14 tests one-for-one) +
 |--------|--------|------:|-------|
 | ✅ `error` | `src/error.cyr` | 20 | 9 codes + names + finite/sentinel helpers |
 | ✅ `clock` | `src/clock.cyr` | 14 | `AudioClock` struct; Option→NaN sentinel; int↔f64 |
-| ✅ `simd` | `src/simd.cyr` | 34 | 14 scalar kernels; SIMD arms dropped (platform-blocked) |
+| ✅ `simd` | `src/simd.cyr` | 34 | 14 scalar kernels; SIMD arms dropped (platform-blocked). 2.3.2: 14 packed/walked kernels + 14 `_scalar` oracles, 59 assertions |
 | ✅ `buffer/mod` | `src/buffer.cyr` | 23 | `AudioBuffer` + `BufferPool`; mix/resample_linear |
 | ✅ `buffer/dither` | `src/dither.cyr` | 6 | TPDF + noise-shaped; u32 xorshift masked |
 | ✅ `buffer/convert` | `src/convert.cyr` | 44 | i32/planar/mono-stereo/i24-packed/downmix |
-| ✅ `buffer/resample` | `src/resample.cyr` | 12 | windowed-sinc (scalar); Blackman-Harris window |
+| ✅ `buffer/resample` | `src/resample.cyr` | 12 | windowed-sinc (scalar); Blackman-Harris window. 2.3.2: the oracle's default `simd` path (weights once per frame), with the `not(simd)` path kept as `dhvani_resample_sinc_scalar` |
 | ✅ `buffer/ops` | `src/ops.cyr` | 10 | crossfade + fades (equal-power matched inline) |
 
 **Deferred out of Wave A** (not blockers):
@@ -355,7 +360,8 @@ Parity: `tests/g2p.tcyr` (14 tests one-for-one) +
   `dhvani_tan` (added to error.cyr — no `f64_tan` in stdlib). **16 green**.
 - ✅ `biquad` → `src/biquad.cyr` — RBJ cookbook, 8 types; data-carrying
   `FilterType{gain_db}` → code + separate field; `abaco::angular_frequency`/
-  `db_gain_factor`; SIMD stereo fast-path dropped (scalar loop). **16 green**.
+  `db_gain_factor`; SIMD stereo fast-path dropped (scalar loop) — restored in 2.3.2 on
+  `dh_simd_biquad_stereo_raw`. **16 green**.
 - ✅ `dsp/mod` → `src/dsp.cyr` — facade free fns (noise_gate/hard_limiter/
   normalize) + `soft_knee_gain`; abaco db-math re-exports. **24 green** (12
   tests; 7 deferred to Wave C — need compressor/limiter/delay/eq).

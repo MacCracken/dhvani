@@ -104,5 +104,46 @@ var dominant = dhvani_spectrum_dominant_frequency(spec);
 var freqres = dhvani_spectrum_freq_resolution(spec);
 assert(f64_lt(f64_abs(f64_sub(dominant, f64_from(440))), f64_mul(freqres, 2.0)), "dominant freq near 440Hz");
 
+# ---- default_path_matches_scalar_path (2.3.2) ----
+# dhvani_resample_sinc (the oracle's `simd` path: weights once per frame, shared by the
+# channels, gathered taps, lane-order sums) against dhvani_resample_sinc_scalar (its
+# `not(simd)` path). Same shape, and every sample equal to within rounding, up and down
+# (down scales the kernel), at every quality, mono and stereo with distinct channels.
+fn stereo_two_tones(frames, sr) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var t = f64_div(f64_from(i), f64_from(sr));
+        vec_push(v, f64_mul(f64_sin(f64_mul(f64_mul(2.0, DH_PI), f64_mul(440.0, t))), 0.8));
+        vec_push(v, f64_mul(f64_sin(f64_mul(f64_mul(2.0, DH_PI), f64_mul(3000.0, t))), 0.5));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, sr);
+}
+fn paths_agree(buf, rate, quality) {
+    var a = dhvani_resample_sinc(buf, rate, quality);
+    var b = dhvani_resample_sinc_scalar(buf, rate, quality);
+    if (DhAudioBuffer_frames(a) != DhAudioBuffer_frames(b)) { return 0; }
+    if (DhAudioBuffer_channels(a) != DhAudioBuffer_channels(b)) { return 0; }
+    if (DhAudioBuffer_sample_rate(a) != DhAudioBuffer_sample_rate(b)) { return 0; }
+    var sa = DhAudioBuffer_samples(a);
+    var sb = DhAudioBuffer_samples(b);
+    if (vec_len(sa) != vec_len(sb)) { return 0; }
+    var i = 0;
+    while (i < vec_len(sa)) {
+        if (near(vec_get(sa, i), vec_get(sb, i), 0.000000000001) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+test_group("default_path_matches_scalar_path");
+var pst = stereo_two_tones(1000, 44100);
+var pmo = dhvani_buffer_from_interleaved(make_sine(777, 440.0, 48000), 1, 48000);
+assert_eq(paths_agree(pst, 48000, DH_RESAMPLE_GOOD), 1, "stereo 44.1k -> 48k, good");
+assert_eq(paths_agree(pst, 22050, DH_RESAMPLE_BEST), 1, "stereo 44.1k -> 22.05k, best (scaled kernel)");
+assert_eq(paths_agree(pst, 96000, DH_RESAMPLE_DRAFT), 1, "stereo 44.1k -> 96k, draft");
+assert_eq(paths_agree(pmo, 44100, DH_RESAMPLE_GOOD), 1, "mono 48k -> 44.1k, good");
+assert_eq(paths_agree(pmo, 8000, DH_RESAMPLE_BEST), 1, "mono 48k -> 8k, best (6x scaled kernel)");
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -97,9 +97,10 @@ sibling bundles it uses, and unused wrapper refs DCE-prune. The layers:
 | Sampler | [nidhi](https://github.com/MacCracken/nidhi) | Sample playback |
 | Acoustics | [goonj](https://github.com/MacCracken/goonj) | Room IR, convolution/FDN reverb, ambisonics, presets |
 
-> **Blocked** (dependency still Rust, not yet ported to Cyrius): `g2p` (via
-> shabda), personality/mood voice mapping (via bhava). SIMD acceleration is a
-> post-port non-goal — the port is scalar-only pending a Cyrius SIMD story.
+> **Blocked** (dependency still Rust, not yet ported to Cyrius): personality/mood
+> voice mapping (via bhava). `g2p` (via shabda) is ported since 2.2.0. The buffer
+> kernels are SIMD-accelerated again since 2.3.2, on Cyrius's packed verbs (SSE2 /
+> AVX2 / NEON). See [`docs/guides/simd.md`](docs/guides/simd.md).
 
 ---
 

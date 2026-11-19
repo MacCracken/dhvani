@@ -95,6 +95,12 @@ Full per-module ledger + established conventions live in
 - **f32 → f64** throughout (the hisab/ganita math is f64-only; widening is
   forced and improves precision). Loosen f32-oracle test tolerances where
   bit-exactness isn't meaningful.
+- **Packed SIMD verbs have no scalar tail.** `f64v_*` steps 2 lanes and
+  `f64v256_*` 4, so an odd `n` writes past `dst`. Call them only through the
+  `dh_simd_row_*` helpers in `src/simd.cyr`, gate the 256-bit verbs on
+  `simd_has_avx2()` (SIGILL otherwise), and keep every accelerated kernel's
+  `_scalar` form as its parity oracle. Element-wise kernels must be bit-identical
+  to it; test every size around a lane boundary, with canary slots past `len`.
 - **enums → integer `var` codes**; **`Result`/`Option` → sentinel/error-code
   returns** (`ERR_*`, NaN, `-1`, null) — payloads via `lib/tagged.cyr`. No
   unwinding, no `panic`.

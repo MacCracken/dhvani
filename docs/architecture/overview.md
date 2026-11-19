@@ -12,7 +12,7 @@
 1. **f64 internally** — all processing in 64-bit float; format conversion at I/O boundaries only (i16/i24/i32/f32/f64/u8)
 2. **Sample-accurate** — clock, mixing, and DSP operate at sample granularity
 3. **Zero-allocation hot path** — mixing and DSP reuse buffers; the free-less bump allocator makes per-frame alloc a leak
-4. **Scalar kernels** — mixing, resampling, gain run through portable scalar loops (SIMD arms are platform-blocked, see below)
+4. **Packed kernels** — mixing, gain, RMS, resampling and the stereo biquad run on Cyrius packed verbs (SSE2/AVX2/NEON), each with its scalar form kept as the parity oracle (`docs/guides/simd.md`)
 5. **FFI-free device I/O** — Linux audio capture/output via vani (raw `/dev/snd` ALSA PCM over ioctls, no libpipewire/libasound)
 
 ---
@@ -82,7 +82,7 @@ src/
 ├── playback.cyr       AudioBuffer ↔ vani PCM (S16/S24/S32): blocking + RT ring player/recorder
 ├── device.cyr         Device enumeration + default-device open (via yukti)
 │   compute
-├── simd.cyr           Scalar audio kernels (SSE2/AVX2/NEON arms platform-blocked, dropped)
+├── simd.cyr           Audio kernels: packed (f64v_* / f64v256_*) + their `_scalar` oracles
 │   feature layers (wrap sibling bundles; DCE-prune when unused)
 ├── synthesis.cyr      Synth engines via naad (subtractive, FM, additive, wavetable, granular, drum, vocoder)
 ├── voice_synth.cyr    Voice synthesis via svara (glottal, formant, phoneme, prosody, vocal tract) — bhava_bridge blocked (bhava still Rust)

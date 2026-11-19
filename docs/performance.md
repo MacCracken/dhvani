@@ -1,29 +1,32 @@
 # Performance Guide
 
-## Scalar-f64 kernels
+## Buffer kernels (packed since 2.3.2)
 
-The Cyrius port is **scalar-f64 only** — SIMD intrinsics (`simd/x86`,
-`simd/aarch64`) are platform-blocked pending a Cyrius SIMD story, and all
-sample math widened from f32 to f64. The following operations run as scalar f64
-loops (no vector lanes):
+All sample math is f64 (widened from the oracle's f32). Since 2.3.2 the buffer kernels
+run on Cyrius's packed verbs: `f64v_*` (2 lanes; SSE2, NEON) and `f64v256_*` (4 lanes;
+AVX2, chosen by CPUID). Through 2.3.1 they were scalar only. 512-sample block, x86_64
+with AVX2:
 
-| Operation | Kernel | Notes |
-|-----------|--------|-------|
-| `mix()` | scalar f64 | element-wise add/accumulate |
-| `apply_gain()` | scalar f64 | element-wise multiply |
-| `clamp()` / `dhvani_dsp_hard_limiter()` | scalar f64 | element-wise clamp |
-| `peak()` | scalar f64 | running max |
-| `rms()` | scalar f64 | running sum of squares |
-| `dhvani_dsp_noise_gate()` | scalar f64 | element-wise threshold |
-| i16/i24/i32 ↔ f64 convert | scalar f64 | format conversion |
-| `resample_sinc()` | scalar f64 | weighted sum |
+| Operation | Kernel | vs 2.3.1 |
+|-----------|--------|---------:|
+| `mix()` | packed add | 58× |
+| `apply_gain()` | packed scale | 61× |
+| `rms()` | packed dot (sum of squares) | 14.7× |
+| `resample_sinc()` | packed dot (weighted sum), weights once per frame | — |
+| `peak()` | walked running max | 5.7× |
+| `clamp()` / `dhvani_dsp_hard_limiter()` | walked clamp | 4.4× |
+| `dhvani_dsp_noise_gate()` | walked threshold | 2.6× |
+| i16/i24/u8 ↔ f64 convert | walked | 2.8–5× |
+| `BiquadFilter::process()`, stereo at full wet | 2-lane L/R vector | 3.8× |
 
-IIR-feedback effects are inherently sequential (they were never vectorized in
-the Rust source either):
-- `BiquadFilter::process()`, `Reverb`, `Compressor`, `Limiter`
+"Walked" kernels have no packed verb (no packed min/max, compare or convert), so they
+stay scalar, but over the raw element storage instead of a `vec_get` call per sample.
 
-> The scalar-only kernels are the source of the Rust-vs-Cyrius throughput gap —
-> see [`benchmarks-rust-v-cyrius.md`](benchmarks-rust-v-cyrius.md).
+The other IIR-feedback effects are sequential per channel and stay scalar, as in the
+Rust source: `Reverb`, `Compressor`, `Limiter`, and mono or part-wet biquads. Per
+second of stereo audio, gain is 54× and biquad lowpass 3.85×, while the compressor and
+limiter are unchanged. See [`benchmarks-rust-v-cyrius.md`](benchmarks-rust-v-cyrius.md)
+and `BENCHMARKS.md`.
 
 ## Benchmarking
 

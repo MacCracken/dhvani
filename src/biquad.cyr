@@ -1,8 +1,9 @@
 # biquad.cyr -- RBJ Audio EQ Cookbook biquad filters (Direct Form II Transposed).
-# Ports rust-old/src/dsp/biquad.rs. L1: deps error + buffer + abaco
+# Ports rust-old/src/dsp/biquad.rs. L1: deps error + simd + buffer + abaco
 # (angular_frequency, db_gain_factor). FilterType enum with data-carrying
 # Peaking/LowShelf/HighShelf{gain_db} -> integer code + a separate gain_db
-# param/field. The SIMD stereo fast path is dropped (scalar per-channel loop).
+# param/field. process() keeps the oracle's stereo fast path (2.3.2; dropped
+# through 2.3.1, when simd had no vector arm to run it on).
 
 var DH_BQ_LOWPASS   = 0;
 var DH_BQ_HIGHPASS  = 1;
@@ -138,7 +139,7 @@ fn dhvani_biquad_new(filter_type, gain_db, freq_hz, q, sample_rate, channels) {
     return self;
 }
 
-# process(buf) -- filter in place with dry/wet mix (scalar per-channel).
+# process(buf) -- filter in place with dry/wet mix.
 fn dhvani_biquad_process(self, buf) {
     if (DhBiquadFilter_bypassed(self) == 1) { return 0; }
     var ch = DhAudioBuffer_channels(buf);
@@ -147,6 +148,19 @@ fn dhvani_biquad_process(self, buf) {
     var coeffs = DhBiquadFilter_coeffs(self);
     var states = DhBiquadFilter_states(self);
     var mix = DhBiquadFilter_mix(self);
+    # Fast path, as in the oracle: stereo at full wet (|mix - 1| < f32::EPSILON) runs
+    # both channels through the cross-channel kernel, which reads the coeffs and the two
+    # states in place (DhBiquadCoeffs / DhBiquadState are its layouts) -- no vec built.
+    # The output is pure wet, where the loop below would add input * (1 - mix).
+    if (ch == 2) {
+        if (vec_len(states) >= 2) {
+            if (f64_lt(f64_abs(f64_sub(mix, 1.0)), DH_EPSILON) == 1) {
+                dh_simd_biquad_stereo_raw(dh_vec_data(samples), vec_len(samples) / 2, coeffs,
+                  vec_get(states, 0), vec_get(states, 1));
+                return 0;
+            }
+        }
+    }
     var dry = f64_sub(1.0, mix);
     var frame = 0;
     while (frame < frames) {

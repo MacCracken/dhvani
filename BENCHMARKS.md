@@ -132,6 +132,68 @@ each cell is the mean of the two runs. **No path regressed**; every delta is wit
 | dynamics mono_1s | 4.52 ms | 4.47 ms | −1.2 % |
 | fft 4096 mono | 3.08 ms | 3.10 ms | +0.6 % |
 
+## 2.3.2 — the packed kernels (same box, one session, interleaved)
+
+Three trees, each run twice in the order 2.3.1 → deps → 2.3.2 → 2.3.1 → deps → 2.3.2, with
+every cell the mean of its two runs:
+
+- **2.3.1**: a clean `git archive` of 2.3.1.
+- **deps**: 2.3.2's dependency bump with 2.3.1's kernels.
+- **2.3.2**: the bump plus the packed kernels, the biquad stereo fast path and the
+  resampler's default path.
+
+All three ran the same two bench files, which 2.3.2 changes in two ways:
+
+- **Eight new rows** (`add`, `sum_sq`, `clamp`, `gate`, `wsum`, `f32->i16`, the stereo
+  biquad kernel, and a stereo biquad's `process`).
+- **A fixture fix.** `dhvani_osc_new`, `dhvani_biquad_new` and `dhvani_svf_new` take an
+  INTEGER sample rate. Both bench files passed `f64_from(44100)`, whose bit pattern is a
+  ~4.7e18 Hz rate. That made the oscillator sit at phase ≈ 0 (13.5 ns at 2.3.1; 50 ns for
+  a real 440 Hz sine) and the "1 kHz lowpass" a near-passthrough. The rows below are the
+  fixed fixtures, so compare them only with each other.
+
+**The dependency bump moved nothing**: every row within ±3.8 % of 2.3.1, inside run-to-run
+spread (2.3.2's own two compressor runs differ by 4.9 %). The box ran ~25 % slower than in
+the 2.3.1 session (the unchanged compressor: 5.05 → 6.52 ms), so read the ratios, not the
+absolute times.
+
+| hot path (`tests/hotpath.bcyr`) | 2.3.1 | deps | 2.3.2 | vs deps |
+|----------|------:|-----:|------:|--------:|
+| `osc_sample` (sine, per-sample) | 50 ns | 50 ns | 50 ns | 1.00× |
+| `biquad_process_sample` (per-sample) | 25 ns | 25 ns | 25 ns | 1.00× |
+| `svf_process_sample` (per-sample) | 28 ns | 28 ns | 28 ns | 1.00× |
+| `simd_add_buffers` (512) | 7.34 µs | 7.38 µs | **127 ns** | **58×** |
+| `simd_apply_gain` (512) | 5.12 µs | 5.18 µs | **85 ns** | **61×** |
+| `simd_sum_of_squares` (512) | 2.84 µs | 2.84 µs | **194 ns** | **14.7×** |
+| `simd_weighted_sum` (512) | 5.48 µs | 5.28 µs | **417 ns** | **12.7×** |
+| `simd_peak_abs` (512) | 5.90 µs | 5.91 µs | **1.04 µs** | 5.7× |
+| `simd_i16_to_f32` (512) | 5.11 µs | 5.22 µs | **1.04 µs** | 5.0× |
+| `simd_clamp` (512) | 7.54 µs | 7.33 µs | **1.68 µs** | 4.4× |
+| `simd_biquad_stereo` (256 frames) | 17.6 µs | 17.2 µs | **3.99 µs** | 4.3× |
+| `biquad_process`, stereo full wet (256 frames) | 15.6 µs | 15.4 µs | **4.01 µs** | 3.8× |
+| `simd_f32_to_i16` (512) | 7.84 µs | 7.62 µs | **2.71 µs** | 2.8× |
+| `simd_noise_gate` (512) | 2.82 µs | 2.71 µs | **1.04 µs** | 2.6× |
+| `fft_spectrum` (1024-radix-2) | 684 µs | 665 µs | 664 µs | 1.00× |
+
+| per second of audio (`tests/bench_compare.bcyr`) | 2.3.1 | deps | 2.3.2 | vs deps |
+|----------|------:|-----:|------:|--------:|
+| gain stereo_1s | 879 µs | 878 µs | **16.3 µs** | **54×** |
+| peak stereo_1s | 1.02 ms | 1.02 ms | **173 µs** | 5.9× |
+| biquad_lp stereo_1s | 2.56 ms | 2.58 ms | **669 µs** | 3.85× |
+| r128 stereo_1s | 8.72 ms | 8.87 ms | **4.87 ms** | 1.82× |
+| compressor stereo_1s | 6.52 ms | 6.61 ms | 6.57 ms | 1.01× |
+| limiter stereo_1s | 4.77 ms | 4.83 ms | 4.77 ms | 1.01× |
+| dynamics mono_1s | 4.55 ms | 4.67 ms | 4.60 ms | 1.02× |
+| fft 4096 mono | 3.10 ms | 3.22 ms | 3.17 ms | 1.02× |
+
+- `add`, `gain`, `sum_sq` and `wsum` are packed (`f64v_*` / `f64v256_*`). `peak`, `clamp`,
+  `gate` and the conversions have no packed verb and are walked over the element storage.
+  The stereo biquad is one 2-lane vector per frame.
+- r128 gains through its K-weighting, which runs `biquad_process` on the stereo buffer at
+  full wet and so takes the fast path. The compressor, limiter, dynamics and FFT do not
+  touch the kernels and are flat.
+- The per-sample rows and the FFT are dhvani's own scalar code, unchanged, and flat.
+
 Notes:
 - Per-sample DSP (osc/biquad/svf) benched with `bench_run_batch` (200k calls,
   batched to amortize the ~240 ns/pair `clock_gettime` overhead).
