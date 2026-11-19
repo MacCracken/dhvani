@@ -18,9 +18,12 @@
 
 # render_sequence(sequence, voice, sample_rate) -- render a PhonemeSequence to a
 # mono AudioBuffer. Returns 0 (null) on synth failure or buffer-construction
-# failure (matching the Rust map_err chains that produced NadaError::Dsp).
+# failure (matching the Rust map_err chains that produced NadaError::Dsp), and for
+# a sequence or voice handle <= 0 (svara reads both with no check).
 #must_use
 fn dhvani_vsynth_render_sequence(sequence, voice, sample_rate) {
+    if (sequence <= 0) { return 0; }
+    if (voice <= 0) { return 0; }
     var samples = svara_sequence_render(sequence, voice, f64_from(sample_rate));
     if (svara_is_err(samples) == 1) { return 0; }
     return dhvani_buffer_from_interleaved(samples, 1, sample_rate);
@@ -28,44 +31,75 @@ fn dhvani_vsynth_render_sequence(sequence, voice, sample_rate) {
 
 # render_phoneme(phoneme, voice, sample_rate, duration) -- render a single
 # phoneme to a mono AudioBuffer. Returns 0 (null) on synth failure or buffer
-# construction failure.
+# construction failure, and for a voice handle <= 0. (`phoneme` is a code, which
+# svara validates itself; 0 is a valid one.)
 #must_use
 fn dhvani_vsynth_render_phoneme(phoneme, voice, sample_rate, duration) {
+    if (voice <= 0) { return 0; }
     var samples = svara_phoneme_synthesize(phoneme, voice, f64_from(sample_rate), duration);
     if (svara_is_err(samples) == 1) { return 0; }
     return dhvani_buffer_from_interleaved(samples, 1, sample_rate);
+}
+
+# 1 iff source and tract are both usable handles. Both are raw i64 that share their
+# value space with svara's negative error codes (svara_glottal_new ->
+# SVARA_ERR_INVALID_PITCH, svara_tract_new -> a mapped naad error). The consumers
+# do raw load64/store64 off the handle -- no vec bounds check stands behind them --
+# so an unchecked negative or null handle is a wild access. Rust took &mut refs
+# here, which made an error value unrepresentable; the flattened port has to say
+# it. svara_is_err only tests `code < 0`, so 0 needs its own test.
+fn dh_vsynth_handles_ok(source, tract) {
+    if (source == 0) { return 0; }
+    if (svara_is_err(source) == 1) { return 0; }
+    if (tract == 0) { return 0; }
+    if (svara_is_err(tract) == 1) { return 0; }
+    return 1;
 }
 
 # render_vocal_tract(source, tract, frames, sample_rate) -- the lowest-level
 # voice bridge: pull `frames` samples from a GlottalSource through a VocalTract,
 # assemble a mono AudioBuffer. Silence fallback on construction failure (matches
 # the Rust unwrap_or_else). No closure needed -- the glottal/tract fns are called
-# directly per frame.
+# directly per frame. One exact allocation for the samples; 0 for an error/null
+# handle or a refused allocation.
 #must_use
 fn dhvani_vsynth_render_vocal_tract(source, tract, frames, sample_rate) {
-    # Both handles are raw i64 that share their value space with svara's negative
-    # error codes (svara_glottal_new -> SVARA_ERR_INVALID_PITCH, svara_tract_new
-    # -> a mapped naad error). The consumers below do raw load64/store64 off the
-    # handle -- no vec bounds check stands behind them -- so an unchecked
-    # negative or null handle is a wild access. Rust took &mut refs here, which
-    # made an error value unrepresentable; the flattened port has to say it.
-    # svara_is_err only tests `code < 0`, so 0 needs its own test.
-    if (source == 0) { return 0; }
-    if (svara_is_err(source) == 1) { return 0; }
-    if (tract == 0) { return 0; }
-    if (svara_is_err(tract) == 1) { return 0; }
-    var samples = vec_new();
-    var i = 0;
-    while (i < frames) {
+    if (dh_vsynth_handles_ok(source, tract) == 0) { return 0; }
+    var nf = frames;
+    if (nf < 0) { nf = 0; }
+    var samples = dh_vec_zeros(nf);
+    if (vec_len(samples) != nf) { return 0; }
+    var d = dh_vec_data(samples);
+    var end = d + nf * 8;
+    while (d < end) {
         var glottal = svara_glottal_next_sample(source);
-        vec_push(samples, svara_tract_process_sample(tract, glottal));
-        i = i + 1;
+        store64(d, svara_tract_process_sample(tract, glottal));
+        d = d + 8;
     }
     var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
     if (buf == 0) {
         var sr = sample_rate;
         if (sr < 1) { sr = 1; }
-        return dhvani_buffer_silence(1, frames, sr);
+        return dhvani_buffer_silence(1, nf, sr);
     }
     return buf;
+}
+
+# render_vocal_tract_into: alloc-free per-block form over a caller-owned MONO
+# buffer (its own frame count). DHVANI_ERR_NONE, or DHVANI_ERR_INVALID_PARAMETER for
+# an error/null handle, a null buffer or a buffer that is not 1-channel.
+fn dhvani_vsynth_render_vocal_tract_into(source, tract, buf) {
+    if (dh_vsynth_handles_ok(source, tract) == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (buf == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dhvani_buffer_channels(buf) != 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var samples = dhvani_buffer_samples(buf);
+    var nf = dh_imin(dhvani_buffer_frames(buf), vec_len(samples));
+    var d = dh_vec_data(samples);
+    var end = d + nf * 8;
+    while (d < end) {
+        var glottal = svara_glottal_next_sample(source);
+        store64(d, svara_tract_process_sample(tract, glottal));
+        d = d + 8;
+    }
+    return DHVANI_ERR_NONE;
 }

@@ -174,51 +174,219 @@ while (call_n < 4) {
 # Warm up first (channel setup + FDL growth legitimately allocate), then measure
 # a steady-state window.
 test_group("process_block_is_alloc_free");
-var ir_a = vec_new(); vec_push(ir_a, 1.0); vec_push(ir_a, 0.5); vec_push(ir_a, 0.25);
-var rev_a = dhvani_conv_new(ir_a, 1.0, 44100);
+var ir_pa = vec_new(); vec_push(ir_pa, 1.0); vec_push(ir_pa, 0.5); vec_push(ir_pa, 0.25);
+var rev_pa = dhvani_conv_new(ir_pa, 1.0, 44100);
 var warm = 0;
 while (warm < 3) {
     var sa0 = vec_new();
     var wa = 0;
     while (wa < 2048) { vec_push(sa0, 0.1); wa = wa + 1; }
-    dhvani_conv_process(rev_a, dhvani_buffer_from_interleaved(sa0, 1, 44100));
+    dhvani_conv_process(rev_pa, dhvani_buffer_from_interleaved(sa0, 1, 44100));
     warm = warm + 1;
 }
 # steady state: build the input buffer OUTSIDE the measured window
-var sa = vec_new();
+var sa_pa = vec_new();
 var ka = 0;
-while (ka < 2048) { vec_push(sa, 0.1); ka = ka + 1; }
-var buf_a = dhvani_buffer_from_interleaved(sa, 1, 44100);
+while (ka < 2048) { vec_push(sa_pa, 0.1); ka = ka + 1; }
+var buf_pa = dhvani_buffer_from_interleaved(sa_pa, 1, 44100);
 var used_before = alloc_used();
-dhvani_conv_process(rev_a, buf_a);
+dhvani_conv_process(rev_pa, buf_pa);
 var used_after = alloc_used();
 assert_eq(used_after - used_before, 0, "conv_process allocates 0 bytes in steady state");
 
-
 # ---- set_ir_grows_partitions (regression, 2.2.3) ----
-# dhvani_conv_ensure_channels is the ONLY place the per-channel FDL is sized to
-# the partition count, and it early-returns when the channel count is unchanged.
-# So: process once with a SHORT ir (FDL sized to 1 partition), then set a LONGER
-# ir, then process again -- process_block indexes ch_fdl[0..num_partitions) and
-# runs off the end (vec_get -> _vec_die -> exit 1). Reaching the assert is the
-# regression proof.
+# Through 2.2.2 dhvani_conv_ensure_channels was the ONLY place the per-channel FDL
+# was sized to the partition count, and it early-returns when the channel count
+# is unchanged. So: process once with a SHORT ir (FDL sized to 1 partition), then
+# set a LONGER ir, then process again -- process_block indexes
+# ch_fdl[0..num_partitions) and ran off the end (vec_get -> _vec_die -> exit 1).
+# set_ir now grows every allocated channel's FDL itself. Reaching the assert is
+# the regression proof.
 test_group("set_ir_grows_partitions");
 var ir_g0 = vec_new(); vec_push(ir_g0, 1.0);
-var rev_g = dhvani_conv_new(ir_g0, 1.0, 44100);
+var rev_gg = dhvani_conv_new(ir_g0, 1.0, 44100);
 var sg0 = vec_new();
 var gj = 0;
 while (gj < 2048) { vec_push(sg0, 0.2); gj = gj + 1; }
-dhvani_conv_process(rev_g, dhvani_buffer_from_interleaved(sg0, 1, 44100));   # sizes FDL to the SHORT ir
+dhvani_conv_process(rev_gg, dhvani_buffer_from_interleaved(sg0, 1, 44100));   # sizes FDL to the SHORT ir
 var ir_g1 = vec_new();
 var gk = 0;
 while (gk < 4096) { vec_push(ir_g1, 0.01); gk = gk + 1; }                    # many more partitions
-dhvani_conv_set_ir(rev_g, ir_g1);
-var sg1 = vec_new();
+dhvani_conv_set_ir(rev_gg, ir_g1);
+var sg1_g = vec_new();
 var gm = 0;
-while (gm < 2048) { vec_push(sg1, 0.2); gm = gm + 1; }
-var buf_g3 = dhvani_buffer_from_interleaved(sg1, 1, 44100);
-dhvani_conv_process(rev_g, buf_g3);
+while (gm < 2048) { vec_push(sg1_g, 0.2); gm = gm + 1; }
+var buf_g3 = dhvani_buffer_from_interleaved(sg1_g, 1, 44100);
+dhvani_conv_process(rev_gg, buf_g3);
 assert_eq(conv_all_finite(buf_g3), 1, "longer ir after process: no OOB, output finite");
+
+# ---- helpers (regression groups, 2.3.2) ----
+var cv_lcg = 777;
+fn cv_noise() {
+    cv_lcg = cv_lcg * 6364136223846793005 + 1442695040888963407;
+    var m = (cv_lcg >> 11) & 0x1FFFFFFFFFFFFF;
+    return f64_sub(f64_mul(f64_div(f64_from(m), 9007199254740992.0), 2.0), 1.0);
+}
+fn cv_ir(n, seed) {
+    cv_lcg = seed;
+    var v = vec_new();
+    var env = 1.0;
+    var i = 0;
+    while (i < n) { vec_push(v, f64_mul(env, cv_noise())); env = f64_mul(env, 0.999); i = i + 1; }
+    return v;
+}
+fn cv_sig(frames, ch, seed) {
+    cv_lcg = seed;
+    var v = vec_new();
+    var i = 0;
+    while (i < frames * ch) { vec_push(v, f64_mul(0.5, cv_noise())); i = i + 1; }
+    return dhvani_buffer_from_interleaved(v, ch, 44100);
+}
+fn cv_ndiff(a, b) {
+    var sa = dhvani_buffer_samples(a);
+    var sb = dhvani_buffer_samples(b);
+    var n = vec_len(sa);
+    var i = 0;
+    var d = 0;
+    while (i < n) { if (vec_get(sa, i) != vec_get(sb, i)) { d = d + 1; } i = i + 1; }
+    return d;
+}
+
+# ---- channel_switch_is_alloc_free (regression, 2.3.2) ----
+# Through 2.3.2 every channel-count change reallocated the input blocks, overlap
+# and the whole frequency delay line (~428 KB per switch for an 8-partition IR):
+# a graph routing mono and stereo buffers through one reverb leaked per call. The
+# storage is grow-only now; a switch zeroes in place -- the oracle's fresh-zero
+# state, so the output equals a fresh reverb's bit for bit.
+test_group("channel_switch_is_alloc_free");
+var sw_ir_c = cv_ir(4096, 5);
+var sw_rev_c = dhvani_conv_new(sw_ir_c, 0.6, 44100);
+var sw_mono_c = cv_sig(512, 1, 1);
+var sw_st_c = cv_sig(512, 2, 2);
+dhvani_conv_process(sw_rev_c, sw_mono_c);
+dhvani_conv_process(sw_rev_c, sw_st_c);
+var sw_uc0 = alloc_used();
+var sw_kc = 0;
+while (sw_kc < 10) {
+    dhvani_conv_process(sw_rev_c, sw_mono_c);
+    dhvani_conv_process(sw_rev_c, sw_st_c);
+    sw_kc = sw_kc + 1;
+}
+var sw_uc1 = alloc_used();
+assert_eq(sw_uc1 - sw_uc0, 0, "10x mono/stereo alternation allocates 0 bytes");
+dhvani_conv_process(sw_rev_c, cv_sig(512, 1, 9));
+var sw_xa_c = cv_sig(1536, 2, 3);
+var sw_xb_c = cv_sig(1536, 2, 3);
+var sw_fresh_c = dhvani_conv_new(sw_ir_c, 0.6, 44100);
+dhvani_conv_process(sw_rev_c, sw_xa_c);
+dhvani_conv_process(sw_fresh_c, sw_xb_c);
+assert_eq(cv_ndiff(sw_xa_c, sw_xb_c), 0, "after a switch the output == a fresh reverb's, bit for bit");
+
+# ---- set_ir_reuses_storage (regression, 2.3.2) ----
+# set_ir refills the pooled partition buffers and keeps the FDL when the new IR
+# needs no more partitions than before (through 2.3.2 every set_ir rebuilt the
+# whole FDL: ~831 KB for a same-length IR). Output must equal a fresh reverb
+# built with that IR, for a same-length, a shorter and a longer-than-ever IR.
+test_group("set_ir_reuses_storage");
+var ir_r2 = cv_ir(4096, 11);
+var ur0 = alloc_used();
+dhvani_conv_set_ir(sw_rev_c, ir_r2);
+var ur1 = alloc_used();
+assert_eq(ur1 - ur0, 0, "set_ir with a same-length IR allocates 0 bytes");
+var ya_r = cv_sig(1024, 2, 4);
+var yb_r = cv_sig(1024, 2, 4);
+var fresh_r = dhvani_conv_new(ir_r2, 0.6, 44100);
+dhvani_conv_process(sw_rev_c, ya_r);
+dhvani_conv_process(fresh_r, yb_r);
+assert_eq(cv_ndiff(ya_r, yb_r), 0, "same-length set_ir == fresh reverb");
+var ir_r3 = cv_ir(700, 12);
+dhvani_conv_set_ir(sw_rev_c, ir_r3);
+var za_r = cv_sig(1024, 2, 5);
+var zb_r = cv_sig(1024, 2, 5);
+var fresh_r3 = dhvani_conv_new(ir_r3, 0.6, 44100);
+dhvani_conv_process(sw_rev_c, za_r);
+dhvani_conv_process(fresh_r3, zb_r);
+assert_eq(cv_ndiff(za_r, zb_r), 0, "shorter set_ir == fresh reverb");
+var ir_r4 = cv_ir(6000, 13);
+dhvani_conv_set_ir(sw_rev_c, ir_r4);
+var wa_r = cv_sig(2048, 2, 6);
+var wb_r = cv_sig(2048, 2, 6);
+var fresh_r4 = dhvani_conv_new(ir_r4, 0.6, 44100);
+dhvani_conv_process(sw_rev_c, wa_r);
+dhvani_conv_process(fresh_r4, wb_r);
+assert_eq(cv_ndiff(wa_r, wb_r), 0, "longer-than-ever set_ir (FDL grown) == fresh reverb");
+var ma_r = cv_sig(1024, 1, 7);
+var mb_r = cv_sig(1024, 1, 7);
+var fresh_r5 = dhvani_conv_new(ir_r4, 0.6, 44100);
+dhvani_conv_process(sw_rev_c, ma_r);
+dhvani_conv_process(fresh_r5, mb_r);
+assert_eq(cv_ndiff(ma_r, mb_r), 0, "and a later channel switch still matches");
+
+# ---- streaming_timing_is_the_oracles (pins documented behavior, 2.3.2) ----
+# process() writes a block's output only when the block completes, back over that
+# block's frames (zero added latency, as rust-old). Frames of a block completing
+# in a later call come back RAW. With IR = [0.5] and mix 1.0 a processed frame is
+# exactly 0.5x; 256-frame calls against the 512 block: odd calls raw, even
+# processed; a one-shot 1000-frame call leaves frames 512..999 raw.
+test_group("streaming_timing_is_the_oracles");
+var ir_t = vec_new(); vec_push(ir_t, 0.5);
+var rev_t = dhvani_conv_new(ir_t, 1.0, 44100);
+var t1 = dhvani_buffer_silence(1, 256, 44100);
+var t2 = dhvani_buffer_silence(1, 256, 44100);
+var ti = 0;
+while (ti < 256) {
+    vec_set(dhvani_buffer_samples(t1), ti, 0.25);
+    vec_set(dhvani_buffer_samples(t2), ti, 0.25);
+    ti = ti + 1;
+}
+dhvani_conv_process(rev_t, t1);
+dhvani_conv_process(rev_t, t2);
+assert_eq(vec_get(dhvani_buffer_samples(t1), 10), 0.25, "call 1 (block incomplete) returns raw input");
+var t2v = vec_get(dhvani_buffer_samples(t2), 10);
+assert(f64_lt(f64_abs(f64_sub(t2v, 0.125)), 0.0000000001), "call 2 completes the block: 0.5x");
+var rev_t2 = dhvani_conv_new(ir_t, 1.0, 44100);
+var t3 = dhvani_buffer_silence(1, 1000, 44100);
+var tk = 0;
+while (tk < 1000) { vec_set(dhvani_buffer_samples(t3), tk, 0.25); tk = tk + 1; }
+dhvani_conv_process(rev_t2, t3);
+var t3v = vec_get(dhvani_buffer_samples(t3), 100);
+assert(f64_lt(f64_abs(f64_sub(t3v, 0.125)), 0.0000000001), "one-shot: frame 100 processed");
+assert_eq(vec_get(dhvani_buffer_samples(t3), 700), 0.25, "one-shot: frame 700 (partial last block) raw");
+
+# ---- zero_channel_buffer (hardening, 2.3.2) ----
+test_group("zero_channel_buffer");
+var z_c = dhvani_buffer_silence(0, 600, 44100);
+dhvani_conv_process(sw_rev_c, z_c);
+assert_eq(vec_len(dhvani_buffer_samples(z_c)), 0, "0-channel buffer is a no-op");
+var after_z = cv_sig(512, 2, 8);
+dhvani_conv_process(sw_rev_c, after_z);
+assert_eq(conv_all_finite(after_z), 1, "and the reverb still works after it");
+
+# ---- partition_count_div_ceil (2.3.2) ----
+test_group("partition_count_div_ceil");
+assert_eq(dh_conv_num_partitions(0, 512), 0, "empty IR -> 0 partitions");
+assert_eq(dh_conv_num_partitions(1, 512), 1, "1 sample -> 1");
+assert_eq(dh_conv_num_partitions(512, 512), 1, "exact block -> 1");
+assert_eq(dh_conv_num_partitions(513, 512), 2, "one over -> 2");
+assert_eq(vec_len(dhvani_conv_partition_ir(cv_ir(1025, 1), 512, 1024)), 3, "partition_ir(1025) -> 3");
+
+# ---- bad_block_size_rejected (regression, 2.3.2) ----
+# A block size <= 0 or one past the FFT limit must return null before
+# partition_ir runs (an unbounded partition loop / runaway allocation otherwise).
+# The oracle clamps 0 up to 1; the port rejects it (deliberate divergence).
+test_group("bad_block_size_rejected");
+var ir_bb = vec_new(); vec_push(ir_bb, 1.0); vec_push(ir_bb, 0.5);
+# 0 and below clamp up to 1, as the oracle's block_size.max(1) does
+assert_eq(DhConvolutionReverb_block_size(dhvani_conv_with_block_size(ir_bb, 0, 1.0, 44100)), 1, "block_size 0 -> 1");
+var rev_bm = dhvani_conv_with_block_size(ir_bb, 0 - 1, 1.0, 44100);
+assert_eq(DhConvolutionReverb_block_size(rev_bm), 1, "block_size -1 -> 1");
+assert_eq(dhvani_conv_with_block_size(ir_bb, 0x10000000000, 1.0, 44100), 0, "block_size 2^40 -> null");
+assert_eq(dhvani_conv_with_block_size(ir_bb, 0x4000000000000001, 1.0, 44100), 0, "next_pow2 overflow -> null");
+assert_eq(dhvani_conv_with_block_size(ir_bb, DH_MAX_FFT / 2 + 1, 1.0, 44100), 0, "just past the FFT limit -> null");
+var rev_bb = dhvani_conv_with_block_size(ir_bb, 1, 1.0, 44100);
+assert(rev_bb != 0, "block_size 1 is valid");
+assert_eq(DhConvolutionReverb_block_size(rev_bb), 1, "block_size 1 kept");
+assert_eq(DhConvolutionReverb_block_size(dhvani_conv_with_block_size(ir_bb, 300, 1.0, 44100)), 512, "300 -> 512");
 
 var rc = assert_summary();
 syscall(60, rc);

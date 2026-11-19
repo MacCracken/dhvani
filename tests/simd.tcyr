@@ -1,9 +1,9 @@
-# simd.tcyr -- parity tests for src/simd.cyr (scalar kernels).
-# Ported from the behavioral #[test] blocks in rust-old/src/simd/mod.rs that
-# check concrete numeric outputs. The pure SIMD-vs-scalar parity tests
-# (simd_scalar_parity, i24_parity, u8_parity, biquad_stereo_parity) are DROPPED
-# -- with only the scalar path ported they degrade to scalar-vs-scalar. The
-# biquad kernel is instead checked against a hand-computed first-sample output.
+# simd.tcyr -- parity tests for src/simd.cyr: every #[test] block in
+# rust-old/src/simd/mod.rs, one-for-one. The five SIMD-vs-scalar tests
+# (simd_scalar_parity, i24_parity, u8_parity, biquad_stereo_parity,
+# various_buffer_sizes) were dropped through 2.3.1, while only the scalar path
+# existed; since 2.3.2 they compare each packed kernel with its `_scalar` oracle,
+# followed by dhvani's own bit-identity / canary / alloc-free sweeps.
 #
 # NOTE: negative FLOAT literals must go through f64_neg() (a bare `-1.0` is
 # integer-negated -> a wrong bit pattern). Negative INTEGER PCM values
@@ -79,7 +79,8 @@ assert(near(dhvani_simd_sum_of_squares(q1), 14.0, 0.000001), "1+4+9 = 14");
 # ---- noise_gate ----
 test_group("noise_gate");
 var n1 = vec_new();
-vec_push(n1, 0.01); vec_push(n1, f64_neg(0.01)); vec_push(n1, 0.5); vec_push(n1, f64_neg(0.5)); vec_push(n1, 0.001); vec_push(n1, 0.8);
+vec_push(n1, 0.01); vec_push(n1, f64_neg(0.01)); vec_push(n1, 0.5);
+vec_push(n1, f64_neg(0.5)); vec_push(n1, 0.001); vec_push(n1, 0.8);
 dhvani_simd_noise_gate(n1, 0.1);
 assert_eq(vec_get(n1, 0), 0, "0.01 gated");
 assert_eq(vec_get(n1, 1), 0, "-0.01 gated");
@@ -91,10 +92,15 @@ assert(near(vec_get(n1, 5), 0.8, 0.0001), "0.8 kept");
 # ---- i16 <-> f32 roundtrip (integer PCM negatives are literal) ----
 test_group("i16_f32_roundtrip");
 var i16src = vec_new();
-vec_push(i16src, 0); vec_push(i16src, 16384); vec_push(i16src, -16384); vec_push(i16src, 32767); vec_push(i16src, -32768);
-var f32buf = vec_new(); vec_push(f32buf, 0); vec_push(f32buf, 0); vec_push(f32buf, 0); vec_push(f32buf, 0); vec_push(f32buf, 0);
+vec_push(i16src, 0); vec_push(i16src, 16384); vec_push(i16src, -16384);
+vec_push(i16src, 32767); vec_push(i16src, -32768);
+var f32buf = vec_new();
+vec_push(f32buf, 0); vec_push(f32buf, 0);
+vec_push(f32buf, 0); vec_push(f32buf, 0); vec_push(f32buf, 0);
 dhvani_simd_i16_to_f32(i16src, f32buf);
-var i16back = vec_new(); vec_push(i16back, 0); vec_push(i16back, 0); vec_push(i16back, 0); vec_push(i16back, 0); vec_push(i16back, 0);
+var i16back = vec_new();
+vec_push(i16back, 0); vec_push(i16back, 0);
+vec_push(i16back, 0); vec_push(i16back, 0); vec_push(i16back, 0);
 dhvani_simd_f32_to_i16(f32buf, i16back);
 var jj = 0;
 var i16ok = 1;
@@ -124,10 +130,13 @@ assert(near(load64(owt), 1.5, 0.0001), "unequal weight sum = 1.5");
 # ---- i24 <-> f32 roundtrip ----
 test_group("i24_f32_roundtrip");
 var i24src = vec_new();
-vec_push(i24src, 0); vec_push(i24src, 4194304); vec_push(i24src, -4194304); vec_push(i24src, 8388607); vec_push(i24src, -8388608);
+vec_push(i24src, 0); vec_push(i24src, 4194304); vec_push(i24src, -4194304);
+vec_push(i24src, 8388607); vec_push(i24src, -8388608);
 var f24 = vec_new(); vec_push(f24, 0); vec_push(f24, 0); vec_push(f24, 0); vec_push(f24, 0); vec_push(f24, 0);
 dhvani_simd_i24_to_f32(i24src, f24);
-var i24back = vec_new(); vec_push(i24back, 0); vec_push(i24back, 0); vec_push(i24back, 0); vec_push(i24back, 0); vec_push(i24back, 0);
+var i24back = vec_new();
+vec_push(i24back, 0); vec_push(i24back, 0);
+vec_push(i24back, 0); vec_push(i24back, 0); vec_push(i24back, 0);
 dhvani_simd_f32_to_i24(f24, i24back);
 var kk = 0;
 var i24ok = 1;
@@ -151,11 +160,11 @@ assert(near(vec_get(fu, 0), f64_neg(1.0), 0.01), "u8 0 -> ~-1.0");
 # ---- biquad_stereo: first-sample output == b0*input (zero initial state) ----
 test_group("biquad_stereo");
 var coeffs = vec_new();
-vec_push(coeffs, 0.004836739652368523);      # b0
-vec_push(coeffs, 0.009673479304737046);      # b1
-vec_push(coeffs, 0.004836739652368523);      # b2
-vec_push(coeffs, f64_neg(1.9029109205028356)); # a1
-vec_push(coeffs, 0.9222578791123097);        # a2
+vec_push(coeffs, 0.004836739652368523);      # b0;
+vec_push(coeffs, 0.009673479304737046);      # b1;
+vec_push(coeffs, 0.004836739652368523);      # b2;
+vec_push(coeffs, f64_neg(1.9029109205028356)); # a1;
+vec_push(coeffs, 0.9222578791123097);        # a2;
 var state = vec_new(); vec_push(state, 0); vec_push(state, 0); vec_push(state, 0); vec_push(state, 0);
 var bs = vec_new(); vec_push(bs, 1.0); vec_push(bs, 1.0); vec_push(bs, 0.5); vec_push(bs, 0.5);
 dhvani_simd_biquad_stereo(bs, coeffs, state);
@@ -172,7 +181,7 @@ assert_eq(dhvani_is_finite(vec_get(state, 0)), 1, "state finite");
 test_group("peak_abs_ignores_nan");
 var nanbuf = vec_new();
 vec_push(nanbuf, 0.8);
-vec_push(nanbuf, f64_div(0, 0));   # NaN
+vec_push(nanbuf, f64_div(0, 0));   # NaN;
 vec_push(nanbuf, 0.2);
 var np = dhvani_simd_peak_abs(nanbuf);
 assert_eq(f64_eq(np, np), 1, "peak over a NaN-containing buffer is not NaN");
@@ -551,6 +560,17 @@ dhvani_simd_f32_to_i16(fa, fi);
 dhvani_simd_biquad_stereo(fa, coeffs, fst);
 assert_eq(alloc_used() - fused_before, 0, "0 bytes across one call of each");
 
+# ---- biquad_stereo refuses short coeffs / state vecs (2.3.3) ----
+# The raw kernel reads 5 coeffs and writes 4 state slots directly; a short vec read
+# garbage coefficients and wrote past its length (the old vec_get form aborted).
+test_group("biquad_stereo_short_vecs");
+var sv_c4 = vec_new(); vec_push(sv_c4, 1.0); vec_push(sv_c4, 0); vec_push(sv_c4, 0); vec_push(sv_c4, 0);
+var sv_st = vzeros(4);
+var sv_s = vec_new(); vec_push(sv_s, 0.5); vec_push(sv_s, 0.5);
+assert_eq(dhvani_simd_biquad_stereo(sv_s, sv_c4, sv_st), DHVANI_ERR_INVALID_PARAMETER, "4 coeffs refused");
+assert_eq(dhvani_simd_biquad_stereo(sv_s, coeffs, vzeros(3)), DHVANI_ERR_INVALID_PARAMETER, "3 state slots refused");
+assert_eq(vec_get(sv_s, 0), 0.5, "samples untouched");
+assert_eq(dhvani_simd_biquad_stereo(sv_s, coeffs, sv_st), 0, "full vecs accepted");
 
 var rc = assert_summary();
 syscall(60, rc);

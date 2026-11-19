@@ -77,7 +77,8 @@ assert(f64_lt(dhvani_lim_gain_reduction_db(l6), 0), "gain reduction applied");
 # ---- set_params_updates ----
 test_group("set_params_updates");
 var l7 = dhvani_lim_new(dhvani_limparams_default(), 44100);
-assert_eq(dhvani_lim_set_params(l7, dhvani_limparams_new(f64_neg(3.0), 100.0, 3.0, 1.0)), DHVANI_ERR_NONE, "set_params ok");
+var l7p = dhvani_limparams_new(f64_neg(3.0), 100.0, 3.0, 1.0);
+assert_eq(dhvani_lim_set_params(l7, l7p), DHVANI_ERR_NONE, "set_params ok");
 var b7 = make_sine(1.0, 2048);
 dhvani_lim_process(l7, b7);
 assert_eq(all_finite(b7), 1, "finite after set_params");
@@ -114,6 +115,152 @@ dhvani_lim_process(l9, b9);
 var want9 = f64_mul(f64_neg(120.0), f64_sub(1.0, f64_exp(f64_neg(0.1))));
 var err9 = f64_abs(f64_sub(dhvani_lim_envelope_db(l9), want9));
 assert(f64_lt(err9, 0.000001), "100 ms release @48k: env -120*(1-exp(-0.1)) after 10 ms");
+
+# ================================================================
+# 2.3.2 hardening regressions (each fails on the 2.3.2 code)
+# ================================================================
+var lx_nan = 0x7FF8000000000000;
+
+fn lx_mono(n, val) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, val); i = i + 1; }
+    return dhvani_buffer_from_interleaved(v, 1, 48000);
+}
+fn lx_stereo(frames, phase0) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var t = f64_from(i + phase0);
+        vec_push(v, f64_mul(f64_sin(f64_mul(t, 0.0627)), 1.4));
+        vec_push(v, f64_mul(f64_sin(f64_mul(t, 0.31)), 0.6));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, 48000);
+}
+
+# ---- nonfinite_sample_does_not_latch ----
+# In the oracle a single +Inf drove envelope_db to +Inf for good (gain -Inf, skipped),
+# leaving a hard clipper with no release; a NaN passed the "brick wall" untouched.
+test_group("nonfinite_sample_does_not_latch");
+var lx_l = dhvani_lim_new(dhvani_limparams_default(), 48000);
+var lx_b1 = lx_mono(1, DH_POS_INF);
+dhvani_lim_process(lx_l, lx_b1);
+assert_eq(vec_get(dhvani_buffer_samples(lx_b1), 0), 0, "+Inf in -> 0 out");
+assert_eq(dhvani_is_finite(dhvani_lim_envelope_db(lx_l)), 1, "envelope stays finite");
+var lx_b2 = lx_mono(48000, 0.05);
+dhvani_lim_process(lx_l, lx_b2);
+assert_eq(dhvani_lim_gain_reduction_db(lx_l), 0, "quiet signal 1 s later: the envelope released");
+var lx_n = dhvani_lim_new(dhvani_limparams_default(), 48000);
+var lx_nv = vec_new(); vec_push(lx_nv, lx_nan); vec_push(lx_nv, 0.25);
+var lx_nb = dhvani_buffer_from_interleaved(lx_nv, 2, 48000);
+dhvani_lim_process(lx_n, lx_nb);
+assert_eq(vec_get(dhvani_buffer_samples(lx_nb), 0), 0, "NaN in -> 0 out");
+assert_eq(vec_get(dhvani_buffer_samples(lx_nb), 1), 0.25, "the finite channel passes (under the ceiling)");
+assert_eq(dhvani_is_finite(dhvani_lim_envelope_db(lx_n)), 1, "NaN never reaches the detector");
+
+# ---- validate_rejects_nan ----
+# The oracle's `ceiling_db > 0.0` / `release_ms < 0.0` tests let a NaN through.
+test_group("validate_rejects_nan");
+fn lx_pv(ceiling, release, knee) {
+    return dhvani_limparams_validate(dhvani_limparams_new(ceiling, release, knee, 1.0));
+}
+var lx_bad = DHVANI_ERR_INVALID_PARAMETER;
+assert_eq(lx_pv(lx_nan, 50.0, 0), lx_bad, "NaN ceiling");
+assert_eq(lx_pv(f64_neg(0.3), lx_nan, 0), lx_bad, "NaN release");
+assert_eq(lx_pv(f64_neg(0.3), 50.0, lx_nan), lx_bad, "NaN knee");
+assert_eq(dhvani_lim_new(dhvani_limparams_new(lx_nan, 50.0, 0, 1.0), 48000), 0, "new() refuses NaN ceiling");
+assert_eq(lx_pv(0, 0, 0), DHVANI_ERR_NONE, "bounds inclusive");
+assert_eq(lx_pv(DH_NEG_INF, 0, 0), DHVANI_ERR_NONE, "-Inf ceiling valid, as in the oracle");
+
+# ---- params_owned ----
+test_group("params_owned");
+var lx_p = dhvani_limparams_default();
+var lx_o = dhvani_lim_new(lx_p, 48000);
+DhLimiterParams_set_ceiling_db(lx_p, 6.0);
+assert_eq(DhLimiterParams_ceiling_db(DhEnvelopeLimiter_params(lx_o)), f64_neg(0.3), "new(): ceiling still -0.3 dB");
+var lx_q = dhvani_limparams_new(f64_neg(1.0), 20.0, 0, 1.0);
+var lx_u = alloc_used();
+assert_eq(dhvani_lim_set_params(lx_o, lx_q), DHVANI_ERR_NONE, "set_params ok");
+assert_eq(alloc_used() - lx_u, 0, "set_params allocates nothing");
+DhLimiterParams_set_ceiling_db(lx_q, 6.0);
+var lx_oc = DhLimiterParams_ceiling_db(DhEnvelopeLimiter_params(lx_o));
+assert_eq(lx_oc, f64_neg(1.0), "set_params(): ceiling still -1 dB");
+
+# ---- process_matches_reference ----
+# The 2.3.2 loop, verbatim: the hoisted, storage-walking process() gives the same bits
+# on finite input.
+fn lx_old_process(self, buf) {
+    var p = DhEnvelopeLimiter_params(self);
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var release_coeff = time_constant(DhLimiterParams_release_ms(p), f64_from(DhEnvelopeLimiter_sample_rate(self)));
+    var ceiling_lin = db_to_amplitude(DhLimiterParams_ceiling_db(p));
+    var neg_ceiling = f64_neg(ceiling_lin);
+    var mix = f64_clamp(DhLimiterParams_mix(p), 0, 1.0);
+    var dry = f64_sub(1.0, mix);
+    var env_db = DhEnvelopeLimiter_envelope_db(self);
+    var frame = 0;
+    while (frame < frames) {
+        var peak = 0;
+        var c = 0;
+        while (c < ch) {
+            peak = dh_max_ignore_nan(peak, f64_abs(vec_get(samples, frame * ch + c)));
+            c = c + 1;
+        }
+        var input_db = f64_max(amplitude_to_db(peak), f64_neg(120.0));
+        if (f64_gt(input_db, env_db) == 1) {
+            env_db = input_db;
+        } else {
+            env_db = f64_add(f64_mul(release_coeff, env_db), f64_mul(f64_sub(1.0, release_coeff), input_db));
+        }
+        var gain_db = dhvani_lim_compute_gain(self, env_db);
+        if (f64_lt(gain_db, 0) == 1) {
+            if (dhvani_is_finite(gain_db) == 1) {
+                var gain_lin = db_to_amplitude(gain_db);
+                var c2 = 0;
+                while (c2 < ch) {
+                    var idx = frame * ch + c2;
+                    var dry_sample = vec_get(samples, idx);
+                    var wet = f64_mul(f64_mul(dry_sample, gain_lin), mix);
+                    vec_set(samples, idx, f64_add(f64_mul(dry_sample, dry), wet));
+                    c2 = c2 + 1;
+                }
+            }
+        }
+        var c3 = 0;
+        while (c3 < ch) {
+            var idx3 = frame * ch + c3;
+            vec_set(samples, idx3, f64_clamp(vec_get(samples, idx3), neg_ceiling, ceiling_lin));
+            c3 = c3 + 1;
+        }
+        frame = frame + 1;
+    }
+    DhEnvelopeLimiter_set_envelope_db(self, env_db);
+    return 0;
+}
+test_group("process_matches_reference");
+var lx_rp = dhvani_limparams_new(f64_neg(1.5), 30.0, 4.0, 0.8);
+var lx_rn = dhvani_lim_new(lx_rp, 48000);
+var lx_ro = dhvani_lim_new(lx_rp, 48000);
+var lx_rok = 1;
+var lx_rb = 0;
+while (lx_rb < 3) {
+    var lx_ba = lx_stereo(500, lx_rb * 500);
+    var lx_bb = lx_stereo(500, lx_rb * 500);
+    var lx_ru = alloc_used();
+    dhvani_lim_process(lx_rn, lx_ba);
+    if (alloc_used() != lx_ru) { lx_rok = 0; }
+    lx_old_process(lx_ro, lx_bb);
+    var lx_sa = dhvani_buffer_samples(lx_ba);
+    var lx_sb = dhvani_buffer_samples(lx_bb);
+    var lx_ri = 0;
+    while (lx_ri < 1000) { if (vec_get(lx_sa, lx_ri) != vec_get(lx_sb, lx_ri)) { lx_rok = 0; } lx_ri = lx_ri + 1; }
+    if (dhvani_lim_envelope_db(lx_rn) != dhvani_lim_envelope_db(lx_ro)) { lx_rok = 0; }
+    lx_rb = lx_rb + 1;
+}
+assert_eq(lx_rok, 1, "bit-identical to the 2.3.2 loop (samples, envelope), 0 bytes");
 
 var rc = assert_summary();
 syscall(60, rc);

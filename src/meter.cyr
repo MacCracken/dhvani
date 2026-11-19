@@ -11,6 +11,13 @@
 # RETURNS: load()/read_all() returned [f32;2] / Vec<[f32;2]> in Rust. In Cyrius
 # a stereo pair is a 2-element `vec` (index 0 = left, 1 = right); read_all() is a
 # `vec` of such pairs. peak()/rms()/peak_hold() return the owned `vec` handles.
+# Those vec-returning reads allocate per call (the bump allocator never frees),
+# so a polling reader (UI meter refresh) must use the allocation-free forms:
+# the scalar getters (dhvani_meter_peak_left/right, dhvani_meter_bank_left/right)
+# or the *_into forms that write a caller-owned vec.
+#
+# INDICES: a negative slot/channel index is out of bounds (rust-old's usize
+# cannot be negative) -- the no-op / [0,0] / 0.0 fallbacks apply, never an abort.
 #
 # DROPPED: Debug/Display formatters, the SharedMeterBank Arc alias (Cyrius is
 # single-threaded -- shared_meter_bank just builds a MeterBank), and the
@@ -44,6 +51,22 @@ fn dhvani_meter_linear_to_db(linear) {
     return f64_mul(20.0, dhvani_meter_log10(linear));
 }
 
+# 1 iff 0 <= i < n (a negative index is out of bounds, as for rust-old's usize).
+fn dh_meter_idx_ok(i, n) {
+    if (i < 0) { return 0; }
+    if (i >= n) { return 0; }
+    return 1;
+}
+
+# Rewrite `out` as the pair [l, r]: truncate + push stays inside the vec's
+# capacity (a vec_new() holds 16), so this allocates nothing.
+fn dh_meter_write_pair(out, l, r) {
+    vec_truncate(out, 0);
+    vec_push(out, l);
+    vec_push(out, r);
+    return 0;
+}
+
 # ================================================================
 # PeakMeter -- a single stereo peak level (was two AtomicU32).
 # ================================================================
@@ -60,21 +83,33 @@ fn dhvani_meter_peak_new() {
 }
 
 # store(left, right) -- set the stereo peak level.
-#inline
 fn dhvani_meter_peak_store(self, left, right) {
     DhPeakMeter_set_left(self, left);
     DhPeakMeter_set_right(self, right);
     return 0;
 }
 
-# load() -- a 2-element vec [left, right].
-#inline
+# load() -- a NEW 2-element vec [left, right] (allocates; for polling use
+# dhvani_meter_peak_left/right or dhvani_meter_peak_load_into).
 #must_use
 fn dhvani_meter_peak_load(self) {
     var out = vec_new();
     vec_push(out, DhPeakMeter_left(self));
     vec_push(out, DhPeakMeter_right(self));
     return out;
+}
+
+# left()/right() -- the stored levels, no allocation.
+#inline
+#must_use
+fn dhvani_meter_peak_left(self) { return DhPeakMeter_left(self); }
+#inline
+#must_use
+fn dhvani_meter_peak_right(self) { return DhPeakMeter_right(self); }
+
+# load_into(out) -- write [left, right] into caller-owned `out` (no allocation).
+fn dhvani_meter_peak_load_into(self, out) {
+    return dh_meter_write_pair(out, DhPeakMeter_left(self), DhPeakMeter_right(self));
 }
 
 # ================================================================
@@ -91,7 +126,7 @@ fn dhvani_meter_bank_new(capacity) {
     while (i < capacity) { vec_push(slots, dhvani_meter_peak_new()); i = i + 1; }
     var self = alloc(sizeof(DhMeterBank));
     DhMeterBank_set_slots(self, slots);
-    DhMeterBank_set_active(self, capacity);
+    DhMeterBank_set_active(self, vec_len(slots));
     return self;
 }
 
@@ -115,24 +150,47 @@ fn dhvani_meter_bank_capacity(self) { return vec_len(DhMeterBank_slots(self)); }
 # store(index, left, right) -- no-op if index out of bounds.
 fn dhvani_meter_bank_store(self, index, left, right) {
     var slots = DhMeterBank_slots(self);
-    if (index < vec_len(slots)) {
+    if (dh_meter_idx_ok(index, vec_len(slots)) == 1) {
         dhvani_meter_peak_store(vec_get(slots, index), left, right);
     }
     return 0;
 }
 
-# load(index) -- [left, right], or [0.0, 0.0] if index out of bounds.
+# load(index) -- a NEW vec [left, right], or [0.0, 0.0] if index out of bounds
+# (allocates; for polling use dhvani_meter_bank_left/right or _load_into).
 #must_use
 fn dhvani_meter_bank_load(self, index) {
     var slots = DhMeterBank_slots(self);
-    if (index < vec_len(slots)) { return dhvani_meter_peak_load(vec_get(slots, index)); }
+    if (dh_meter_idx_ok(index, vec_len(slots)) == 1) { return dhvani_meter_peak_load(vec_get(slots, index)); }
     var zeros = vec_new();
     vec_push(zeros, 0);   # +0.0
     vec_push(zeros, 0);   # +0.0
     return zeros;
 }
 
-# read_all() -- a vec of [left,right] pairs, one per active slot.
+# left(index)/right(index) -- the slot's level, 0.0 if out of bounds; no allocation.
+#must_use
+fn dhvani_meter_bank_left(self, index) {
+    var slots = DhMeterBank_slots(self);
+    if (dh_meter_idx_ok(index, vec_len(slots)) == 0) { return 0; }
+    return DhPeakMeter_left(vec_get(slots, index));
+}
+
+#must_use
+fn dhvani_meter_bank_right(self, index) {
+    var slots = DhMeterBank_slots(self);
+    if (dh_meter_idx_ok(index, vec_len(slots)) == 0) { return 0; }
+    return DhPeakMeter_right(vec_get(slots, index));
+}
+
+# load_into(index, out) -- write [left, right] (or [0.0, 0.0] out of bounds)
+# into caller-owned `out`; no allocation.
+fn dhvani_meter_bank_load_into(self, index, out) {
+    return dh_meter_write_pair(out, dhvani_meter_bank_left(self, index), dhvani_meter_bank_right(self, index));
+}
+
+# read_all() -- a NEW vec of NEW [left,right] pairs, one per active slot
+# (allocates; for polling use dhvani_meter_bank_read_all_into).
 #must_use
 fn dhvani_meter_bank_read_all(self) {
     var active = DhMeterBank_active(self);
@@ -142,11 +200,29 @@ fn dhvani_meter_bank_read_all(self) {
     return out;
 }
 
-# set_active(count) -- clamp to capacity, then store as active.
+# read_all_into(out) -- rewrite caller-owned `out` as the FLAT interleaved list
+# [l0, r0, l1, r1, ...] over the active slots; returns the slot count. Allocates
+# only when `out` must grow past its capacity (first call), never in steady state.
+fn dhvani_meter_bank_read_all_into(self, out) {
+    var active = DhMeterBank_active(self);
+    var slots = DhMeterBank_slots(self);
+    vec_truncate(out, 0);
+    var i = 0;
+    while (i < active) {
+        var s = vec_get(slots, i);
+        vec_push(out, DhPeakMeter_left(s));
+        vec_push(out, DhPeakMeter_right(s));
+        i = i + 1;
+    }
+    return active;
+}
+
+# set_active(count) -- clamp to [0, capacity], then store as active.
 fn dhvani_meter_bank_set_active(self, count) {
     var cap = vec_len(DhMeterBank_slots(self));
     var n = count;
     if (n > cap) { n = cap; }
+    if (n < 0) { n = 0; }
     DhMeterBank_set_active(self, n);
     return 0;
 }
@@ -159,6 +235,11 @@ fn dhvani_meter_shared_bank(capacity) { return dhvani_meter_bank_new(capacity); 
 # ================================================================
 # LevelMeter -- block-accumulating meter (peak, RMS, LUFS, peak-hold).
 # ================================================================
+# lufs_len = the 400 ms LUFS window in frames. rust-old kept the window's
+# per-frame mean squares in `lufs_buffer` and summed it once full; it is
+# overwritten front to back every block, so a running sum (lufs_acc) adds the
+# same values in the same order from the same +0.0 -- bit-identical, without
+# the window's storage or the per-block re-read.
 #derive(accessors)
 struct DhLevelMeter {
     peak;
@@ -168,16 +249,27 @@ struct DhLevelMeter {
     rms_sum;
     rms_count;
     lufs_blocks;
-    lufs_buffer;
+    lufs_len;
+    lufs_acc;
     lufs_buffer_pos;
     peak_hold;
     peak_decay;
 }
 
 # new(channels, sample_rate) -- allocate per-channel state; lufs = DB_FLOOR.
-# lufs_buffer length = (sample_rate * 0.4) truncated (Rust `as usize`).
+# sample_rate is an INTEGER Hz value like every other dhvani constructor (rust-old
+# took f32; converted here). The LUFS window = trunc(sample_rate * 0.4) frames
+# (Rust `as usize`). Returns 0 when that window would hold < 1 frame (sample_rate
+# < 3, zero, negative -- or an f64 bit pattern passed by mistake, which reads as
+# an absurd integer) or channels < 0: rust-old then pushed a NaN 0/0 block every
+# frame and re-gated 1500 blocks per frame, leaving LUFS pinned at the floor.
 #must_use
 fn dhvani_meter_level_new(channels, sample_rate) {
+    if (channels < 0) { return 0; }
+    if (sample_rate <= 0) { return 0; }
+    if (sample_rate > DH_MAX_SAMPLE_RATE) { return 0; }
+    var buf_len = f64_to(f64_trunc(f64_mul(f64_from(sample_rate), DH_METER_LUFS_BLOCK_DURATION)));
+    if (buf_len < 1) { return 0; }
     var self = alloc(sizeof(DhLevelMeter));
     DhLevelMeter_set_peak(self, dh_vec_zeros(channels));
     DhLevelMeter_set_rms(self, dh_vec_zeros(channels));
@@ -186,92 +278,121 @@ fn dhvani_meter_level_new(channels, sample_rate) {
     DhLevelMeter_set_rms_sum(self, dh_vec_zeros(channels));
     DhLevelMeter_set_rms_count(self, 0);
     DhLevelMeter_set_lufs_blocks(self, vec_new());
-    var buf_len = f64_to(f64_trunc(f64_mul(sample_rate, DH_METER_LUFS_BLOCK_DURATION)));
-    DhLevelMeter_set_lufs_buffer(self, dh_vec_zeros(buf_len));
+    DhLevelMeter_set_lufs_len(self, buf_len);
+    DhLevelMeter_set_lufs_acc(self, 0);   # +0.0
     DhLevelMeter_set_lufs_buffer_pos(self, 0);
     DhLevelMeter_set_peak_hold(self, dh_vec_zeros(channels));
     DhLevelMeter_set_peak_decay(self, DH_METER_PEAK_DECAY);
+    if (vec_len(DhLevelMeter_peak(self)) != channels) { return 0; }
+    if (vec_len(DhLevelMeter_peak_hold(self)) != channels) { return 0; }
     return self;
 }
 
 # process(buf) -- analyze a buffer, update peak/rms/lufs/peak_hold.
+# Walks the sample storage directly (0 bytes/sample).
+# NON-FINITE samples (NaN/Inf) are skipped -- no peak, and silence in the
+# RMS/LUFS sums. rust-old let one NaN make RMS NaN for the meter's lifetime (the
+# sums are cumulative) and one Inf pin peak_hold at Inf and gate LUFS to the floor
+# for 1500 blocks; for finite input the result is bit-identical to rust-old's.
 fn dhvani_meter_level_process(self, buf) {
+    if (self == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (buf == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
     var frames = DhAudioBuffer_frames(buf);
     var buf_channels = DhAudioBuffer_channels(buf);
     var channels = DhLevelMeter_channels(self);
     var active_channels = buf_channels;
     if (channels < active_channels) { active_channels = channels; }
+    if (active_channels < 0) { active_channels = 0; }
     var samples = DhAudioBuffer_samples(buf);
+    # never walk past the storage of an inconsistent buffer
+    if (buf_channels > 0) {
+        var avail = vec_len(samples) / buf_channels;
+        if (frames > avail) { frames = avail; }
+    }
+    if (frames < 0) { frames = 0; }
     var peak = DhLevelMeter_peak(self);
     var rms = DhLevelMeter_rms(self);
-    var rms_sum = DhLevelMeter_rms_sum(self);
-    var lufs_buffer = DhLevelMeter_lufs_buffer(self);
     var lufs_blocks = DhLevelMeter_lufs_blocks(self);
-    var lufs_len = vec_len(lufs_buffer);
+    var lufs_len = DhLevelMeter_lufs_len(self);
+    var sd = dh_vec_data(samples);
+    var pk = dh_vec_data(peak);
+    var rs = dh_vec_data(DhLevelMeter_rms_sum(self));
+    var stride = buf_channels * 8;
 
     # Reset per-block peak.
     var rp = 0;
-    while (rp < vec_len(peak)) { vec_set(peak, rp, 0); rp = rp + 1; }
+    while (rp < channels) { store64(pk + rp * 8, 0); rp = rp + 1; }
 
     var rms_count = DhLevelMeter_rms_count(self);
     var lufs_pos = DhLevelMeter_lufs_buffer_pos(self);
+    var lufs_acc = DhLevelMeter_lufs_acc(self);
+    var fac = f64_from(active_channels);
 
     var frame = 0;
+    var fp = sd;
     while (frame < frames) {
         var channel_sq_sum = 0;   # +0.0
         var ch = 0;
         while (ch < active_channels) {
-            var sample = vec_get(samples, frame * buf_channels + ch);
-            var absval = f64_abs(sample);
-            if (f64_gt(absval, vec_get(peak, ch)) == 1) { vec_set(peak, ch, absval); }
-            var sq = f64_mul(sample, sample);
-            vec_set(rms_sum, ch, f64_add(vec_get(rms_sum, ch), sq));
-            channel_sq_sum = f64_add(channel_sq_sum, sq);
+            var sample = load64(fp + ch * 8);
+            # finite <=> exponent field not all ones
+            if (((sample >> 52) & 0x7FF) != 0x7FF) {
+                var absval = f64_abs(sample);
+                var pslot = pk + ch * 8;
+                if (f64_gt(absval, load64(pslot)) == 1) { store64(pslot, absval); }
+                var sq = f64_mul(sample, sample);
+                var rslot = rs + ch * 8;
+                store64(rslot, f64_add(load64(rslot), sq));
+                channel_sq_sum = f64_add(channel_sq_sum, sq);
+            }
             ch = ch + 1;
         }
 
         rms_count = rms_count + 1;
 
         var mean_sq = 0;   # +0.0
-        if (active_channels > 0) { mean_sq = f64_div(channel_sq_sum, f64_from(active_channels)); }
+        if (active_channels > 0) { mean_sq = f64_div(channel_sq_sum, fac); }
         if (lufs_pos < lufs_len) {
-            vec_set(lufs_buffer, lufs_pos, mean_sq);
+            lufs_acc = f64_add(lufs_acc, mean_sq);
             lufs_pos = lufs_pos + 1;
         }
 
         if (lufs_pos >= lufs_len) {
-            var block_sum = 0;   # +0.0
-            var bi = 0;
-            while (bi < lufs_len) { block_sum = f64_add(block_sum, vec_get(lufs_buffer, bi)); bi = bi + 1; }
-            var block_power = f64_div(block_sum, f64_from(lufs_len));
-            vec_push(lufs_blocks, block_power);
+            vec_push(lufs_blocks, f64_div(lufs_acc, f64_from(lufs_len)));
+            lufs_acc = 0;   # +0.0
             lufs_pos = 0;
             dhvani_meter_level_compute_lufs(self);
         }
         frame = frame + 1;
+        fp = fp + stride;
     }
 
     DhLevelMeter_set_rms_count(self, rms_count);
     DhLevelMeter_set_lufs_buffer_pos(self, lufs_pos);
+    DhLevelMeter_set_lufs_acc(self, lufs_acc);
 
     # Update RMS.
     if (rms_count > 0) {
+        var fcount = f64_from(rms_count);
+        var rd = dh_vec_data(rms);
         var uc = 0;
         while (uc < channels) {
-            vec_set(rms, uc, f64_sqrt(f64_div(vec_get(rms_sum, uc), f64_from(rms_count))));
+            store64(rd + uc * 8, f64_sqrt(f64_div(load64(rs + uc * 8), fcount)));
             uc = uc + 1;
         }
     }
 
     # Update peak hold with decay (scaled by frame count).
-    var peak_hold = DhLevelMeter_peak_hold(self);
+    var hd = dh_vec_data(DhLevelMeter_peak_hold(self));
     var decay = f64_pow(DhLevelMeter_peak_decay(self), f64_from(frames));
     var hc = 0;
     while (hc < channels) {
-        if (f64_gt(vec_get(peak, hc), vec_get(peak_hold, hc)) == 1) {
-            vec_set(peak_hold, hc, vec_get(peak, hc));
+        var pv = load64(pk + hc * 8);
+        var hslot = hd + hc * 8;
+        if (f64_gt(pv, load64(hslot)) == 1) {
+            store64(hslot, pv);
         } else {
-            vec_set(peak_hold, hc, f64_mul(vec_get(peak_hold, hc), decay));
+            store64(hslot, f64_mul(load64(hslot), decay));
         }
         hc = hc + 1;
     }
@@ -337,32 +458,24 @@ fn dhvani_meter_level_rms(self) { return DhLevelMeter_rms(self); }
 #must_use
 fn dhvani_meter_level_lufs(self) { return DhLevelMeter_lufs(self); }
 
+# dB of v[channel], or of 0.0 (-> DB_FLOOR) if channel is out of range.
+fn dh_meter_chan_db(v, channel) {
+    var x = 0;   # +0.0 (Rust unwrap_or(0.0))
+    if (dh_meter_idx_ok(channel, vec_len(v)) == 1) { x = vec_get(v, channel); }
+    return dhvani_meter_linear_to_db(x);
+}
+
 # peak_db(channel) -- dB of the channel's peak (0.0 if channel out of range).
 #must_use
-fn dhvani_meter_level_peak_db(self, channel) {
-    var peak = DhLevelMeter_peak(self);
-    var v = 0;   # +0.0 (Rust unwrap_or(0.0))
-    if (channel < vec_len(peak)) { v = vec_get(peak, channel); }
-    return dhvani_meter_linear_to_db(v);
-}
+fn dhvani_meter_level_peak_db(self, channel) { return dh_meter_chan_db(DhLevelMeter_peak(self), channel); }
 
 # rms_db(channel) -- dB of the channel's RMS (0.0 if out of range).
 #must_use
-fn dhvani_meter_level_rms_db(self, channel) {
-    var rms = DhLevelMeter_rms(self);
-    var v = 0;   # +0.0
-    if (channel < vec_len(rms)) { v = vec_get(rms, channel); }
-    return dhvani_meter_linear_to_db(v);
-}
+fn dhvani_meter_level_rms_db(self, channel) { return dh_meter_chan_db(DhLevelMeter_rms(self), channel); }
 
 # peak_hold_db(channel) -- dB of the channel's peak hold (0.0 if out of range).
 #must_use
-fn dhvani_meter_level_peak_hold_db(self, channel) {
-    var ph = DhLevelMeter_peak_hold(self);
-    var v = 0;   # +0.0
-    if (channel < vec_len(ph)) { v = vec_get(ph, channel); }
-    return dhvani_meter_linear_to_db(v);
-}
+fn dhvani_meter_level_peak_hold_db(self, channel) { return dh_meter_chan_db(DhLevelMeter_peak_hold(self), channel); }
 
 #inline
 #must_use
@@ -371,27 +484,26 @@ fn dhvani_meter_level_peak_hold(self) { return DhLevelMeter_peak_hold(self); }
 #must_use
 fn dhvani_meter_level_channels(self) { return DhLevelMeter_channels(self); }
 
-# reset() -- clear all meter state.
+# zero every entry of a vec by walking its storage.
+fn dh_meter_zero(v) {
+    var p = dh_vec_data(v);
+    var end = p + vec_len(v) * 8;
+    while (p < end) { store64(p, 0); p = p + 8; }
+    return 0;
+}
+
+# reset() -- clear all meter state (no allocation: lufs_blocks is truncated,
+# keeping its capacity, rather than replaced).
 fn dhvani_meter_level_reset(self) {
-    var channels = DhLevelMeter_channels(self);
-    var peak = DhLevelMeter_peak(self);
-    var rms = DhLevelMeter_rms(self);
-    var rms_sum = DhLevelMeter_rms_sum(self);
-    var peak_hold = DhLevelMeter_peak_hold(self);
-    var lufs_buffer = DhLevelMeter_lufs_buffer(self);
-    var i = 0;
-    while (i < vec_len(peak)) { vec_set(peak, i, 0); i = i + 1; }
-    var r = 0;
-    while (r < vec_len(rms)) { vec_set(rms, r, 0); r = r + 1; }
+    if (self == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    dh_meter_zero(DhLevelMeter_peak(self));
+    dh_meter_zero(DhLevelMeter_rms(self));
     DhLevelMeter_set_lufs(self, DH_METER_DB_FLOOR);
-    var s = 0;
-    while (s < vec_len(rms_sum)) { vec_set(rms_sum, s, 0); s = s + 1; }
+    dh_meter_zero(DhLevelMeter_rms_sum(self));
     DhLevelMeter_set_rms_count(self, 0);
-    DhLevelMeter_set_lufs_blocks(self, vec_new());
-    var lb = 0;
-    while (lb < vec_len(lufs_buffer)) { vec_set(lufs_buffer, lb, 0); lb = lb + 1; }
+    vec_truncate(DhLevelMeter_lufs_blocks(self), 0);
+    DhLevelMeter_set_lufs_acc(self, 0);   # +0.0
     DhLevelMeter_set_lufs_buffer_pos(self, 0);
-    var h = 0;
-    while (h < vec_len(peak_hold)) { vec_set(peak_hold, h, 0); h = h + 1; }
+    dh_meter_zero(DhLevelMeter_peak_hold(self));
     return 0;
 }

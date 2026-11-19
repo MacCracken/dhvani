@@ -113,5 +113,82 @@ assert_eq(dhvani_osc_waveform(xo), DH_WAVE_SINE, "starts sine");
 dhvani_osc_set_waveform(xo, DH_WAVE_SAW);
 assert_eq(dhvani_osc_waveform(xo), DH_WAVE_SAW, "switched to saw");
 
+# ================================================================
+# 2.3.2 parity + hardening regressions (each fails on the 2.3.2 code)
+# ================================================================
+
+# ---- square_phase_wrap_is_fmod ----
+# Rust: poly_blep((phase + 0.5) % 1.0, dt). At a frequency above the sample rate
+# (dt = 1.7) the phase passes 1.5 and the single conditional subtract kept 1.6 where
+# fmod gives 0.6. Expected: rust-old's Oscillator on its pinned toolchain (f32 out).
+test_group("square_phase_wrap_is_fmod");
+var ofq = vec_new();
+vec_push(ofq, 0.4982699); vec_push(ofq, f64_neg(0.56747407)); vec_push(ofq, f64_neg(0.80968857));
+vec_push(ofq, 2.1314878); vec_push(ofq, 3.916955); vec_push(ofq, 6.103806);
+vec_push(ofq, 7.6539793); vec_push(ofq, 10.4359865);
+var ofo = dhvani_osc_new(DH_WAVE_SQUARE, 44100);
+var ofok = 1;
+var ofi = 0;
+while (ofi < 8) {
+    var ofw = vec_get(ofq, ofi);
+    var oftol = f64_mul(0.00001, f64_max(1.0, f64_abs(ofw)));
+    if (f64_lt(f64_abs(f64_sub(dhvani_osc_sample(ofo, 74970.0), ofw)), oftol) == 0) { ofok = 0; }
+    ofi = ofi + 1;
+}
+assert_eq(ofok, 1, "square at 1.7x the sample rate = rust-old, 8 samples");
+# x % 1.0 on the pinned Rust toolchain: { x bits, (x % 1.0) bits }
+var ofm = vec_new();
+fn of2(v, x, r) { vec_push(v, x); vec_push(v, r); return 0; }
+of2(ofm, 0x0000000000000000, 0x0000000000000000);
+of2(ofm, 0x8000000000000000, 0x8000000000000000);
+of2(ofm, 0x3FD0000000000000, 0x3FD0000000000000);
+of2(ofm, 0xBFD0000000000000, 0xBFD0000000000000);
+of2(ofm, 0x3FF0000000000000, 0x0000000000000000);
+of2(ofm, 0xBFF0000000000000, 0x8000000000000000);
+of2(ofm, 0x3FF8000000000000, 0x3FE0000000000000);
+of2(ofm, 0x4004CCCCCCCCCCCD, 0x3FE3333333333334);
+of2(ofm, 0xC004CCCCCCCCCCCD, 0xBFE3333333333334);
+of2(ofm, 0x4008CCCCCCCCCCCD, 0x3FB99999999999A0);
+of2(ofm, 0x3FEFFFFFFFFFFFFF, 0x3FEFFFFFFFFFFFFF);
+of2(ofm, 0x3FF0000000000001, 0x3CB0000000000000);
+of2(ofm, 0x432FFFFFFFFFFFFF, 0x3FE0000000000000);
+of2(ofm, 0x4330000000000000, 0x0000000000000000);
+of2(ofm, 0xC330000000000001, 0x8000000000000000);
+of2(ofm, 0x7E37E43C8800759C, 0x0000000000000000);
+of2(ofm, 0x0000000000000001, 0x0000000000000001);
+of2(ofm, 0x8000000000000001, 0x8000000000000001);
+var ofmok = 1;
+var ofmi = 0;
+while (ofmi < vec_len(ofm)) {
+    if (dh_fmod1(vec_get(ofm, ofmi)) != vec_get(ofm, ofmi + 1)) { ofmok = 0; }
+    ofmi = ofmi + 2;
+}
+assert_eq(ofmok, 1, "dh_fmod1 = Rust x % 1.0, bit for bit (18 values)");
+var ofinf = dh_fmod1(DH_POS_INF);
+assert_eq(f64_eq(ofinf, ofinf), 0, "+Inf % 1.0 is NaN");
+# below the sample rate the wrap is the old subtract, bit for bit
+var ofa = dhvani_osc_new(DH_WAVE_SQUARE, 44100);
+var ofb = dhvani_osc_new(DH_WAVE_TRIANGLE, 44100);
+var ofsame = 1;
+var ofk = 0;
+while (ofk < 2000) {
+    var ofph = dhvani_osc_phase(ofa);
+    var ofp2 = f64_add(ofph, 0.5);
+    if (f64_ge(ofp2, 1.0) == 1) { ofp2 = f64_sub(ofp2, 1.0); }
+    if (dh_fmod1(f64_add(ofph, 0.5)) != ofp2) { ofsame = 0; }
+    var ofs1 = dhvani_osc_sample(ofa, 3001.0);
+    var ofs2 = dhvani_osc_sample(ofb, 3001.0);
+    ofk = ofk + 1;
+}
+assert_eq(ofsame, 1, "phase in [0,1): fmod = the 2.3.2 conditional subtract, bit for bit");
+
+# ---- validate_rejects_nan_rate ----
+test_group("validate_rejects_nan_rate");
+var ofv = dhvani_osc_new(DH_WAVE_SINE, 44100);
+DhOscillator_set_sample_rate(ofv, 0x7FF8000000000000);
+assert_eq(dhvani_osc_validate(ofv), DHVANI_ERR_INVALID_SAMPLE_RATE, "NaN sample rate rejected");
+assert_eq(dhvani_osc_validate(dhvani_osc_new(DH_WAVE_SINE, 0)), DHVANI_ERR_INVALID_SAMPLE_RATE, "0 Hz rejected");
+assert_eq(dhvani_osc_validate(dhvani_osc_new(DH_WAVE_SINE, 48000)), DHVANI_ERR_NONE, "48 kHz valid");
+
 var rc = assert_summary();
 syscall(60, rc);

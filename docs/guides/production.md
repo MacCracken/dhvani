@@ -22,35 +22,48 @@ the vani/yukti stack when you want device I/O (see below). Do not edit
 
 ## SIMD
 
-There is no SIMD in the Cyrius port — every kernel is scalar (Cyrius has no SIMD
-intrinsics yet; see `simd.md`). This is the source of the Rust-vs-Cyrius
-throughput gap. No CPU flags, no runtime feature detection, nothing to toggle.
-Capture hot-path `.bcyr` numbers (`cyrius bench`) before shipping to catch
-regressions.
+Since 2.3.2 the buffer kernels run on Cyrius's packed verbs: 2-lane `f64v_*`
+everywhere, and 4-lane `f64v256_*` on x86 CPUs that report AVX2. The choice is made
+at runtime from CPUID, so there is nothing to toggle (`simd.md`). Capture hot-path
+`.bcyr` numbers (`cyrius bench`) before shipping to catch regressions.
 
 ## Real-time audio guidelines
 
 ### RT-safe (no allocation, no locks)
 - `dhvani_buffer_apply_gain()`, `dhvani_buffer_clamp()`, `dhvani_buffer_peak()`, `dhvani_buffer_rms()`
-- All DSP `process()` paths (each reuses pre-allocated per-instance state)
-- `dhvani_meter_peak_store()` / `dhvani_meter_peak_load()` — atomic operations
-- The graph `process()` — uses `try_lock()`, never blocks
-- The RT ring `dhvani_player_push()` / `dhvani_player_drain()` and `dhvani_recorder_fill()`
+- All DSP `process()` paths (each reuses pre-allocated per-instance state), and since
+  2.3.3 their parameter setters (`set_params`, `set_band`, …), which rewrite the existing
+  coefficients in place
+- `dhvani_meter_peak_store()`, and the allocation-free readers `dhvani_meter_peak_left/right()`,
+  `dhvani_meter_bank_left/right()` and the `*_into` forms (2.3.3). `dhvani_meter_peak_load()` /
+  `bank_load()` / `read_all()` return a fresh vec, so poll with the readers instead.
+- The graph `process()`, and a plan swap, which since 2.3.3 reuses the processor's buffers
+  (a plan larger than any before allocates once)
+- The RT ring `dhvani_player_push()` / `dhvani_player_drain()`, `dhvani_recorder_fill()`,
+  and `dhvani_recorder_read()` (2.3.3: it decodes into a buffer the recorder owns and
+  reuses, valid until the next read)
+- The MIDI `_into` queries and transforms (`dhvani_midi_clip_events_in_range_into`,
+  `dhvani_midiroute_filter_event_into`, `dhvani_miditx_*_into`, 2.3.3)
 
 ### Non-RT types (may allocate or block)
-- `Graph::compile()` — topological sort allocates
-- `dhvani_buffer_from_interleaved()` — allocates a `vec`
-- `dhvani_recorder_read()` — decodes the ring into a new AudioBuffer per call
-- `dhvani_devices_list()` — enumerates endpoints via yukti (udevadm + sysfs)
+- `Graph::compile()`: the topological sort and the node-table snapshot allocate
+- `dhvani_buffer_from_interleaved()` / `silence()` / `clone()` / `mix()` / `resample_*()`
+- The allocating forms of the MIDI clip queries and translators (use `_into`)
+- `dhvani_acoustics_convolve_multiband()`: builds a convolver per call (offline only;
+  keep one from `dhvani_acoustics_convolution_from_multiband()` for per-block use)
+- `dhvani_devices_list()`: enumerates endpoints via yukti (/dev/snd, /proc/asound, sysfs)
 
 Under the free-less bump allocator these never reclaim their memory, so keep
 them off the render loop entirely — allocate up front, reuse the RT ring
 (`Player`/`Recorder`) on the hot path.
 
 ### Thread safety
-- DSP effect structs hold per-instance mutable state — give each RT thread its own
-- Use the graph swap handle to pass a compiled plan from the UI thread to the RT thread (non-blocking `try_lock`)
-- Metering uses atomic peak stores (`dhvani_meter_peak_store` / `_load`) across threads
+- DSP effect structs hold per-instance mutable state: give each RT thread its own
+- Pass a compiled plan to the render thread through the graph swap handle. The port has
+  no locks or atomics (the oracle's `try_lock` / atomic loads became plain fields), so
+  swap between cycles on the thread that calls `process()`
+- `dhvani_playback_write` and the capture reads share one grow-only scratch per
+  direction: one thread per direction
 
 ## Buffer sizes
 

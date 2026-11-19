@@ -111,7 +111,34 @@ var sensitive = dhvani_detect_onsets(hbuf, 2048, 512, 0.1);
 var strict = dhvani_detect_onsets(hbuf, 2048, 512, 0.5);
 assert(sensitive != 0, "threshold: sensitive non-null");
 assert(strict != 0, "threshold: strict non-null");
-assert(vec_len(dhvani_onset_positions(sensitive)) >= vec_len(dhvani_onset_positions(strict)), "sensitive >= strict onset count");
+var n_sensitive = vec_len(dhvani_onset_positions(sensitive));
+assert(n_sensitive >= vec_len(dhvani_onset_positions(strict)), "sensitive >= strict onset count");
+
+# ================================================================
+# 2.3.2 audit regressions (not in rust-old)
+# ================================================================
+
+# ---- negative_hop_rejected ----
+# Pre-fix: detect_onsets(buf, w, -hop, t) went through dhvani_stft's hop == 0-only
+# guard and aborted the process in vec_get.
+test_group("negative_hop_rejected");
+var nh = dhvani_buffer_from_interleaved(make_impulse(44100, 22050, 22150, 0.9), 1, 44100);
+assert_eq(dhvani_detect_onsets(nh, 2048, 0 - 512, 0.2), 0, "hop -512 -> 0 (no abort)");
+assert_eq(dhvani_detect_onsets(nh, 2048, 0, 0.2), 0, "hop 0 -> 0");
+
+# ---- spectral_flux_shared ----
+# dhvani_spectral_flux is the flux detect_onsets peak-picks; < 2 frames -> empty.
+test_group("spectral_flux_shared");
+var fsg = dhvani_stft(nh, 2048, 512);
+var fl = dhvani_spectral_flux(fsg);
+assert_eq(vec_len(fl), dhvani_spectrogram_num_frames(fsg), "one flux value per frame");
+assert_eq(vec_get(fl, 0), 0, "flux[0] = 0");
+var fmax = 0;
+var fi = 0;
+while (fi < vec_len(fl)) { fmax = f64_max(fmax, vec_get(fl, fi)); fi = fi + 1; }
+assert_eq(fmax, 1.0, "normalized to peak 1.0");
+var fone = dhvani_stft(dhvani_buffer_silence(1, 2048, 44100), 2048, 512);
+assert_eq(vec_len(dhvani_spectral_flux(fone)), 0, "1 frame -> empty flux");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -106,5 +106,68 @@ while (w4 < np4) {
 }
 assert_eq(ordered4, 1, "ordered: beat positions strictly increasing");
 
+# ================================================================
+# 2.3.2 audit regressions (not in rust-old)
+# ================================================================
+
+# The pre-2.3.2 beat envelope loop (vec accessors, f64_max fold), as reference.
+fn ref_envelope(sg) {
+    var nfr = dhvani_spectrogram_num_frames(sg);
+    var env = vec_new();
+    if (nfr < 2) { return env; }
+    var nb = dhvani_spectrogram_num_bins(sg);
+    vec_push(env, 0);
+    var i = 1;
+    while (i < nfr) {
+        var flux = 0;
+        var cur = dhvani_spectrogram_frame(sg, i);
+        var prev = dhvani_spectrogram_frame(sg, i - 1);
+        var b = 0;
+        while (b < nb) {
+            var d = f64_sub(vec_get(cur, b), vec_get(prev, b));
+            if (f64_gt(d, 0) == 1) { flux = f64_add(flux, d); }
+            b = b + 1;
+        }
+        vec_push(env, flux);
+        i = i + 1;
+    }
+    var mx = 0;
+    var m = 0;
+    while (m < vec_len(env)) { mx = f64_max(mx, vec_get(env, m)); m = m + 1; }
+    if (f64_gt(mx, 0) == 1) {
+        var n = 0;
+        while (n < vec_len(env)) { vec_set(env, n, f64_div(vec_get(env, n), mx)); n = n + 1; }
+    }
+    return env;
+}
+
+# ---- envelope_shared_flux_bit_identical ----
+# beat's envelope now comes from onset.cyr's dhvani_spectral_flux (raw-storage
+# walk, NaN-ignoring fold) -- bit-identical to the old inline loop.
+test_group("envelope_shared_flux_bit_identical");
+var eb = dhvani_buffer_from_interleaved(samples2, 1, 44100);
+var env_new = dhvani_beat_onset_strength_envelope(eb, 2048, 512);
+var env_ref = ref_envelope(dhvani_stft(eb, 2048, 512));
+var eok = 1;
+if (vec_len(env_new) != vec_len(env_ref)) { eok = 0; }
+var ei = 0;
+while (eok == 1 && ei < vec_len(env_ref)) {
+    if (vec_get(env_new, ei) != vec_get(env_ref, ei)) { eok = 0; }
+    ei = ei + 1;
+}
+assert(vec_len(env_ref) > 100, "click track has > 100 envelope frames");
+assert_eq(eok, 1, "envelope bit-identical to pre-fix loop");
+assert_eq(dhvani_beat_onset_strength_envelope(eb, 2048, 0 - 1), 0, "negative hop -> 0 (no abort)");
+
+# ---- tempo_bounds_saturate ----
+# f64_to saturates like Rust's `as usize`: min_bpm = 0 -> no lower bound (real
+# tempo), max_bpm = 0 -> empty lag range (zero result), negative bpm -> clamped.
+test_group("tempo_bounds_saturate");
+var tb0 = dhvani_detect_tempo(eb, 0, 200.0);
+var tb0_gap = f64_abs(f64_sub(dhvani_beat_bpm(tb0), dhvani_beat_bpm(r2)));
+assert(f64_lt(tb0_gap, 0.001) == 1, "min_bpm 0 == min_bpm 60 on the 120 BPM track");
+assert_eq(dhvani_beat_bpm(dhvani_detect_tempo(eb, 60.0, 0)), 0, "max_bpm 0 -> bpm 0");
+assert(dhvani_detect_tempo(eb, f64_neg(60.0), 200.0) != 0, "negative min_bpm -> no abort");
+
 var rc = assert_summary();
 syscall(60, rc);

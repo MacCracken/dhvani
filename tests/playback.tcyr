@@ -16,6 +16,53 @@ include "src/simd.cyr"
 include "src/buffer.cyr"
 include "src/playback.cyr"
 
+# ---- reference implementations (the 2.3.1 byte-loop packers) for bit-identity ----
+# ref_pack is the pre-2.3.2 dh_pack_le_w verbatim; ref_unpack is the pre-2.3.2
+# dh_unpack_le_w with the decode scale corrected to 2^(bits-1).
+fn ref_pack(samples, n, dst, bit_depth, bytes) {
+    var scale = dh_pcm_scale(bit_depth);
+    var i = 0;
+    while (i < n) {
+        var c = f64_clamp(vec_get(samples, i), DH_NEG_ONE, 1.0);
+        var v = f64_to(f64_trunc(f64_mul(c, scale)));
+        var off = i * bytes;
+        var b = 0;
+        while (b < bytes) {
+            store8(dst + off + b, (v >> (b * 8)) & 0xFF);
+            b = b + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+fn ref_unpack(src, n, dst, bit_depth, bytes) {
+    var scale = dh_pcm_dscale(bit_depth);
+    var i = 0;
+    while (i < n) {
+        var off = i * bytes;
+        var v = 0;
+        var b = 0;
+        while (b < bytes) {
+            v = v | (load8(src + off + b) << (b * 8));
+            b = b + 1;
+        }
+        v = v & ((1 << bit_depth) - 1);
+        if (v >= (1 << (bit_depth - 1))) { v = v - (1 << bit_depth); }
+        vec_set(dst, i, f64_div(f64_from(v), scale));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# a fake configured vani device: audio handle 0 (so vani_play / vani_record fail
+# BEFORE any ioctl -- no hardware is touched) carrying the given format.
+fn fake_dev(channels, bit_depth, alsa_fmt) {
+    var d = alloc(64);
+    store64(d, 0);
+    store64(d + 24, vani_format_new(48000, channels, bit_depth, alsa_fmt));
+    return d;
+}
+
 alloc_init();
 
 # ---- to_s16le exact little-endian packing ----
@@ -169,21 +216,293 @@ assert_eq(dh_pcm_store_bytes(32), vani_bytes_per_sample(vani_alsa_for(32, 1)), "
 # Round-trip through the 4-byte storage layout, including the sign padding that
 # the unpack mask has to strip before the sign fold.
 test_group("s24_storage_roundtrip_extremes");
-var sv = vec_new();
-vec_push(sv, 1.0); vec_push(sv, DH_NEG_ONE); vec_push(sv, 0); vec_push(sv, 0.5);
+var s24v = vec_new();
+vec_push(s24v, 1.0); vec_push(s24v, DH_NEG_ONE); vec_push(s24v, 0); vec_push(s24v, 0.5);
 var sbytes = dh_pcm_store_bytes(24);
-var sbuf = alloc(4 * sbytes);
-dh_pack_le_w(sv, 4, sbuf, 24, sbytes);
+var s24buf = alloc(4 * sbytes);
+dh_pack_le_w(s24v, 4, s24buf, 24, sbytes);
 var sout = dh_vec_zeros(4);
-dh_unpack_le_w(sbuf, 4, sout, 24, sbytes);
-assert_eq(f64_to(f64_mul(vec_get(sout, 0), 1000.0)), 1000, "S24 storage +full-scale round-trips");
-assert_eq(f64_to(f64_mul(vec_get(sout, 1), 1000.0)), 0 - 1000, "S24 storage -full-scale round-trips (sign padding stripped)");
+dh_unpack_le_w(s24buf, 4, sout, 24, sbytes);
+# +/-1.0 encode to +/-8388607 and decode by 2^23 (rust-old i24_to_f32), so full
+# scale comes back one LSB inside +/-1.0 -- exactly +/-8388607/8388608.
+var s24_fs = f64_div(f64_from(8388607), 8388608.0);
+assert_eq(vec_get(sout, 0), s24_fs, "S24 storage +full-scale round-trips to 8388607/2^23");
+assert_eq(vec_get(sout, 1), f64_neg(s24_fs), "S24 storage -full-scale round-trips (sign padding stripped)");
 assert_eq(f64_to(f64_mul(vec_get(sout, 2), 1000.0)), 0, "S24 storage zero round-trips");
 # half-scale is not exact: 0.5*8388607 = 4194303.5, and the pack TRUNCATES (as
-# rust-old does), so the round-trip lands one quantum low. Assert within one LSB.
+# rust-old does), so the round-trip lands below 0.5. Assert within two LSB.
 var half_err = f64_abs(f64_sub(vec_get(sout, 3), 0.5));
 assert_eq(f64_lt(half_err, 0.0000002), 1, "S24 storage half-scale round-trips within 1 LSB");
 
+# ---- decode_scale_parity (2.3.2) ----
+# rust-old i16_to_f32 / i24_packed_to_f32 / i32_to_f32 divide by 2^(bits-1), as do
+# dhvani's own dhvani_simd_i16_to_f32 / dhvani_convert_i32_to_f32. Through 2.3.1 the
+# PCM bridge divided by 2^(bits-1)-1: -32768 -> -1.0000305, 16384 -> 0.500015.
+test_group("decode_scale_parity");
+var dp16 = alloc(4);
+store16(dp16, 0x8000);
+store16(dp16 + 2, 0x4000);
+var db16 = dhvani_capture_from_s16le(dp16, 2, 1, 44100);
+var ds16 = dhvani_buffer_samples(db16);
+assert_eq(vec_get(ds16, 0), DH_NEG_ONE, "s16 -32768 decodes to exactly -1.0");
+assert_eq(vec_get(ds16, 1), 0.5, "s16 16384 decodes to exactly 0.5");
+var src16 = vec_new();
+vec_push(src16, 0 - 32768);
+vec_push(src16, 16384);
+var dst16 = dh_vec_zeros(2);
+dhvani_simd_i16_to_f32(src16, dst16);
+assert_eq(vec_get(ds16, 0), vec_get(dst16, 0), "agrees with dhvani_simd_i16_to_f32 (-32768)");
+assert_eq(vec_get(ds16, 1), vec_get(dst16, 1), "agrees with dhvani_simd_i16_to_f32 (16384)");
+var dp24 = alloc(3);
+store16(dp24, 0);
+store8(dp24 + 2, 0x80);
+var db24 = dhvani_capture_from_pcm(dp24, 1, 1, 44100, 24);
+assert_eq(vec_get(dhvani_buffer_samples(db24), 0), DH_NEG_ONE, "s24 -8388608 decodes to exactly -1.0");
+var dp32 = alloc(4);
+store32(dp32, 0x80000000);
+var db32 = dhvani_capture_from_pcm(dp32, 1, 1, 44100, 32);
+assert_eq(vec_get(dhvani_buffer_samples(db32), 0), DH_NEG_ONE, "s32 -2^31 decodes to exactly -1.0");
+
+# ---- pack_unpack_bit_identical (2.3.2) ----
+# The walked packers (store16/store32, no per-sample vec call) must produce the
+# exact bytes of the 2.3.1 byte loop, and the walked unpacker the exact f64 of the
+# byte-loop decode, for every depth x storage width the bridge uses.
+test_group("pack_unpack_bit_identical");
+var sweep = vec_new();
+vec_push(sweep, f64_neg(1.5)); vec_push(sweep, DH_NEG_ONE); vec_push(sweep, f64_neg(0.999));
+vec_push(sweep, f64_neg(0.5)); vec_push(sweep, f64_neg(f64_div(1.0, f64_from(1000000000))));
+vec_push(sweep, 0); vec_push(sweep, f64_div(1.0, f64_from(1000000000))); vec_push(sweep, 0.25);
+vec_push(sweep, 0.5); vec_push(sweep, 0.7071); vec_push(sweep, 0.999999); vec_push(sweep, 1.0);
+vec_push(sweep, 1.5); vec_push(sweep, 0x7FF8000000000000); vec_push(sweep, 0x7FF0000000000000);
+vec_push(sweep, 0xFFF0000000000000);
+var lcg = 12345;
+var li = 0;
+while (li < 240) {
+    lcg = (lcg * 1103515245 + 12345) & 0x7FFFFFFF;
+    vec_push(sweep, f64_sub(f64_mul(f64_div(f64_from(lcg), f64_from(2147483647)), 2.4), 1.2));
+    li = li + 1;
+}
+var nsw = vec_len(sweep);
+var combos = vec_new();
+vec_push(combos, 16); vec_push(combos, 2);
+vec_push(combos, 24); vec_push(combos, 3);
+vec_push(combos, 24); vec_push(combos, 4);
+vec_push(combos, 32); vec_push(combos, 4);
+var pack_same = 1;
+var unpack_same = 1;
+var ci = 0;
+while (ci < 4) {
+    var depth = vec_get(combos, ci * 2);
+    var width = vec_get(combos, ci * 2 + 1);
+    var pa = alloc(nsw * width);
+    var pb = alloc(nsw * width);
+    ref_pack(sweep, nsw, pa, depth, width);
+    dh_pack_le_w(sweep, nsw, pb, depth, width);
+    var bi = 0;
+    while (bi < nsw * width) {
+        if (load8(pa + bi) != load8(pb + bi)) { pack_same = 0; }
+        bi = bi + 1;
+    }
+    # decode both the packed sweep and raw pseudo-random bytes (sign padding,
+    # garbage high bytes in a 4-byte S24 slot) through both decoders
+    var raw = alloc(nsw * width);
+    var ri = 0;
+    while (ri < nsw * width) {
+        lcg = (lcg * 1103515245 + 12345) & 0x7FFFFFFF;
+        store8(raw + ri, lcg >> 7);
+        ri = ri + 1;
+    }
+    var ua = dh_vec_zeros(nsw);
+    var ub = dh_vec_zeros(nsw);
+    ref_unpack(pa, nsw, ua, depth, width);
+    dh_unpack_le_w(pa, nsw, ub, depth, width);
+    var ui = 0;
+    while (ui < nsw) {
+        if (vec_get(ua, ui) != vec_get(ub, ui)) { unpack_same = 0; }
+        ui = ui + 1;
+    }
+    ref_unpack(raw, nsw, ua, depth, width);
+    dh_unpack_le_w(raw, nsw, ub, depth, width);
+    ui = 0;
+    while (ui < nsw) {
+        if (vec_get(ua, ui) != vec_get(ub, ui)) { unpack_same = 0; }
+        ui = ui + 1;
+    }
+    ci = ci + 1;
+}
+assert_eq(pack_same, 1, "walked pack == 2.3.1 byte-loop pack (16/2, 24/3, 24/4, 32/4)");
+assert_eq(unpack_same, 1, "walked unpack == byte-loop unpack, bit for bit");
+
+# ---- nan_inf_pack ----
+test_group("nan_inf_pack");
+var nv = vec_new();
+vec_push(nv, 0x7FF8000000000000);
+vec_push(nv, 0x7FF0000000000000);
+vec_push(nv, 0xFFF0000000000000);
+var np16 = dhvani_playback_to_pcm(dhvani_buffer_from_interleaved(nv, 1, 44100), 16);
+assert_eq(load16(np16), 0, "NaN packs to 0");
+assert_eq(load16(np16 + 2), 0x7FFF, "+inf packs to +32767");
+assert_eq(load16(np16 + 4), 0x8001, "-inf packs to -32767");
+
+# ---- unsupported_depth (2.3.2) ----
+# vani configures S8 happily; dhvani has no 8-bit packer, and through 2.3.1 treated
+# every depth that was not 16/24 as 32-bit (an S8 device fed 4-byte words).
+test_group("unsupported_depth");
+var ub1 = dhvani_buffer_from_interleaved(dh_vec_zeros(4), 2, 48000);
+assert_eq(dh_pcm_depth_ok(8), 0, "8-bit is not a dhvani depth");
+assert_eq(dh_pcm_bytes(8), 0, "dh_pcm_bytes(8) fails closed");
+assert_eq(dh_pcm_store_bytes(20), 0, "dh_pcm_store_bytes(20) fails closed");
+assert_eq(dhvani_playback_to_pcm(ub1, 8), 0, "playback_to_pcm(8-bit) -> 0");
+var q8 = alloc(16);
+assert_eq(dhvani_capture_from_pcm(q8, 1, 1, 44100, 8), 0, "capture_from_pcm(8-bit) -> 0");
+assert_eq(dh_pack_le_w(dhvani_buffer_samples(ub1), 4, q8, 8, 1), 0 - 1, "dh_pack_le_w(8-bit) -> -1");
+assert_eq(dhvani_player_new_fmt(1024, 16, 2, 8), 0, "player_new_fmt(8-bit) -> 0");
+assert_eq(dhvani_recorder_new_fmt(1024, 16, 2, 48000, 20), 0, "recorder_new_fmt(20-bit) -> 0");
+assert_eq(dhvani_capture_read_fmt(fake_dev(2, 8, vani_alsa_for(8, 1)), 16, 2, 48000, 8), 0,
+  "capture_read_fmt(8-bit) -> 0");
+assert_eq(dhvani_playback_write(fake_dev(2, 8, vani_alsa_for(8, 1)), ub1), 0 - 1,
+  "playback_write to an S8 device -> -1");
+assert_eq(dhvani_playback_write(fake_dev(2, 32, SND_PCM_FORMAT_FLOAT_LE), ub1), 0 - 1,
+  "playback_write to a FLOAT_LE device -> -1");
+
+# ---- ctor_rejects (2.3.2) ----
+# vani_ring_new answers 0 for ring_bytes <= 0 or > 1 GiB; that null ring used to
+# be stored and the first push/read dereferenced it (SIGSEGV). channels == 0 made
+# recorder_read divide by a 0 frame size (SIGFPE).
+test_group("ctor_rejects");
+assert_eq(dhvani_player_new(0, 16, 2), 0, "player_new(ring_bytes=0) -> 0");
+assert_eq(dhvani_player_new(1024, 16, 0), 0, "player_new(channels=0) -> 0");
+assert_eq(dhvani_player_new(1024, 0, 2), 0, "player_new(max_frames=0) -> 0");
+assert_eq(dhvani_recorder_new(0, 16, 2, 48000), 0, "recorder_new(ring_bytes=0) -> 0");
+assert_eq(dhvani_recorder_new(1024, 16, 0, 48000), 0, "recorder_new(channels=0) -> 0");
+assert_eq(dhvani_recorder_new(1024, 16, 2, 0), 0, "recorder_new(sample_rate=0) -> 0");
+assert_eq(dhvani_player_push(0, ub1), 0, "player_push(null player) -> 0 bytes");
+assert_eq(dhvani_player_ring(0), 0, "player_ring(null) -> 0");
+assert_eq(dhvani_recorder_read(0, 16), 0, "recorder_read(null) -> 0");
+
+# ---- player_whole_frames (2.3.2) ----
+# 6ch S16 = 12-byte frames, 64-byte ring: after 5 frames (60 bytes) 4 bytes are
+# free. Through 2.3.1 the 6th push wrote those 4 bytes -- a third of a frame --
+# misaligning every later sample.
+test_group("player_whole_frames");
+var pl6 = dhvani_player_new(64, 3, 6);
+var f6 = dh_vec_zeros(6);
+var f6i = 0;
+while (f6i < 6) { vec_set(f6, f6i, 0.25); f6i = f6i + 1; }
+var fb6 = dhvani_buffer_from_interleaved(f6, 6, 48000);
+var pushes_ok = 1;
+var pi6 = 0;
+while (pi6 < 5) {
+    if (dhvani_player_push(pl6, fb6) != 12) { pushes_ok = 0; }
+    pi6 = pi6 + 1;
+}
+assert_eq(pushes_ok, 1, "5 whole 12-byte frames enqueued");
+assert_eq(dhvani_player_push(pl6, fb6), 0, "6th push: 4 bytes free -> 0 bytes, no fragment");
+assert_eq(vani_ring_used(dhvani_player_ring(pl6)) % 12, 0, "ring holds whole frames only");
+# resume with push_from: free 12 bytes, offer 3 frames, 1 fits; then the rest
+var drain6 = alloc(64);
+assert_eq(vani_ring_read(dhvani_player_ring(pl6), drain6, 12), 12, "consumer drains one frame");
+var f18 = dh_vec_zeros(18);
+var fb18 = dhvani_buffer_from_interleaved(f18, 6, 48000);
+assert_eq(dhvani_player_push_from(pl6, fb18, 0), 1, "push_from: 1 of 3 frames fits");
+assert_eq(vani_ring_read(dhvani_player_ring(pl6), drain6, 36), 36, "consumer drains three frames");
+assert_eq(dhvani_player_push_from(pl6, fb18, 1), 2, "push_from(start=1): the remaining 2 frames");
+assert_eq(dhvani_player_push_from(pl6, fb18, 4), 0 - 1, "push_from past the end -> -1");
+var mono1 = dhvani_buffer_from_interleaved(dh_vec_zeros(1), 1, 48000);
+assert_eq(dhvani_player_push(pl6, mono1), 0, "channel-count mismatch -> 0 bytes");
+
+# ---- recorder_whole_frames (2.3.2) ----
+# stereo S16 = 4-byte frames; 6 bytes in the ring = 1 frame + half a frame. Through
+# 2.3.1 the read consumed all 6 and dropped the trailing 2.
+test_group("recorder_whole_frames");
+var rw = dhvani_recorder_new(1024, 4, 2, 48000);
+var six = alloc(8);
+vani_ring_write(dhvani_recorder_ring(rw), six, 6);
+var rwb = dhvani_recorder_read(rw, 4);
+assert_eq(dhvani_buffer_frames(rwb), 1, "one whole frame decoded");
+assert_eq(vani_ring_used(dhvani_recorder_ring(rw)), 2, "the half frame stays in the ring");
+
+# ---- recorder_read_alloc_free (2.3.2) ----
+# The RT capture read decoded into a NEW AudioBuffer per call (32,696 B per
+# 1024-frame stereo block through 2.3.1). It now reuses the recorder's own buffer.
+test_group("recorder_read_alloc_free");
+var rr = dhvani_recorder_new(65536, 1024, 2, 48000);
+var blk = alloc(4096);
+store16(blk, 0x4000);
+vani_ring_write(dhvani_recorder_ring(rr), blk, 4096);
+var rr0 = dhvani_recorder_read(rr, 1024);
+vani_ring_write(dhvani_recorder_ring(rr), blk, 4096);
+var ra0 = alloc_used();
+var rr1 = dhvani_recorder_read(rr, 1024);
+var ra1 = alloc_used();
+assert_eq(ra1 - ra0, 0, "recorder_read allocates 0 bytes per 1024-frame block");
+assert_eq(dhvani_buffer_frames(rr1), 1024, "1024 frames decoded");
+assert_eq(vec_len(dhvani_buffer_samples(rr1)), 2048, "sample vec length tracks the frames");
+assert_eq(vec_get(dhvani_buffer_samples(rr1), 0), 0.5, "first sample decoded");
+assert_eq(rr1, rr0, "the recorder-owned buffer is reused");
+var rr2 = dhvani_recorder_read(rr, 1024);
+assert_eq(dhvani_buffer_frames(rr2), 0, "empty ring -> 0 frames");
+assert_eq(vec_len(dhvani_buffer_samples(rr2)), 0, "empty ring -> empty sample vec");
+vani_ring_write(dhvani_recorder_ring(rr), blk, 4096);
+var rib = dhvani_buffer_from_interleaved(dh_vec_zeros(2048), 2, 48000);
+var rb0 = alloc_used();
+assert_eq(dhvani_recorder_read_into(rr, rib), 1024, "read_into: 1024 frames");
+var rb1 = alloc_used();
+assert_eq(rb1 - rb0, 0, "recorder_read_into allocates 0 bytes");
+assert_eq(vec_get(dhvani_buffer_samples(rib), 0), 0.5, "read_into decoded");
+assert_eq(dhvani_recorder_read_into(rr, mono1), 0 - 1, "read_into channel mismatch -> -1");
+
+# ---- device_glue_fake_handle (2.3.2) ----
+# A fake configured device (audio handle 0) lets the glue run to vani_play /
+# vani_record, which then fail before any ioctl. vani boxes each such Err in a
+# 16-byte allocation of its own, so "no PCM-sized allocation" is asserted as < 64.
+test_group("device_glue_fake_handle");
+var pbuf2 = dhvani_buffer_from_interleaved(dh_vec_zeros(2048), 2, 48000);
+assert_eq(dhvani_playback_write(0, pbuf2), 0 - 1, "playback_write(dev=0) -> -1 (was SIGSEGV)");
+var fd16 = fake_dev(2, 16, vani_alsa_for(16, 1));
+assert_eq(dhvani_playback_write(fd16, 0), 0 - 1, "playback_write(buf=0) -> -1");
+var monob = dhvani_buffer_from_interleaved(dh_vec_zeros(1024), 1, 48000);
+var wa0 = alloc_used();
+assert_eq(dhvani_playback_write(fd16, monob), 0 - 1, "mono buffer to a stereo device -> -1");
+var wa1 = alloc_used();
+assert_eq(wa1 - wa0, 0, "channel mismatch refused before any transfer");
+var wr0 = dhvani_playback_write(fd16, pbuf2);
+var wb0 = alloc_used();
+assert_eq(dhvani_playback_write(fd16, pbuf2), 0 - 1, "fake device write fails cleanly");
+var wb1 = alloc_used();
+assert(wb1 - wb0 < 64, "playback_write steady state: no per-call PCM allocation");
+var fd32 = fake_dev(2, 32, vani_alsa_for(32, 1));
+var ca0 = alloc_used();
+assert_eq(dhvani_capture_read(fd32, 1024, 2, 48000), 0, "16-bit read of a 32-bit device -> 0 (P-1: kernel overrun)");
+assert_eq(dhvani_capture_read_fmt(fd16, 1024, 1, 48000, 16), 0, "1-channel read of a stereo device -> 0");
+assert_eq(dhvani_capture_read_fmt(fd16, 1024, 2, 48000, 24), 0, "24-bit read of a 16-bit device -> 0");
+assert_eq(dhvani_capture_read(0, 1024, 2, 48000), 0, "capture_read(dev=0) -> 0");
+var ca1 = alloc_used();
+assert_eq(ca1 - ca0, 0, "mismatches refused before any transfer");
+var cib = dhvani_buffer_from_interleaved(dh_vec_zeros(2048), 2, 48000);
+var ci0 = dhvani_capture_read_into(fd16, cib);
+var cc0 = alloc_used();
+assert_eq(dhvani_capture_read_into(fd16, cib), 0 - 1, "fake device capture_read_into fails cleanly");
+var cc1 = alloc_used();
+assert(cc1 - cc0 < 64, "capture_read_into steady state: no per-call PCM allocation");
+assert_eq(dhvani_capture_read_into(fd16, monob), 0 - 1, "read_into channel mismatch -> -1");
+
+# ---- pcm_into_forms (2.3.2) ----
+test_group("pcm_into_forms");
+var iv = vec_new();
+vec_push(iv, 1.0); vec_push(iv, f64_neg(0.5));
+var ib = dhvani_buffer_from_interleaved(iv, 2, 48000);
+var idst = alloc(16);
+var ia0 = alloc_used();
+assert_eq(dhvani_playback_to_pcm_into(ib, 16, idst, 16), 4, "to_pcm_into: 4 bytes");
+var ia1 = alloc_used();
+assert_eq(ia1 - ia0, 0, "to_pcm_into allocates nothing");
+assert_eq(load16(idst), 0x7FFF, "to_pcm_into packed 1.0");
+assert_eq(dhvani_playback_to_pcm_into(ib, 24, idst, 5), 0 - 1, "to_pcm_into: dst too small -> -1");
+var ob = dhvani_buffer_from_interleaved(dh_vec_zeros(2), 2, 48000);
+assert_eq(dhvani_capture_from_pcm_into(idst, 1, 16, ob), 1, "from_pcm_into: 1 frame");
+assert_eq(vec_get(dhvani_buffer_samples(ob), 0), f64_div(f64_from(32767), 32768.0),
+  "from_pcm_into decoded 32767/32768");
 
 var rc = assert_summary();
 syscall(60, rc);

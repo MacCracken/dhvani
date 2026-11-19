@@ -82,7 +82,7 @@ var rec7 = dhvani_record_new(16);
 var d7 = vec_new();
 vec_push(d7, 1.0); vec_push(d7, 2.0); vec_push(d7, 3.0);
 dhvani_record_push_samples(rec7, d7);
-assert_eq(vec_len(DhRecordManager_accumulated(rec7)), 3, "push before drop ok");
+assert_eq(dhvani_record_len(rec7), 3, "push before drop ok");
 
 # ---- loop_record_drop_without_finish ----
 test_group("loop_record_drop_without_finish");
@@ -94,7 +94,9 @@ dhvani_record_loop_push_marker(rec8);
 var d8b = vec_new();
 vec_push(d8b, 3.0);
 dhvani_record_loop_push_samples(rec8, d8b);
-assert_eq(vec_len(DhLoopRecordManager_takes(rec8)), 2, "2 takes before drop ok");
+assert_eq(dhvani_record_loop_take_count(rec8), 2, "2 takes before drop ok");
+assert_eq(dhvani_record_loop_take_len(rec8, 0), 2, "take[0] holds 2 before drop");
+assert_eq(dhvani_record_loop_take_len(rec8, 2), 0 - 1, "take index out of range -> -1");
 
 # ---- loop_record_empty_takes ----
 test_group("loop_record_empty_takes");
@@ -133,6 +135,68 @@ while (iter12 < 100) {
 }
 var res12 = dhvani_record_finish(rec12);
 assert_eq(vec_len(res12), 100 * 1024, "100*1024 samples accumulated");
+
+# ---- record_chunked_growth (2.3.2) ----
+# push_samples is the RT call. Through 2.3.1 it appended into one doubling vec, so
+# the push that crossed a power of two copied everything recorded so far (512 MiB
+# at ~11.6 min of 48 kHz stereo) and allocated twice that. Storage is now fixed
+# DH_RECORD_CHUNK chunks: a push allocates at most one chunk and copies only its
+# own samples, however long the take already is.
+test_group("record_chunked_growth");
+var blockc = dh_vec_zeros(DH_RECORD_CHUNK);
+var bci = 0;
+while (bci < DH_RECORD_CHUNK) { vec_set(blockc, bci, f64_from(bci)); bci = bci + 1; }
+var recc = dhvani_record_new(16);
+var pc = 0;
+while (pc < 4) { dhvani_record_push_samples(recc, blockc); pc = pc + 1; }
+assert_eq(dhvani_record_len(recc), 4 * DH_RECORD_CHUNK, "4 chunks recorded");
+var one = vec_new();
+vec_push(one, 7.0);
+var ga0 = alloc_used();
+dhvani_record_push_samples(recc, one);
+var ga1 = alloc_used();
+assert(ga1 - ga0 <= DH_RECORD_CHUNK * 8 + 64, "push crossing into a 5th chunk allocates one chunk, not a 2x regrowth");
+var gb0 = alloc_used();
+dhvani_record_push_samples(recc, one);
+var gb1 = alloc_used();
+assert_eq(gb1 - gb0, 0, "push inside a chunk allocates nothing");
+var resc = dhvani_record_finish(recc);
+assert_eq(vec_len(resc), 4 * DH_RECORD_CHUNK + 2, "finish flattens every chunk");
+assert_eq(vec_get(resc, DH_RECORD_CHUNK - 1), f64_from(DH_RECORD_CHUNK - 1), "last sample of chunk 0");
+assert_eq(vec_get(resc, DH_RECORD_CHUNK), 0, "first sample of chunk 1");
+assert_eq(vec_get(resc, 3 * DH_RECORD_CHUNK + 5), f64_from(5), "sample inside chunk 3");
+assert_eq(vec_get(resc, 4 * DH_RECORD_CHUNK + 1), 7.0, "tail sample");
+assert_eq(dhvani_record_finish(recc), resc, "finish again (no push) -> the same vec");
+dhvani_record_push_samples(recc, one);
+assert_eq(vec_len(dhvani_record_finish(recc)), 4 * DH_RECORD_CHUNK + 3, "push after finish is included next finish");
+
+# ---- record_unaligned_chunks ----
+# pushes that straddle chunk boundaries keep order and values.
+test_group("record_unaligned_chunks");
+var recu = dhvani_record_new(16);
+var odd = dh_vec_zeros(40000);
+var oi = 0;
+while (oi < 40000) { vec_set(odd, oi, f64_from(oi)); oi = oi + 1; }
+dhvani_record_push_samples(recu, odd);
+dhvani_record_push_samples(recu, odd);
+dhvani_record_push_samples(recu, odd);
+var resu = dhvani_record_finish(recu);
+assert_eq(vec_len(resu), 120000, "3 x 40000 samples");
+assert_eq(vec_get(resu, 65535), f64_from(25535), "sample 65535 (chunk 0 end)");
+assert_eq(vec_get(resu, 65536), f64_from(25536), "sample 65536 (chunk 1 start)");
+assert_eq(vec_get(resu, 119999), f64_from(39999), "last sample");
+var loopu = dhvani_record_loop_new(16, DH_RECORDING_MODE_NORMAL);
+dhvani_record_loop_push_samples(loopu, odd);
+dhvani_record_loop_push_samples(loopu, odd);
+dhvani_record_loop_push_marker(loopu);
+dhvani_record_loop_push_samples(loopu, one);
+var takesu = dhvani_record_loop_finish(loopu);
+assert_eq(vec_len(vec_get(takesu, 0)), 80000, "loop take 0 spans two chunks");
+assert_eq(vec_get(vec_get(takesu, 0), 79999), f64_from(39999), "loop take 0 last sample");
+assert_eq(vec_get(vec_get(takesu, 1), 0), 7.0, "loop take 1");
+dhvani_record_push_samples(0, odd);
+dhvani_record_push_samples(recu, 0);
+assert_eq(dhvani_record_len(recu), 120000, "null manager / null data push is a no-op");
 
 var rc = assert_summary();
 syscall(60, rc);

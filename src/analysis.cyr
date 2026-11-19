@@ -23,14 +23,21 @@ fn dh_log10(x) { return f64_div(f64_ln(x), F64_LN10); }
 fn dhvani_spectrum_from_magnitudes(magnitudes, freq_resolution, sample_rate, fft_size) {
     var n = vec_len(magnitudes);
     var magnitude_db = dh_vec_zeros(n);
+    # Peak bin as the oracle's `max_by(partial_cmp().unwrap_or(Equal))`: the fold
+    # starts from bin 0 and moves to bin i unless the running peak is strictly
+    # greater, so the LAST of equal maxima wins (silence -> bin n-1), and a NaN
+    # compares Equal (it is taken, and the next bin replaces it). (0, 0.0) if empty.
     var peak_idx = 0;
     var peak_mag = 0;
+    if (n > 0) { peak_mag = vec_get(magnitudes, 0); }
     var i = 0;
     while (i < n) {
         var m = vec_get(magnitudes, i);
         if (f64_gt(m, 0.0000000001) == 1) { vec_set(magnitude_db, i, f64_mul(20.0, dh_log10(m))); }
         else { vec_set(magnitude_db, i, f64_neg(200.0)); }
-        if (f64_gt(m, peak_mag) == 1) { peak_mag = m; peak_idx = i; }
+        if (i > 0) {
+            if (f64_gt(peak_mag, m) == 0) { peak_mag = m; peak_idx = i; }
+        }
         i = i + 1;
     }
     var peak_magnitude_db = f64_neg(200.0);
@@ -60,7 +67,9 @@ fn dhvani_spectrum_bin_frequency(self, bin) { return f64_mul(f64_from(bin), DhSp
 # magnitude at bin k.
 #must_use
 fn dhvani_spectrum_magnitude(self, k) { return vec_get(DhSpectrum_magnitudes(self), k); }
-# dominant frequency (peak bin frequency); 0.0 for an empty spectrum.
+# dominant frequency (peak bin frequency). The oracle's Option: None only for an
+# empty spectrum (bin_count 0), where this returns 0.0 -- check bin_count to tell
+# that apart from a DC peak. Ties go to the LAST bin (silence -> (n-1) * fr).
 #must_use
 fn dhvani_spectrum_dominant_frequency(self) { return DhSpectrum_peak_frequency(self); }
 

@@ -146,7 +146,8 @@ assert(f64_lt(dhvani_buffer_rms(b14), f64_mul(r14, 0.5)), "low shelf cuts 200Hz"
 # ---- process_sample_out_of_range_channel ----
 test_group("process_sample_out_of_range_channel");
 var f15 = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 1);
-assert(f64_lt(f64_abs(f64_sub(dhvani_biquad_process_sample(f15, 0.75, 5), 0.75)), 0.0000001), "out-of-range channel passthrough");
+var f15_out = dhvani_biquad_process_sample(f15, 0.75, 5);
+assert(f64_lt(f64_abs(f64_sub(f15_out, 0.75)), 0.0000001), "out-of-range channel passthrough");
 
 # ---- stereo_fast_path (2.3.2) ----
 # process() on a stereo buffer at full wet takes the oracle's fast path (the
@@ -206,6 +207,91 @@ while (fp_i < vec_len(fp_r3)) {
     fp_i = fp_i + 1;
 }
 assert_eq(fp_hok, 1, "mix 0.5: the dry/wet loop, unchanged");
+
+# ---- hardening (2.3.3) ----
+# The fast path runs `frames` frames, not vec_len / 2: a buffer whose vec is longer than
+# frames * channels (a reused, grow-only scratch) leaves its tail alone, and the state
+# ends where a true 2-frame buffer leaves it.
+test_group("fast_path_honours_frames");
+var hf_long = vec_new();
+var hf_i = 0;
+while (hf_i < 8) { vec_push(hf_long, f64_mul(f64_from(hf_i + 1), 0.1)); hf_i = hf_i + 1; }
+var hf_buf = dhvani_buffer_from_interleaved(hf_long, 2, 44100);
+DhAudioBuffer_set_frames(hf_buf, 2);             # 2 frames used, 4 present
+var hf_short = vec_new();
+hf_i = 0;
+while (hf_i < 4) { vec_push(hf_short, f64_mul(f64_from(hf_i + 1), 0.1)); hf_i = hf_i + 1; }
+var hf_ref = dhvani_buffer_from_interleaved(hf_short, 2, 44100);
+var hf_fa = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 2);
+var hf_fb = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 2);
+dhvani_biquad_process(hf_fa, hf_buf);
+dhvani_biquad_process(hf_fb, hf_ref);
+assert_eq(vec_get(hf_long, 4), f64_mul(f64_from(5), 0.1), "sample past frames untouched");
+assert_eq(vec_get(hf_long, 7), f64_mul(f64_from(8), 0.1), "last sample untouched");
+var hf_sa = DhBiquadState_z1(vec_get(DhBiquadFilter_states(hf_fa), 0));
+var hf_sb = DhBiquadState_z1(vec_get(DhBiquadFilter_states(hf_fb), 0));
+assert_eq(hf_sa, hf_sb, "state equals a true 2-frame buffer's");
+
+# set_params / set_sample_rate rewrite the coefficients in place: no allocation.
+test_group("set_params_alloc_free");
+var sp_f = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 2);
+dhvani_biquad_set_params(sp_f, DH_BQ_LOWPASS, 0, 900.0, 0.707);
+var sp_used = alloc_used();
+var sp_k = 0;
+while (sp_k < 100) {
+    dhvani_biquad_set_params(sp_f, DH_BQ_PEAKING, 6.0, f64_from(500 + sp_k), 1.0);
+    dhvani_biquad_set_sample_rate(sp_f, 48000);
+    sp_k = sp_k + 1;
+}
+assert_eq(alloc_used() - sp_used, 0, "100 set_params + set_sample_rate: 0 bytes");
+var sp_ref = dhvani_biquad_design(DH_BQ_PEAKING, 6.0, f64_from(599), 1.0, 48000);
+assert_eq(DhBiquadCoeffs_b0(DhBiquadFilter_coeffs(sp_f)), DhBiquadCoeffs_b0(sp_ref), "b0 as designed");
+assert_eq(DhBiquadCoeffs_a2(DhBiquadFilter_coeffs(sp_f)), DhBiquadCoeffs_a2(sp_ref), "a2 as designed");
+
+# A buffer wider than the filter: the extra channels pass through (the oracle panics).
+test_group("wider_buffer_than_states");
+var wb_v = vec_new();
+vec_push(wb_v, 1.0); vec_push(wb_v, 0.5); vec_push(wb_v, 0.25); vec_push(wb_v, 0.125);
+var wb_b = dhvani_buffer_from_interleaved(wb_v, 2, 44100);
+var wb_f = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, 1);
+dhvani_biquad_set_mix(wb_f, F64_HALF);
+dhvani_biquad_process(wb_f, wb_b);
+assert_eq(vec_get(wb_v, 1), F64_HALF, "channel 1 untouched (R[0])");
+assert_eq(vec_get(wb_v, 3), 0.125, "channel 1 untouched (R[1])");
+assert(vec_get(wb_v, 0) != 1.0, "channel 0 filtered");
+assert_eq(dhvani_biquad_process_sample(wb_f, 0.75, 0 - 1), 0.75, "negative channel passes through");
+
+# A rate too low for the 1 Hz .. 0.499*sr clamp designs unity, not NaN.
+test_group("zero_sample_rate_is_unity");
+var zr_c = dhvani_biquad_design(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 0);
+assert_eq(DhBiquadCoeffs_b0(zr_c), 1.0, "b0 = 1");
+assert_eq(DhBiquadCoeffs_a1(zr_c), 0, "a1 = 0");
+var zr_f = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 0, 1);
+assert_eq(dhvani_biquad_process_sample(zr_f, 0.3, 0), 0.3, "passes the sample through");
+
+# One NaN sample: its block's outputs may be NaN, but the state is cleared at the block's
+# end, so the next block is finite (the oracle stays NaN until reset). Both paths.
+fn nan_recovers(channels) {
+    var f = dhvani_biquad_new(DH_BQ_LOWPASS, 0, 1000.0, 0.707, 44100, channels);
+    var v = vec_new();
+    var i = 0;
+    while (i < 8 * channels) { vec_push(v, F64_HALF); i = i + 1; }
+    vec_set(v, 2 * channels, f64_div(0, 0));
+    dhvani_biquad_process(f, dhvani_buffer_from_interleaved(v, channels, 44100));
+    var w = vec_new();
+    i = 0;
+    while (i < 8 * channels) { vec_push(w, F64_HALF); i = i + 1; }
+    dhvani_biquad_process(f, dhvani_buffer_from_interleaved(w, channels, 44100));
+    i = 0;
+    while (i < vec_len(w)) {
+        if (dhvani_is_finite(vec_get(w, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+test_group("nan_input_does_not_persist");
+assert_eq(nan_recovers(1), 1, "mono (generic loop): next block finite");
+assert_eq(nan_recovers(2), 1, "stereo (fast path): next block finite");
 
 var rc = assert_summary();
 syscall(60, rc);

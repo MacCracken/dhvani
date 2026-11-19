@@ -23,10 +23,10 @@ Cyrius runs a **free-less bump allocator**: an allocation is never reclaimed, so
 | `Lfo` | `dsp::lfo` | `tick()` — pure arithmetic |
 | `Oscillator` | `dsp::oscillator` | `sample()` — pure arithmetic |
 | `GainSmoother` | `dsp::gain_smoother` | `next()` — pure arithmetic |
-| `GraphProcessor` | `graph` | `process()` / `process_parallel()` — plan swap is `try_lock` (non-blocking) |
-| `LevelMeter` | `meter` | `process()` — fixed state |
+| `GraphProcessor` | `graph` | `process()`; a plan swap reuses the processor's buffers (2.3.3). `process_parallel` was not ported |
+| `LevelMeter` | `meter` | `process()`, fixed state; read it with the scalar getters or `*_into` forms |
 | `Player` | `playback` | `dhvani_player_push()` / `dhvani_player_drain()` — packs into a reusable scratch, writes to a lock-free vani ring, zero bytes/block |
-| `Recorder` | `playback` | `dhvani_recorder_fill()` — reads the device into a lock-free vani ring, zero bytes/block on the fill side |
+| `Recorder` | `playback` | `dhvani_recorder_fill()` reads the device into a lock-free vani ring; `dhvani_recorder_read()` / `_read_into()` decode into reused storage (2.3.3). Zero bytes/block on both sides |
 
 ## Non-RT Types (may allocate or block)
 
@@ -34,7 +34,6 @@ Cyrius runs a **free-less bump allocator**: an allocation is never reclaimed, so
 |------|--------|-------------------|
 | `dhvani_buffer_from_interleaved()` | `buffer` | Constructor allocates a `vec` |
 | `dhvani_buffer_silence()` | `buffer` | Constructor allocates |
-| `dhvani_recorder_read()` | `playback` | Decodes the ring into a **new** AudioBuffer per call — the read side allocates; drain into pre-sized storage off the RT path |
 | `mix()` | `buffer` | Creates new output buffer |
 | `resample_linear()` / `resample_sinc()` | `buffer::resample` | Allocates output buffer |
 | `Graph::compile()` | `graph` | Builds `ExecutionPlan` with `HashMap` allocation |
@@ -75,8 +74,8 @@ allocation-free and returns a reference to the processor's internal buffer.
 ## Guidelines
 
 1. **Pre-allocate everything** before entering the RT loop
-2. **Never call** `dhvani_buffer_from_interleaved()`, `dhvani_buffer_silence()`, `mix()`, `resample_*()`, or `dhvani_recorder_read()` from the RT thread — they allocate, and the free-less allocator never reclaims it
+2. **Never call** `dhvani_buffer_from_interleaved()`, `dhvani_buffer_silence()`, `mix()` or `resample_*()` from the RT thread: they allocate, and the free-less allocator never reclaims it
 3. **`AutomationLane::render_fast()`** is RT-safe if the lane is pre-built
-4. **Parameter changes** (`set_frequency()`, `set_params()`, etc.) are RT-safe — they update coefficients inline
-5. **Graph plan swaps** use `try_lock()` — the RT thread never blocks
+4. **Parameter changes** (`set_frequency()`, `set_params()`, `set_band()`, etc.) are RT-safe: they update coefficients in place. Through 2.3.2 the biquad family (biquad, EQ bands, de-esser, graphic EQ) allocated a new coefficient set per change
+5. **Graph plan swaps** happen between cycles on the render thread; there is no lock (the oracle's `try_lock` became a plain pending cell)
 6. **`SvfFilter`** is preferred over `BiquadFilter` for modulated parameters (no coefficient discontinuities)

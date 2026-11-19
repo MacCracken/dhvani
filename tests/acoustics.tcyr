@@ -45,6 +45,38 @@ fn all_finite(buf) {
     return ok;
 }
 
+# The pre-2.3.2 process_fdn verbatim (vec_get/vec_set per sample), the
+# bit-identity reference for the walked version.
+fn ref_process_fdn(fdn, buf, mix) {
+    var m = f64_clamp(mix, 0, 1.0);
+    var dry = f64_sub(1.0, m);
+    var ch = DhAudioBuffer_channels(buf);
+    var chmax = ch;
+    if (chmax < 1) { chmax = 1; }
+    var frames = DhAudioBuffer_frames(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frame = 0;
+    while (frame < frames) {
+        var mono_in = 0;
+        var c = 0;
+        while (c < ch) {
+            mono_in = f64_add(mono_in, vec_get(samples, frame * ch + c));
+            c = c + 1;
+        }
+        mono_in = f64_div(mono_in, f64_from(chmax));
+        var wet = fdn_process_sample(fdn, mono_in);
+        var c2 = 0;
+        while (c2 < ch) {
+            var idx = frame * ch + c2;
+            var cur = vec_get(samples, idx);
+            vec_set(samples, idx, f64_add(f64_mul(cur, dry), f64_mul(wet, m)));
+            c2 = c2 + 1;
+        }
+        frame = frame + 1;
+    }
+    return 0;
+}
+
 # IrConfig with default fields but overridden diffuse-ray count + max-time.
 fn cfg(num_diffuse_rays, max_time_seconds) {
     var c = ir_config_default();
@@ -157,6 +189,100 @@ while (band < NUM_BANDS) {
     band = band + 1;
 }
 assert_eq(rt_ok, 1, "all bathroom rt60 bands > 0");
+
+# ---- multiband_tail (2.3.2) ----
+# The reverb only emits whole 512-frame blocks, so through 2.3.1 the last
+# frames % 512 frames of a one-shot convolve_multiband came back RAW (rust-old has
+# the same gap). The buffer is now run zero-padded: the full blocks are
+# bit-identical to a direct process, the tail is convolved, the length is kept.
+test_group("multiband_tail");
+var room10 = acoustic_room_shoebox(f64_from(5), f64_from(4), f64_from(3), acoustic_material_concrete());
+var dir10 = dhvani_acoustics_generate_ir(f64_from(2), 1.5, f64_from(2), f64_from(3), 1.5, f64_from(2), room10,
+  cfg(20, 0.05));
+var mb10 = dhvani_ir_multiband(dir10);
+var tail_frames = 4096 + 100;
+var buf10 = dhvani_buffer_from_interleaved(const_vec(tail_frames * 2, 0.5), 2, 44100);
+assert_eq(dhvani_acoustics_convolve_multiband(buf10, mb10, 0.3), DHVANI_ERR_NONE, "convolve_multiband ok");
+assert_eq(dhvani_buffer_frames(buf10), tail_frames, "frame count unchanged");
+assert_eq(vec_len(dhvani_buffer_samples(buf10)), tail_frames * 2, "sample count unchanged");
+assert_eq(all_finite(buf10), 1, "all finite");
+var raw_tail = 0;
+var ti = 4096 * 2;
+while (ti < tail_frames * 2) {
+    if (f64_eq(vec_get(dhvani_buffer_samples(buf10), ti), 0.5) == 1) { raw_tail = raw_tail + 1; }
+    ti = ti + 1;
+}
+assert_eq(raw_tail, 0, "no raw (unprocessed) tail samples");
+var ref10 = dhvani_buffer_from_interleaved(const_vec(4096 * 2, 0.5), 2, 44100);
+var rev10 = dhvani_acoustics_convolution_from_multiband(mb10, 0.3);
+assert(rev10 != 0, "convolution_from_multiband builds a reverb");
+dhvani_conv_process(rev10, ref10);
+var head_same = 1;
+var hi = 0;
+while (hi < 4096 * 2) {
+    if (vec_get(dhvani_buffer_samples(ref10), hi) != vec_get(dhvani_buffer_samples(buf10), hi)) { head_same = 0; }
+    hi = hi + 1;
+}
+assert_eq(head_same, 1, "whole blocks bit-identical to a direct reverb process");
+
+# ---- convolution_from_multiband (2.3.2) ----
+# the reusable per-block form: one reverb, many blocks, tail carried across.
+test_group("convolution_from_multiband");
+var rev11 = dhvani_acoustics_convolution_from_multiband(mb10, 0.3);
+var blk11 = dhvani_buffer_from_interleaved(const_vec(1024, 0.5), 1, 44100);
+dhvani_conv_process(rev11, blk11);
+dhvani_conv_process(rev11, blk11);
+assert_eq(all_finite(blk11), 1, "per-block reverb all finite");
+assert_eq(dhvani_acoustics_convolution_from_multiband(0, 0.3), 0, "convolution_from_multiband(0) -> 0");
+
+# ---- process_fdn_walked (2.3.2) ----
+# the walked loop is bit-identical to the vec_get/vec_set original, and alloc-free.
+test_group("process_fdn_walked");
+var fdnA = fdn_new(fdn_config_for_room(f64_from(10), f64_from(8), f64_from(3), 1.2, 44100));
+var fdnB = fdn_new(fdn_config_for_room(f64_from(10), f64_from(8), f64_from(3), 1.2, 44100));
+var fa = dhvani_buffer_from_interleaved(const_vec(3000, 0.25), 3, 44100);
+var fb = dhvani_buffer_from_interleaved(const_vec(3000, 0.25), 3, 44100);
+var fsa = dhvani_buffer_samples(fa);
+var fsb = dhvani_buffer_samples(fb);
+var fi = 0;
+while (fi < 3000) {
+    var fv = f64_sin(f64_from(fi));
+    vec_set(fsa, fi, fv);
+    vec_set(fsb, fi, fv);
+    fi = fi + 1;
+}
+ref_process_fdn(fdnA, fa, 0.4);
+var fd0 = alloc_used();
+assert_eq(dhvani_acoustics_process_fdn(fdnB, fb, 0.4), 0, "process_fdn ok");
+var fd1 = alloc_used();
+assert_eq(fd1 - fd0, 0, "process_fdn allocates nothing");
+var fsame = 1;
+fi = 0;
+while (fi < 3000) {
+    if (vec_get(fsa, fi) != vec_get(fsb, fi)) { fsame = 0; }
+    fi = fi + 1;
+}
+assert_eq(fsame, 1, "walked process_fdn == the vec_get original, bit for bit");
+
+# ---- bridge_handles (2.3.2) ----
+# goonj's accessors are raw field loads; every bridge refuses a handle <= 0, and
+# the handle-returning ones answer 0 on failure (export_ir_wav forwarded goonj's
+# negative ERR_COMPUTATION through 2.3.1).
+test_group("bridge_handles");
+assert_eq(dhvani_acoustics_convolution_from_ir(0, 0.5), 0, "convolution_from_ir(0) -> 0");
+assert_eq(dhvani_acoustics_convolution_from_dhvani_ir(0, 0.5), 0, "convolution_from_dhvani_ir(0) -> 0");
+assert_eq(dhvani_acoustics_convolve_multiband(0, mb10, 0.3), DHVANI_ERR_INVALID_PARAMETER,
+  "convolve_multiband(buf 0) -> invalid");
+assert_eq(dhvani_acoustics_convolve_multiband(blk11, 0, 0.3), DHVANI_ERR_INVALID_PARAMETER,
+  "convolve_multiband(multiband 0) -> invalid");
+assert_eq(dhvani_acoustics_process_fdn(0, blk11, 0.3), DHVANI_ERR_INVALID_PARAMETER, "process_fdn(fdn 0) -> invalid");
+assert_eq(dhvani_acoustics_process_fdn(fdnA, 0, 0.3), DHVANI_ERR_INVALID_PARAMETER, "process_fdn(buf 0) -> invalid");
+assert_eq(dhvani_acoustics_decode_bformat_stereo(0), 0, "decode_bformat_stereo(0) -> 0");
+assert_eq(dhvani_acoustics_export_ir_wav(0), 0, "export_ir_wav(0) -> 0");
+var ir12 = impulse_response_new(const_vec(4, 0.5), 0 - 1, 0.1);
+assert_eq(dhvani_acoustics_export_ir_wav(ir12), 0,
+  "export_ir_wav(negative sample rate) -> 0 (was a negative goonj code)");
+assert_eq(dhvani_acoustics_generate_ir(1.0, 1.0, 1.0, 1.5, 1.0, 1.0, 0, cfg(10, 0.05)), 0, "generate_ir(room 0) -> 0");
 
 var rc = assert_summary();
 syscall(60, rc);

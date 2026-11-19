@@ -1,21 +1,32 @@
 # midi.cyr -- MIDI 1.0 core types: NoteEvent, ControlChange, MidiEvent, MidiClip.
-# Ports rust-old/src/midi/mod.rs. L0: dep error only (+ stdlib string streq).
+# Ports rust-old/src/midi/mod.rs. L0: dep error only (stdlib vec).
 # The data-carrying MidiEvent enum -> a `kind` code + a fat struct holding every
 # variant's fields (only position/channel are read across variants). FramePos
 # (u64) and the u8 fields -> i64 slots. serde dropped. Names are string handles.
+#
+# Allocation (free-less bump allocator): every constructor and every allocating
+# clip query (notes_at, note_ons_at, note_offs_at, events_in_range) returns a
+# FRESH handle/vec that is never reclaimed. Real-time callers use the zero-alloc
+# forms instead: `*_init(e, ...)` reinitialises a caller-owned event handle, and
+# the clip queries' `*_into(..., out)` forms truncate + refill a caller-owned vec
+# (0 bytes per call once `out` has grown to the result size).
 
 # ---- NoteEvent ----
 #derive(accessors)
 struct DhNoteEvent { position; duration; note; velocity; channel; }
-#must_use
-fn dhvani_note_event_new(position, duration, note, velocity, channel) {
-    var e = alloc(sizeof(DhNoteEvent));
+# init -- (re)initialise a caller-owned DhNoteEvent handle in place; returns e.
+# The zero-alloc twin of _new for event reuse in a render loop.
+fn dhvani_note_event_init(e, position, duration, note, velocity, channel) {
     DhNoteEvent_set_position(e, position);
     DhNoteEvent_set_duration(e, duration);
     DhNoteEvent_set_note(e, note);
     DhNoteEvent_set_velocity(e, velocity);
     DhNoteEvent_set_channel(e, channel);
     return e;
+}
+#must_use
+fn dhvani_note_event_new(position, duration, note, velocity, channel) {
+    return dhvani_note_event_init(alloc(sizeof(DhNoteEvent)), position, duration, note, velocity, channel);
 }
 #inline
 #must_use
@@ -36,14 +47,17 @@ fn dhvani_note_event_channel(e) { return DhNoteEvent_channel(e); }
 # ---- ControlChange ----
 #derive(accessors)
 struct DhControlChange { position; controller; value; channel; }
-#must_use
-fn dhvani_cc_new(position, controller, value, channel) {
-    var e = alloc(sizeof(DhControlChange));
+# init -- (re)initialise a caller-owned DhControlChange handle; returns e.
+fn dhvani_cc_init(e, position, controller, value, channel) {
     DhControlChange_set_position(e, position);
     DhControlChange_set_controller(e, controller);
     DhControlChange_set_value(e, value);
     DhControlChange_set_channel(e, channel);
     return e;
+}
+#must_use
+fn dhvani_cc_new(position, controller, value, channel) {
+    return dhvani_cc_init(alloc(sizeof(DhControlChange)), position, controller, value, channel);
 }
 #inline
 #must_use
@@ -70,10 +84,8 @@ var DH_MIDI_PROGRAM_CHANGE  = 6;
 #derive(accessors)
 struct DhMidiEvent { kind; position; note; velocity; controller; value; pressure; program; channel; }
 
-# alloc a fully-zeroed event with kind/position/channel set.
-#must_use
-fn dh_midi_event_alloc(kind, position, channel) {
-    var e = alloc(sizeof(DhMidiEvent));
+# reset a caller-owned event: kind/position/channel set, every payload slot 0.
+fn dh_midi_event_reset(e, kind, position, channel) {
     DhMidiEvent_set_kind(e, kind);
     DhMidiEvent_set_position(e, position);
     DhMidiEvent_set_note(e, 0);
@@ -85,47 +97,76 @@ fn dh_midi_event_alloc(kind, position, channel) {
     DhMidiEvent_set_channel(e, channel);
     return e;
 }
-#must_use
-fn dhvani_midi_note_on(position, note, velocity, channel) {
-    var e = dh_midi_event_alloc(DH_MIDI_NOTE_ON, position, channel);
-    DhMidiEvent_set_note(e, note); DhMidiEvent_set_velocity(e, velocity);
+
+# *_init(e, ...) -- re-tag a caller-owned DhMidiEvent as that variant (all other
+# payload slots zeroed); returns e. The constructors below are alloc + _init.
+fn dhvani_midi_note_on_init(e, position, note, velocity, channel) {
+    dh_midi_event_reset(e, DH_MIDI_NOTE_ON, position, channel);
+    DhMidiEvent_set_note(e, note);
+    DhMidiEvent_set_velocity(e, velocity);
     return e;
 }
-#must_use
-fn dhvani_midi_note_off(position, note, velocity, channel) {
-    var e = dh_midi_event_alloc(DH_MIDI_NOTE_OFF, position, channel);
-    DhMidiEvent_set_note(e, note); DhMidiEvent_set_velocity(e, velocity);
+fn dhvani_midi_note_off_init(e, position, note, velocity, channel) {
+    dh_midi_event_reset(e, DH_MIDI_NOTE_OFF, position, channel);
+    DhMidiEvent_set_note(e, note);
+    DhMidiEvent_set_velocity(e, velocity);
     return e;
 }
-#must_use
-fn dhvani_midi_control_change(position, controller, value, channel) {
-    var e = dh_midi_event_alloc(DH_MIDI_CONTROL_CHANGE, position, channel);
-    DhMidiEvent_set_controller(e, controller); DhMidiEvent_set_value(e, value);
-    return e;
-}
-#must_use
-fn dhvani_midi_pitch_bend(position, value, channel) {
-    var e = dh_midi_event_alloc(DH_MIDI_PITCH_BEND, position, channel);
+fn dhvani_midi_control_change_init(e, position, controller, value, channel) {
+    dh_midi_event_reset(e, DH_MIDI_CONTROL_CHANGE, position, channel);
+    DhMidiEvent_set_controller(e, controller);
     DhMidiEvent_set_value(e, value);
     return e;
 }
-#must_use
-fn dhvani_midi_aftertouch(position, pressure, channel) {
-    var e = dh_midi_event_alloc(DH_MIDI_AFTERTOUCH, position, channel);
+fn dhvani_midi_pitch_bend_init(e, position, value, channel) {
+    dh_midi_event_reset(e, DH_MIDI_PITCH_BEND, position, channel);
+    DhMidiEvent_set_value(e, value);
+    return e;
+}
+fn dhvani_midi_aftertouch_init(e, position, pressure, channel) {
+    dh_midi_event_reset(e, DH_MIDI_AFTERTOUCH, position, channel);
     DhMidiEvent_set_pressure(e, pressure);
     return e;
 }
+fn dhvani_midi_poly_aftertouch_init(e, position, note, pressure, channel) {
+    dh_midi_event_reset(e, DH_MIDI_POLY_AFTERTOUCH, position, channel);
+    DhMidiEvent_set_note(e, note);
+    DhMidiEvent_set_pressure(e, pressure);
+    return e;
+}
+fn dhvani_midi_program_change_init(e, position, program, channel) {
+    dh_midi_event_reset(e, DH_MIDI_PROGRAM_CHANGE, position, channel);
+    DhMidiEvent_set_program(e, program);
+    return e;
+}
+
+#must_use
+fn dhvani_midi_note_on(position, note, velocity, channel) {
+    return dhvani_midi_note_on_init(alloc(sizeof(DhMidiEvent)), position, note, velocity, channel);
+}
+#must_use
+fn dhvani_midi_note_off(position, note, velocity, channel) {
+    return dhvani_midi_note_off_init(alloc(sizeof(DhMidiEvent)), position, note, velocity, channel);
+}
+#must_use
+fn dhvani_midi_control_change(position, controller, value, channel) {
+    return dhvani_midi_control_change_init(alloc(sizeof(DhMidiEvent)), position, controller, value, channel);
+}
+#must_use
+fn dhvani_midi_pitch_bend(position, value, channel) {
+    return dhvani_midi_pitch_bend_init(alloc(sizeof(DhMidiEvent)), position, value, channel);
+}
+#must_use
+fn dhvani_midi_aftertouch(position, pressure, channel) {
+    return dhvani_midi_aftertouch_init(alloc(sizeof(DhMidiEvent)), position, pressure, channel);
+}
 #must_use
 fn dhvani_midi_poly_aftertouch(position, note, pressure, channel) {
-    var e = dh_midi_event_alloc(DH_MIDI_POLY_AFTERTOUCH, position, channel);
-    DhMidiEvent_set_note(e, note); DhMidiEvent_set_pressure(e, pressure);
-    return e;
+    return dhvani_midi_poly_aftertouch_init(alloc(sizeof(DhMidiEvent)), position, note, pressure, channel);
 }
 #must_use
 fn dhvani_midi_program_change(position, program, channel) {
-    var e = dh_midi_event_alloc(DH_MIDI_PROGRAM_CHANGE, position, channel);
-    DhMidiEvent_set_program(e, program);
-    return e;
+    return dhvani_midi_program_change_init(alloc(sizeof(DhMidiEvent)), position, program, channel);
 }
 #inline
 #must_use
@@ -138,8 +179,17 @@ fn dhvani_midi_event_position(e) { return DhMidiEvent_position(e); }
 fn dhvani_midi_event_channel(e) { return DhMidiEvent_channel(e); }
 
 # ---- MidiClip ----
+# Invariants the queries rely on (kept by every dhvani_midi_clip_* mutator; the
+# notes()/control_changes() vecs are READ-ONLY views -- Rust hands out &[T]):
+#   * notes are sorted by position (non-decreasing). add_note/merge insert in
+#     order; quantize maps positions through a monotone function; transpose
+#     leaves positions alone.
+#   * max_note_duration >= every note's duration (starts 0, only ever raised;
+#     no mutator shortens a duration). It bounds how far before a window a note
+#     can start and still reach into it, which makes the lower-bound binary
+#     search in the queries sound for any mix of durations.
 #derive(accessors)
-struct DhMidiClip { name; notes; control_changes; timeline_pos; duration; }
+struct DhMidiClip { name; notes; control_changes; timeline_pos; duration; max_note_duration; }
 #must_use
 fn dhvani_midi_clip_new(name, timeline_pos, duration) {
     var c = alloc(sizeof(DhMidiClip));
@@ -148,6 +198,7 @@ fn dhvani_midi_clip_new(name, timeline_pos, duration) {
     DhMidiClip_set_control_changes(c, vec_new());
     DhMidiClip_set_timeline_pos(c, timeline_pos);
     DhMidiClip_set_duration(c, duration);
+    DhMidiClip_set_max_note_duration(c, 0);
     return c;
 }
 #inline
@@ -188,8 +239,16 @@ fn dh_midi_insert_note(notes, e) {
     }
     return 0;
 }
+# insert a note handle into the clip (sorted) and raise max_note_duration.
+fn dh_midi_clip_insert_note(self, e) {
+    dh_midi_insert_note(DhMidiClip_notes(self), e);
+    if (DhNoteEvent_duration(e) > DhMidiClip_max_note_duration(self)) {
+        DhMidiClip_set_max_note_duration(self, DhNoteEvent_duration(e));
+    }
+    return 0;
+}
 fn dhvani_midi_clip_add_note(self, position, duration, note, velocity, channel) {
-    dh_midi_insert_note(DhMidiClip_notes(self), dhvani_note_event_new(position, duration, note, velocity, channel));
+    dh_midi_clip_insert_note(self, dhvani_note_event_new(position, duration, note, velocity, channel));
     return 0;
 }
 fn dhvani_midi_clip_add_cc(self, position, controller, value, channel) {
@@ -210,73 +269,151 @@ fn dhvani_midi_clip_add_cc(self, position, controller, value, channel) {
     return 0;
 }
 
-# notes active at `frame`: position <= frame < position+duration.
-#must_use
-fn dhvani_midi_clip_notes_at(self, frame) {
+# first index whose note position is >= x (binary search; sound because the
+# notes are sorted by position). Returns vec_len when every note is before x.
+fn dh_midi_lower_bound(notes, x) {
+    var lo = 0;
+    var hi = vec_len(notes);
+    while (lo < hi) {
+        var mid = lo + (hi - lo) / 2;
+        if (DhNoteEvent_position(vec_get(notes, mid)) < x) { lo = mid + 1; } else { hi = mid; }
+    }
+    return lo;
+}
+
+# Query pruning (all four queries return exactly what a full linear filter over
+# the notes would, in note order): a note with duration d <= max_note_duration
+# that ends after `t` (position + d > t) must START after t - max_note_duration,
+# so the scan begins at lower_bound(t - max_note_duration + 1); and because the
+# notes are sorted it stops at the first note starting past the window.
+
+# notes active at `frame` (position <= frame < position+duration) -> `out`
+# (truncated first). Returns the match count. Zero-alloc once `out` has room.
+fn dhvani_midi_clip_notes_at_into(self, frame, out) {
+    vec_truncate(out, 0);
     var notes = DhMidiClip_notes(self);
     var n = vec_len(notes);
-    var out = vec_new();
-    var i = 0;
+    var i = dh_midi_lower_bound(notes, frame - DhMidiClip_max_note_duration(self) + 1);
     while (i < n) {
         var e = vec_get(notes, i);
         var p = DhNoteEvent_position(e);
-        if (p <= frame) { if (frame < p + DhNoteEvent_duration(e)) { vec_push(out, e); } }
+        if (p > frame) { break; }
+        if (frame < p + DhNoteEvent_duration(e)) { vec_push(out, e); }
         i = i + 1;
     }
+    return vec_len(out);
+}
+#must_use
+fn dhvani_midi_clip_notes_at(self, frame) {
+    var out = vec_new();
+    dhvani_midi_clip_notes_at_into(self, frame, out);
     return out;
 }
-# note-ons starting exactly at `frame`.
-#must_use
-fn dhvani_midi_clip_note_ons_at(self, frame) {
+
+# note-ons starting exactly at `frame` -> `out`. Returns the match count.
+fn dhvani_midi_clip_note_ons_at_into(self, frame, out) {
+    vec_truncate(out, 0);
     var notes = DhMidiClip_notes(self);
     var n = vec_len(notes);
-    var out = vec_new();
-    var i = 0;
+    var i = dh_midi_lower_bound(notes, frame);
     while (i < n) {
         var e = vec_get(notes, i);
-        if (DhNoteEvent_position(e) == frame) { vec_push(out, e); }
+        if (DhNoteEvent_position(e) != frame) { break; }
+        vec_push(out, e);
         i = i + 1;
     }
+    return vec_len(out);
+}
+#must_use
+fn dhvani_midi_clip_note_ons_at(self, frame) {
+    var out = vec_new();
+    dhvani_midi_clip_note_ons_at_into(self, frame, out);
     return out;
 }
-# note-offs ending exactly at `frame` (position+duration == frame).
-#must_use
-fn dhvani_midi_clip_note_offs_at(self, frame) {
+
+# note-offs ending exactly at `frame` (position+duration == frame) -> `out`.
+# Returns the match count. Only the lower bound is pruned: position = frame -
+# duration >= frame - max_note_duration. There is no upper stop -- with an i64
+# (possibly negative) duration a matching note may start after `frame`.
+fn dhvani_midi_clip_note_offs_at_into(self, frame, out) {
+    vec_truncate(out, 0);
     var notes = DhMidiClip_notes(self);
     var n = vec_len(notes);
-    var out = vec_new();
-    var i = 0;
+    var i = dh_midi_lower_bound(notes, frame - DhMidiClip_max_note_duration(self));
     while (i < n) {
         var e = vec_get(notes, i);
         if (DhNoteEvent_position(e) + DhNoteEvent_duration(e) == frame) { vec_push(out, e); }
         i = i + 1;
     }
+    return vec_len(out);
+}
+#must_use
+fn dhvani_midi_clip_note_offs_at(self, frame) {
+    var out = vec_new();
+    dhvani_midi_clip_note_offs_at_into(self, frame, out);
     return out;
 }
-# note events overlapping [start, end): position < end AND position+duration > start.
-#must_use
-fn dhvani_midi_clip_events_in_range(self, start, end) {
+
+# note events overlapping [start, end) -- position < end AND position+duration >
+# start -- -> `out`. Returns the match count.
+# PARITY NOTE: rust-old/src/midi/mod.rs:351 binary-searches
+# `partition_point(|n| n.position + n.duration <= start)` over notes sorted by
+# POSITION; end times are not monotone in that order, so the search can land
+# past a long note that still overlaps (notes (0,1000),(100,10),(200,10) and
+# [500,600): Rust returns [], the note at 0 is active). This port returns the
+# correct overlap set; its binary search is on position, bounded by the tracked
+# max_note_duration (see "Query pruning" above).
+fn dhvani_midi_clip_events_in_range_into(self, start, end, out) {
+    vec_truncate(out, 0);
     var notes = DhMidiClip_notes(self);
     var n = vec_len(notes);
-    var out = vec_new();
-    var i = 0;
+    var i = dh_midi_lower_bound(notes, start - DhMidiClip_max_note_duration(self) + 1);
     while (i < n) {
         var e = vec_get(notes, i);
         var p = DhNoteEvent_position(e);
-        if (p < end) { if (p + DhNoteEvent_duration(e) > start) { vec_push(out, e); } }
+        if (p >= end) { break; }
+        if (p + DhNoteEvent_duration(e) > start) { vec_push(out, e); }
         i = i + 1;
     }
+    return vec_len(out);
+}
+#must_use
+fn dhvani_midi_clip_events_in_range(self, start, end) {
+    var out = vec_new();
+    dhvani_midi_clip_events_in_range_into(self, start, end, out);
     return out;
 }
 
 # merge another clip's notes+CCs (kept sorted); extend duration if needed.
+# merge(c, c) is legal here (Rust's borrow checker forbids it): when `other` IS
+# `self`, iterate a snapshot of the handles so the inserts don't shift the
+# source under the loop.
+# DIVERGES from rust-old (mod.rs:374), which extends to `other.notes.last()`'s
+# end -- the note that STARTS last, not the one that ENDS last. This extends to
+# the max position+duration over other's notes.
 fn dhvani_midi_clip_merge(self, other) {
     var onotes = DhMidiClip_notes(other);
+    var occs = DhMidiClip_control_changes(other);
+    if (other == self) {
+        var snap_n = vec_new();
+        var si = 0;
+        while (si < vec_len(onotes)) { vec_push(snap_n, vec_get(onotes, si)); si = si + 1; }
+        var snap_c = vec_new();
+        var sj = 0;
+        while (sj < vec_len(occs)) { vec_push(snap_c, vec_get(occs, sj)); sj = sj + 1; }
+        onotes = snap_n;
+        occs = snap_c;
+    }
     var nn = vec_len(onotes);
+    var other_end = 0;
+    var have_end = 0;
     var i = 0;
     while (i < nn) {
         var e = vec_get(onotes, i);
-        dh_midi_insert_note(DhMidiClip_notes(self),
+        var end_i = DhNoteEvent_position(e) + DhNoteEvent_duration(e);
+        if (have_end == 0) { other_end = end_i; have_end = 1; }
+        if (end_i > other_end) { other_end = end_i; }
+        dh_midi_clip_insert_note(self,
           dhvani_note_event_new(
             DhNoteEvent_position(e),
             DhNoteEvent_duration(e),
@@ -285,7 +422,6 @@ fn dhvani_midi_clip_merge(self, other) {
             DhNoteEvent_channel(e)));
         i = i + 1;
     }
-    var occs = DhMidiClip_control_changes(other);
     var nc = vec_len(occs);
     var j = 0;
     while (j < nc) {
@@ -298,9 +434,7 @@ fn dhvani_midi_clip_merge(self, other) {
           DhControlChange_channel(c));
         j = j + 1;
     }
-    if (nn > 0) {
-        var last = vec_get(onotes, nn - 1);
-        var other_end = DhNoteEvent_position(last) + DhNoteEvent_duration(last);
+    if (have_end == 1) {
         if (other_end > DhMidiClip_duration(self)) { DhMidiClip_set_duration(self, other_end); }
     }
     return 0;

@@ -28,12 +28,13 @@ fn dhvani_lfo_new(shape, rate, depth, sample_rate) {
     return self;
 }
 
-# validate -- rate>=0, depth>=0, sample_rate>0.
+# validate -- rate>=0, depth>=0, sample_rate>0. Every bound rejects NaN (the oracle's
+# `< 0.0` / `<= 0.0` tests let a NaN through).
 #must_use
 fn dhvani_lfo_validate(self) {
-    if (f64_lt(DhLfo_rate(self), 0) == 1)        { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_lt(DhLfo_depth(self), 0) == 1)       { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_le(DhLfo_sample_rate(self), 0) == 1) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
+    if (dh_in_range(DhLfo_rate(self), 0, DH_POS_INF) == 0)  { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhLfo_depth(self), 0, DH_POS_INF) == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (f64_gt(DhLfo_sample_rate(self), 0) == 0)            { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
     return DHVANI_ERR_NONE;
 }
 

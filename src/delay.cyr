@@ -1,6 +1,20 @@
 # delay.cyr -- delay line with feedback + modulated delay (chorus/flanger).
 # Ports rust-old/src/dsp/delay.rs. L1: deps error + buffer. Per-channel ring
 # buffers = a vec of per-channel `vec`s. serde dropped.
+#
+# Hardening beyond the oracle (each one changes output only on input the oracle
+# mishandles):
+#   - A time in ms becomes samples as Rust's `as usize` cast does: negative, -Inf and
+#     NaN floor to 0 (the port's f64_to kept a negative count, and -Inf aborted).
+#   - A non-finite value is never written into a ring. The oracle stores
+#     `input + delayed * feedback` as is, so one NaN came round every `delay` frames
+#     forever (NaN * 0 is NaN, so even feedback 0 kept it) and zeroed that output.
+#   - Buffer channels beyond the delay's channel count pass through untouched (the
+#     oracle panics on the out-of-range ring index).
+#   - ModulatedDelay::set_params grows the ring when the new base + depth outgrow it,
+#     and process clamps the read delay to the ring. The oracle does neither: its
+#     usize index underflows (a debug panic, a silent wrap in release), and here it
+#     was a vec_get abort.
 
 #derive(accessors)
 struct DhDelayLine { buffers; write_pos; delay_samples; max_delay_samples; feedback; mix; bypassed; }
@@ -11,14 +25,36 @@ struct DhModulatedDelayParams { base_delay_ms; depth_ms; rate_hz; feedback; mix;
 #derive(accessors)
 struct DhModulatedDelay { delay; params; lfo_phase; sample_rate; bypassed; }
 
+# Above this a sample count is capped (2^62): Rust's cast saturates at usize::MAX,
+# which no i64 holds, and every caller clamps the count to a ring far smaller.
+var DH_DELAY_SAMPLES_CAP_F = 0x43D0000000000000;   # 2^62 as an f64
+var DH_DELAY_SAMPLES_CAP = 0x4000000000000000;     # 2^62
+
+# ms -> samples, as Rust's `((ms / 1000.0) * sample_rate as f32) as usize`: the cast
+# saturates, so a negative, -Inf or NaN time is 0 samples.
+#must_use
+fn dh_delay_ms_to_samples(ms, sample_rate) {
+    var s = f64_mul(f64_div(ms, 1000.0), f64_from(sample_rate));
+    if (f64_gt(s, 0) == 0) { return 0; }
+    if (f64_ge(s, DH_DELAY_SAMPLES_CAP_F) == 1) { return DH_DELAY_SAMPLES_CAP; }
+    return f64_to(f64_trunc(s));
+}
+
+# A value bound for a ring: non-finite becomes 0, so it cannot circulate.
+#must_use
+fn dh_delay_ring_value(x) {
+    if (dhvani_is_finite(x) == 0) { return 0; }
+    return x;
+}
+
 # ---- DelayLine ----
 #must_use
 fn dhvani_delay_new(delay_ms, max_delay_ms, feedback, mix, sample_rate, channels) {
     var self = alloc(sizeof(DhDelayLine));
-    var max_secs = f64_div(f64_max(max_delay_ms, delay_ms), 1000.0);
-    var max_samples = f64_to(f64_trunc(f64_mul(max_secs, f64_from(sample_rate))));
+    # f32::max ignores a NaN operand: the larger of the two real times sizes the ring
+    var max_samples = dh_delay_ms_to_samples(dh_max_ignore_nan(max_delay_ms, delay_ms), sample_rate);
     if (max_samples < 1) { max_samples = 1; }
-    var delay_samples = f64_to(f64_trunc(f64_mul(f64_div(delay_ms, 1000.0), f64_from(sample_rate))));
+    var delay_samples = dh_delay_ms_to_samples(delay_ms, sample_rate);
     if (delay_samples > max_samples) { delay_samples = max_samples; }
     var buffers = vec_new();
     var c = 0;
@@ -33,51 +69,92 @@ fn dhvani_delay_new(delay_ms, max_delay_ms, feedback, mix, sample_rate, channels
     return self;
 }
 
-# process one sample for a channel (does NOT advance write_pos).
+# The ring of `channel`, or 0 when there is none, or when its length is not the ring
+# size (an allocation that failed): every caller then passes the sample through.
+#must_use
+fn dh_delay_ring(self, channel) {
+    if (channel < 0) { return 0; }
+    var buffers = DhDelayLine_buffers(self);
+    if (channel >= vec_len(buffers)) { return 0; }
+    var ring = vec_get(buffers, channel);
+    if (vec_len(ring) != DhDelayLine_max_delay_samples(self)) { return 0; }
+    return ring;
+}
+
+# process one sample for a channel (does NOT advance write_pos). A channel the delay
+# has no ring for returns the input unchanged.
 fn dhvani_delay_process_sample(self, input, channel) {
+    var ring = dh_delay_ring(self, channel);
+    if (ring == 0) { return input; }
     var max = DhDelayLine_max_delay_samples(self);
     var wp = DhDelayLine_write_pos(self);
-    var ring = vec_get(DhDelayLine_buffers(self), channel);
     var read_pos = (wp + max - DhDelayLine_delay_samples(self)) % max;
     var delayed = vec_get(ring, read_pos);
-    vec_set(ring, wp, f64_add(input, f64_mul(delayed, DhDelayLine_feedback(self))));
+    vec_set(ring, wp, dh_delay_ring_value(f64_add(input, f64_mul(delayed, DhDelayLine_feedback(self)))));
     var mix = DhDelayLine_mix(self);
     return f64_add(f64_mul(input, f64_sub(1.0, mix)), f64_mul(delayed, mix));
 }
 
-# read a fractional delay position via linear interpolation.
+# read a fractional delay position via linear interpolation. The delay is clamped to
+# [0, ring - 1] samples, the deepest read that stays inside the ring.
 #must_use
 fn dhvani_delay_read_interpolated(self, channel, delay_frac) {
+    var ring = dh_delay_ring(self, channel);
+    if (ring == 0) { return 0; }
     var max = DhDelayLine_max_delay_samples(self);
     var wp = DhDelayLine_write_pos(self);
-    var ring = vec_get(DhDelayLine_buffers(self), channel);
-    var delay_int = f64_to(f64_trunc(delay_frac));
-    var frac = f64_sub(delay_frac, f64_from(delay_int));
+    var df = f64_max(delay_frac, 0);
+    var lim = f64_from(max - 1);
+    if (f64_gt(df, lim) == 1) { df = lim; }
+    var delay_int = f64_to(f64_trunc(df));
+    var frac = f64_sub(df, f64_from(delay_int));
     var pos0 = (wp + max - delay_int) % max;
     var pos1 = (wp + max - delay_int - 1) % max;
     return f64_add(f64_mul(vec_get(ring, pos0), f64_sub(1.0, frac)), f64_mul(vec_get(ring, pos1), frac));
 }
 
-# process(buf) -- fixed delay in place.
+# process(buf) -- fixed delay in place. The rings are independent, so each channel is
+# walked on its own, with the struct fields read once per block: the same operations,
+# in the same order per channel, as dhvani_delay_process_sample per sample.
 fn dhvani_delay_process(self, buf) {
     if (DhDelayLine_bypassed(self) == 1) { return 0; }
     var ch = DhAudioBuffer_channels(buf);
     var samples = DhAudioBuffer_samples(buf);
     var frames = DhAudioBuffer_frames(buf);
+    if (ch < 1) { return 0; }
+    frames = dh_imin(frames, vec_len(samples) / ch);
+    if (frames < 1) { return 0; }
     var max = DhDelayLine_max_delay_samples(self);
-    var frame = 0;
-    while (frame < frames) {
-        var c = 0;
-        while (c < ch) {
-            var idx = frame * ch + c;
-            var out = dhvani_delay_process_sample(self, vec_get(samples, idx), c);
-            if (dhvani_is_finite(out) == 0) { out = 0; }
-            vec_set(samples, idx, out);
-            c = c + 1;
+    var delay = DhDelayLine_delay_samples(self);
+    var fb = DhDelayLine_feedback(self);
+    var mix = DhDelayLine_mix(self);
+    var dry = f64_sub(1.0, mix);
+    var wp0 = DhDelayLine_write_pos(self);
+    var d = dh_vec_data(samples);
+    var stride = ch * 8;
+    var c = 0;
+    while (c < ch) {
+        var ring = dh_delay_ring(self, c);
+        if (ring != 0) {
+            var rp = dh_vec_data(ring);
+            var wp = wp0;
+            var p = d + c * 8;
+            var end = p + frames * stride;
+            while (p < end) {
+                var input = load64(p);
+                var delayed = load64(rp + ((wp + max - delay) % max) * 8);
+                store64(rp + wp * 8, dh_delay_ring_value(f64_add(input, f64_mul(delayed, fb))));
+                var out = f64_add(f64_mul(input, dry), f64_mul(delayed, mix));
+                if (dhvani_is_finite(out) == 0) { out = 0; }
+                store64(p, out);
+                wp = wp + 1;
+                if (wp == max) { wp = 0; }
+                p = p + stride;
+            }
         }
-        DhDelayLine_set_write_pos(self, (DhDelayLine_write_pos(self) + 1) % max);
-        frame = frame + 1;
+        c = c + 1;
     }
+    DhDelayLine_set_write_pos(self, (wp0 + frames) % max);
     return 0;
 }
 
@@ -88,7 +165,7 @@ fn dhvani_delay_is_bypassed(self) { if (DhDelayLine_bypassed(self) == 1) { retur
 #must_use
 fn dhvani_delay_latency_frames(self) { return DhDelayLine_delay_samples(self); }
 fn dhvani_delay_set_delay_ms(self, delay_ms, sample_rate) {
-    var samples = f64_to(f64_trunc(f64_mul(f64_div(delay_ms, 1000.0), f64_from(sample_rate))));
+    var samples = dh_delay_ms_to_samples(delay_ms, sample_rate);
     var max = DhDelayLine_max_delay_samples(self);
     if (samples > max) { samples = max; }
     DhDelayLine_set_delay_samples(self, samples);
@@ -109,6 +186,43 @@ fn dhvani_delay_reset(self) {
     return 0;
 }
 
+# Grow every ring to new_max samples, keeping each sample at its age: the sample written
+# `age` frames ago moves to new_max - age, and write_pos restarts at 0. All new rings are
+# allocated before any is swapped in, so a failed allocation leaves the delay as it was
+# (returns -1). A no-op when the ring is already at least new_max.
+fn dh_delay_grow(self, new_max) {
+    var old_max = DhDelayLine_max_delay_samples(self);
+    if (new_max <= old_max) { return 0; }
+    var buffers = DhDelayLine_buffers(self);
+    var n = vec_len(buffers);
+    var fresh = vec_new();
+    var c = 0;
+    while (c < n) {
+        var nr = dh_vec_zeros(new_max);
+        if (vec_len(nr) != new_max) { return 0 - 1; }
+        vec_push(fresh, nr);
+        c = c + 1;
+    }
+    var wp = DhDelayLine_write_pos(self);
+    c = 0;
+    while (c < n) {
+        var old = vec_get(buffers, c);
+        var nr2 = vec_get(fresh, c);
+        if (vec_len(old) == old_max) {
+            var age = 1;
+            while (age <= old_max) {
+                vec_set(nr2, new_max - age, vec_get(old, (wp - age + old_max) % old_max));
+                age = age + 1;
+            }
+        }
+        vec_set(buffers, c, nr2);
+        c = c + 1;
+    }
+    DhDelayLine_set_write_pos(self, 0);
+    DhDelayLine_set_max_delay_samples(self, new_max);
+    return 0;
+}
+
 # ---- ModulatedDelayParams ----
 #must_use
 fn dhvani_moddelayparams_new(base_delay_ms, depth_ms, rate_hz, feedback, mix) {
@@ -122,30 +236,54 @@ fn dhvani_moddelayparams_new(base_delay_ms, depth_ms, rate_hz, feedback, mix) {
 }
 #must_use
 fn dhvani_moddelayparams_default() { return dhvani_moddelayparams_new(7.0, 3.0, 0.5, 0.3, 0.5); }
+
+# copy src's fields into dst (an instance's own params); returns dst.
+fn dh_moddelayparams_copy(dst, src) {
+    DhModulatedDelayParams_set_base_delay_ms(dst, DhModulatedDelayParams_base_delay_ms(src));
+    DhModulatedDelayParams_set_depth_ms(dst, DhModulatedDelayParams_depth_ms(src));
+    DhModulatedDelayParams_set_rate_hz(dst, DhModulatedDelayParams_rate_hz(src));
+    DhModulatedDelayParams_set_feedback(dst, DhModulatedDelayParams_feedback(src));
+    DhModulatedDelayParams_set_mix(dst, DhModulatedDelayParams_mix(src));
+    return dst;
+}
+
+# validate -- base/depth/rate >= 0, feedback in [0, 0.99], mix in [0, 1]. Every bound
+# rejects NaN (the oracle's `contains` does for feedback and mix; its `< 0.0` tests let a
+# NaN base, depth or rate through).
 #must_use
 fn dhvani_moddelayparams_validate(p) {
-    if (f64_lt(DhModulatedDelayParams_base_delay_ms(p), 0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_lt(DhModulatedDelayParams_depth_ms(p), 0) == 1)      { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_lt(DhModulatedDelayParams_rate_hz(p), 0) == 1)       { return DHVANI_ERR_INVALID_PARAMETER; }
-    var fb = DhModulatedDelayParams_feedback(p);
-    if (f64_lt(fb, 0) == 1)    { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_gt(fb, 0.99) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
-    var mx = DhModulatedDelayParams_mix(p);
-    if (f64_lt(mx, 0) == 1)    { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_gt(mx, 1.0) == 1)  { return DHVANI_ERR_INVALID_PARAMETER; }
+    var bad = DHVANI_ERR_INVALID_PARAMETER;
+    if (dh_in_range(DhModulatedDelayParams_base_delay_ms(p), 0, DH_POS_INF) == 0) { return bad; }
+    if (dh_in_range(DhModulatedDelayParams_depth_ms(p), 0, DH_POS_INF) == 0)      { return bad; }
+    if (dh_in_range(DhModulatedDelayParams_rate_hz(p), 0, DH_POS_INF) == 0)       { return bad; }
+    if (dh_in_range(DhModulatedDelayParams_feedback(p), 0, 0.99) == 0)            { return bad; }
+    if (dh_in_range(DhModulatedDelayParams_mix(p), 0, 1.0) == 0)                  { return bad; }
     return DHVANI_ERR_NONE;
 }
 
 # ---- ModulatedDelay ----
+# The ring a ModulatedDelay needs for params p: base + depth + 1 ms, as the oracle sizes it.
+#must_use
+fn dh_moddelay_max_ms(p) {
+    return f64_add(f64_add(DhModulatedDelayParams_base_delay_ms(p), DhModulatedDelayParams_depth_ms(p)), 1.0);
+}
+
+# The DelayLine for params p, as the oracle builds it: base delay, a base + depth + 1 ms ring.
+#must_use
+fn dh_moddelay_line(p, sample_rate, channels) {
+    return dhvani_delay_new(DhModulatedDelayParams_base_delay_ms(p), dh_moddelay_max_ms(p),
+      DhModulatedDelayParams_feedback(p), DhModulatedDelayParams_mix(p), sample_rate, channels);
+}
+
+# new(params, sample_rate, channels) -- the params are COPIED into storage the delay
+# owns (the oracle takes them by value), so a later change to the caller's handle
+# cannot reach the delay without set_params.
 #must_use
 fn dhvani_moddelay_new(params, sample_rate, channels) {
     var self = alloc(sizeof(DhModulatedDelay));
-    var max_ms = f64_add(
-      f64_add(DhModulatedDelayParams_base_delay_ms(params), DhModulatedDelayParams_depth_ms(params)),
-      1.0);
-    DhModulatedDelay_set_delay(self, dhvani_delay_new(DhModulatedDelayParams_base_delay_ms(params), max_ms,
-        DhModulatedDelayParams_feedback(params), DhModulatedDelayParams_mix(params), sample_rate, channels));
-    DhModulatedDelay_set_params(self, params);
+    var own = dh_moddelayparams_copy(alloc(sizeof(DhModulatedDelayParams)), params);
+    DhModulatedDelay_set_delay(self, dh_moddelay_line(own, sample_rate, channels));
+    DhModulatedDelay_set_params(self, own);
     DhModulatedDelay_set_lfo_phase(self, 0);
     DhModulatedDelay_set_sample_rate(self, sample_rate);
     DhModulatedDelay_set_bypassed(self, 0);
@@ -157,39 +295,63 @@ fn dhvani_moddelay_process(self, buf) {
     var ch = DhAudioBuffer_channels(buf);
     var samples = DhAudioBuffer_samples(buf);
     var frames = DhAudioBuffer_frames(buf);
+    if (ch < 1) { return 0; }
+    frames = dh_imin(frames, vec_len(samples) / ch);
+    if (frames < 1) { return 0; }
     var p = DhModulatedDelay_params(self);
     var delay = DhModulatedDelay_delay(self);
     var sr = DhModulatedDelay_sample_rate(self);
-    var phase_inc = f64_div(DhModulatedDelayParams_rate_hz(p), f64_from(sr));
+    var srf = f64_from(sr);
+    var phase_inc = f64_div(DhModulatedDelayParams_rate_hz(p), srf);
     var lfo_phase = DhModulatedDelay_lfo_phase(self);
     var base = DhModulatedDelayParams_base_delay_ms(p);
     var depth = DhModulatedDelayParams_depth_ms(p);
     var feedback = DhModulatedDelayParams_feedback(p);
     var mix = DhModulatedDelayParams_mix(p);
+    var dry = f64_sub(1.0, mix);
     var max = DhDelayLine_max_delay_samples(delay);
+    # the deepest read that stays inside the ring (pos1 = delay_int + 1 frames back)
+    var lim = f64_from(max - 1);
+    var two_pi = f64_mul(2.0, F64_PI);
+    # leading channels with a ring of the right size; the rest pass through
+    var nring = 0;
+    while (nring < ch) {
+        if (dh_delay_ring(delay, nring) == 0) { break; }
+        nring = nring + 1;
+    }
+    var bp = dh_vec_data(DhDelayLine_buffers(delay));
+    var d = dh_vec_data(samples);
+    var wp = DhDelayLine_write_pos(delay);
     var frame = 0;
     while (frame < frames) {
-        var lfo = f64_sin(f64_mul(f64_mul(2.0, F64_PI), lfo_phase));
+        var lfo = f64_sin(f64_mul(two_pi, lfo_phase));
         var delay_ms = f64_add(base, f64_mul(depth, lfo));
-        var delay_frac = f64_max(f64_mul(f64_div(delay_ms, 1000.0), f64_from(sr)), 0);
-        var wp = DhDelayLine_write_pos(delay);
+        var delay_frac = f64_max(f64_mul(f64_div(delay_ms, 1000.0), srf), 0);
+        if (f64_gt(delay_frac, lim) == 1) { delay_frac = lim; }
+        var delay_int = f64_to(f64_trunc(delay_frac));
+        var frac = f64_sub(delay_frac, f64_from(delay_int));
+        var inv = f64_sub(1.0, frac);
+        var pos0 = (wp + max - delay_int) % max;
+        var pos1 = (wp + max - delay_int - 1) % max;
+        var fp = d + frame * ch * 8;
         var c = 0;
-        while (c < ch) {
-            var idx = frame * ch + c;
-            var input = vec_get(samples, idx);
-            var delayed = dhvani_delay_read_interpolated(delay, c, delay_frac);
-            var ring = vec_get(DhDelayLine_buffers(delay), c);
-            vec_set(ring, wp, f64_add(input, f64_mul(delayed, feedback)));
-            var out = f64_add(f64_mul(input, f64_sub(1.0, mix)), f64_mul(delayed, mix));
+        while (c < nring) {
+            var rp = dh_vec_data(load64(bp + c * 8));
+            var input = load64(fp);
+            var delayed = f64_add(f64_mul(load64(rp + pos0 * 8), inv), f64_mul(load64(rp + pos1 * 8), frac));
+            store64(rp + wp * 8, dh_delay_ring_value(f64_add(input, f64_mul(delayed, feedback))));
+            var out = f64_add(f64_mul(input, dry), f64_mul(delayed, mix));
             if (dhvani_is_finite(out) == 0) { out = 0; }
-            vec_set(samples, idx, out);
+            store64(fp, out);
+            fp = fp + 8;
             c = c + 1;
         }
-        DhDelayLine_set_write_pos(delay, (wp + 1) % max);
-        lfo_phase = f64_add(lfo_phase, phase_inc);
-        if (f64_ge(lfo_phase, 1.0) == 1) { lfo_phase = f64_sub(lfo_phase, 1.0); }
+        wp = wp + 1;
+        if (wp == max) { wp = 0; }
+        lfo_phase = dh_fmod1(f64_add(lfo_phase, phase_inc));
         frame = frame + 1;
     }
+    DhDelayLine_set_write_pos(delay, wp);
     DhModulatedDelay_set_lfo_phase(self, lfo_phase);
     return 0;
 }
@@ -198,9 +360,7 @@ fn dhvani_moddelay_process(self, buf) {
 #must_use
 fn dhvani_moddelay_latency_frames(self) {
     var p = DhModulatedDelay_params(self);
-    var base_secs = f64_div(DhModulatedDelayParams_base_delay_ms(p), 1000.0);
-    var sr_f = f64_from(DhModulatedDelay_sample_rate(self));
-    return f64_to(f64_trunc(f64_mul(base_secs, sr_f)));
+    return dh_delay_ms_to_samples(DhModulatedDelayParams_base_delay_ms(p), DhModulatedDelay_sample_rate(self));
 }
 #inline
 #must_use
@@ -209,20 +369,25 @@ fn dhvani_moddelay_set_bypass(self, bypassed) { DhModulatedDelay_set_bypassed(se
 #must_use
 fn dhvani_moddelay_is_bypassed(self) { if (DhModulatedDelay_bypassed(self) == 1) { return 1; } return 0; }
 
+# set_params -- copy the params in (feedback/mix also clamped onto the delay line, as the
+# oracle does). When the new base + depth outgrow the ring it is grown, keeping its
+# history; that allocates, so do it off the RT path. A change that fits allocates nothing.
 fn dhvani_moddelay_set_params(self, params) {
     var delay = DhModulatedDelay_delay(self);
     DhDelayLine_set_feedback(delay, f64_clamp(DhModulatedDelayParams_feedback(params), 0, 0.99));
     DhDelayLine_set_mix(delay, f64_clamp(DhModulatedDelayParams_mix(params), 0, 1.0));
-    DhModulatedDelay_set_params(self, params);
+    var own = dh_moddelayparams_copy(DhModulatedDelay_params(self), params);
+    var need = dh_delay_ms_to_samples(
+      dh_max_ignore_nan(dh_moddelay_max_ms(own), DhModulatedDelayParams_base_delay_ms(own)),
+      DhModulatedDelay_sample_rate(self));
+    dh_delay_grow(delay, need);
     return 0;
 }
 fn dhvani_moddelay_set_sample_rate(self, sample_rate) {
     DhModulatedDelay_set_sample_rate(self, sample_rate);
     var p = DhModulatedDelay_params(self);
     var channels = vec_len(DhDelayLine_buffers(DhModulatedDelay_delay(self)));
-    var max_ms = f64_add(f64_add(DhModulatedDelayParams_base_delay_ms(p), DhModulatedDelayParams_depth_ms(p)), 1.0);
-    DhModulatedDelay_set_delay(self, dhvani_delay_new(DhModulatedDelayParams_base_delay_ms(p), max_ms,
-        DhModulatedDelayParams_feedback(p), DhModulatedDelayParams_mix(p), sample_rate, channels));
+    DhModulatedDelay_set_delay(self, dh_moddelay_line(p, sample_rate, channels));
     DhModulatedDelay_set_lfo_phase(self, 0);
     return 0;
 }

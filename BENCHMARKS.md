@@ -132,6 +132,63 @@ each cell is the mean of the two runs. **No path regressed**; every delta is wit
 | dynamics mono_1s | 4.52 ms | 4.47 ms | −1.2 % |
 | fft 4096 mono | 3.08 ms | 3.10 ms | +0.6 % |
 
+## 2.3.3 — the P(-1) sweep (same box, one session, interleaved)
+
+2.3.2 (the tagged tree) against 2.3.3, each run twice in the order 2.3.2 → 2.3.3 → 2.3.2
+→ 2.3.3; every cell is the mean of its two runs. `tests/bench_dsp.bcyr` is new in 2.3.3.
+It times the per-block DSP paths the sweep rewrote, through calls whose signatures 2.3.2
+shares, so the same file runs on both trees.
+
+Every rewrite below is bit-identical to the code it replaced: the tests compare against
+kept reference implementations or golden checksums.
+
+| per block (`tests/bench_dsp.bcyr`) | 2.3.2 | 2.3.3 | speedup |
+|----------|------:|------:|--------:|
+| `pan_process`, stereo 512 | 10.66 µs | **1.57 µs** | 6.8× |
+| `noise_reducer_process`, stereo 4096 | 24.0 ms | **3.94 ms** | 6.1× |
+| `conv_process`, 4096-tap IR, stereo 512 | 3.03 ms | **558 µs** | 5.4× |
+| `reverb_process`, stereo 512 | 178.6 µs | **67.4 µs** | 2.7× |
+| `delay_process`, stereo 512 | 39.2 µs | **15.6 µs** | 2.5× |
+| `svf_process` (lowpass), stereo 512 | 33.5 µs | **15.0 µs** | 2.2× |
+| `moddelay_process`, stereo 512 | 81.6 µs | 73.0 µs | 1.12× |
+| `eq_process`, 3 bands, stereo 512 | 23.5 µs | 24.0 µs | 0.98× (noise) |
+| `waveform_compute`, 1 s stereo | 1.20 ms | **447 µs** | 2.7× (see below) |
+| `resample_sinc` 44.1 → 48 kHz, 1 s stereo | 153 ms | 156 ms | 0.98× (noise) |
+
+| per second of audio (`tests/bench_compare.bcyr`) | 2.3.2 | 2.3.3 | speedup |
+|----------|------:|------:|--------:|
+| fft 4096 mono | 3.22 ms | **768 µs** | 4.2× |
+| dynamics mono_1s | 4.72 ms | **2.88 ms** | 1.64× |
+| limiter stereo_1s | 4.90 ms | **3.58 ms** | 1.37× |
+| r128 stereo_1s | 4.98 ms | **3.69 ms** | 1.35× |
+| compressor stereo_1s | 6.80 ms | **5.28 ms** | 1.29× |
+| gain / peak / biquad_lp stereo_1s | — | — | each within ±1 % |
+
+| hot path (`tests/hotpath.bcyr`) | 2.3.2 | 2.3.3 | speedup |
+|----------|------:|------:|--------:|
+| `fft_spectrum` (1024) | 669 µs | **155 µs** | 4.3× |
+| per-sample osc / biquad / svf, the 512-block simd kernels, the stereo biquad | — | — | each within ±3 % |
+
+- **Waveform:** the first A/B showed it 15 % *slower*. The new NaN-safe fold called
+  `dh_min_ignore_nan` → `f64_min`, four calls per sample. Both folds are now inline, with
+  exactly the helpers' selection rule (a test checks the bits, signed zeros included).
+  The row is from a second interleaved A/B of `bench_dsp` run after that fix, which
+  reproduced the other rows within 3 %.
+- **FFT:** the twiddle table is cached per size and the butterflies walk raw storage. At
+  1024 points the transform alone is 6.2× faster, and `fft_spectrum` adds its magnitude
+  pass on top of that. Convolution and noise reduction gain mostly through the FFT, the
+  rest from walked loops.
+- **Graph and meter** are not in a bench file. The repair agent measured them with
+  same-harness probes:
+  - 32 no-op nodes, 2ch × 512: 209 → 48 µs per cycle.
+  - 200 nodes, 1ch × 64: 298 → 33 µs per cycle.
+  - meter block, 2ch × 512: 31.7 → 10.1 µs.
+- **R128's LRA** sort was O(n²): it went from 1.2 s to 2 ms on 30 min of blocks, which
+  this 1 s bench cannot show.
+- **Memory:** `dh_vec_zeros` / `dhvani_buffer_clone` now allocate exactly. STFT, tempo
+  and R128 halve their per-call footprint (R128 on 10 s stereo: 16.8 → 7.1 MB). Every
+  steady-state RT path in the CHANGELOG's table now allocates 0 bytes.
+
 ## 2.3.2 — the packed kernels (same box, one session, interleaved)
 
 Three trees, each run twice in the order 2.3.1 → deps → 2.3.2 → 2.3.1 → deps → 2.3.2, with

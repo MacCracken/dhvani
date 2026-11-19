@@ -1,6 +1,7 @@
 # graph.cyr -- audio graph: node-based processing with topological execution.
 # Ported one-for-one from rust-old/src/graph/mod.rs. Depends on buffer.cyr
-# (dhvani_buffer_silence / dhvani_buffer_samples) + the fnptr stdlib (fncall3).
+# (dhvani_buffer_silence / dhvani_buffer_samples / dh_vec_zeros / dh_vec_copy),
+# simd.cyr (dh_vec_data) and the fnptr stdlib (fncall3).
 #
 # Design notes (Rust -> Cyrius):
 #   * AudioNode trait  -> fn-ptr dispatch. A node is a DhGraphNode struct holding
@@ -11,10 +12,23 @@
 #     they lived in `mod tests` in Rust.
 #   * NodeId(u32) atomic counter -> module-level `var DH_GRAPH_NEXT_ID`.
 #   * HashMap<NodeId, _> -> parallel vecs (id-vec + value-vec) + linear scan.
-#   * Result<_, &str>    -> plan pointer, or 0 (null) on the "cycle detected" Err.
+#     Those scans are compile-time / query-time only: compile() also assigns every
+#     node a DENSE SLOT (its position in the execution order) and precomputes, per
+#     slot, the node pointer and its predecessors' slots, so the per-cycle render
+#     path is O(nodes + edges) and a node id never indexes or sizes anything (a
+#     negative or huge id is just a key).
+#   * Result<_, &str>    -> plan pointer, or 0 (null) on the Err case. Every plan
+#     accessor treats a 0 plan as absent (returns 0); swap(h, 0) is an error.
 #   * Option<AudioBuffer> slots -> buffer pointer, or 0 for None.
 #   * Arc<Mutex<Option<plan>>> pending-plan cell -> a shared length-1 vec.
 #   * process_parallel (#[cfg(feature="parallel")], rayon) -> dropped (no threads).
+#
+# NODE INPUT CONTRACT: rust-old hands a node `&[&AudioBuffer]` -- read-only
+# clones. Here `inputs` holds the predecessors' LIVE output buffers (no copy per
+# cycle), so a node must treat every input as read-only: writing into an input
+# corrupts what that predecessor's other consumers receive this cycle. Write only
+# into `output`. The `inputs` vec itself is processor scratch, valid only for the
+# duration of the call.
 
 # ---- NodeId (atomic unique id generator) ----
 
@@ -39,6 +53,18 @@ fn dh_graph_find(ids, id) {
         i = i + 1;
     }
     return -1;
+}
+
+# Vec::insert(pos, val): shift the tail right by one, then place val at pos.
+fn dh_graph_vec_insert(v, pos, val) {
+    vec_push(v, 0);
+    var i = vec_len(v) - 1;
+    while (i > pos) {
+        vec_set(v, i, vec_get(v, i - 1));
+        i = i - 1;
+    }
+    vec_set(v, pos, val);
+    return 0;
 }
 
 # ---- AudioNode (trait object -> fn-ptr node) ----
@@ -70,8 +96,9 @@ fn dhvani_graph_node_is_finished(node) { return DhGraphNode_finished(node); }
 fn dhvani_graph_node_is_bypassed(node) { return DhGraphNode_bypassed(node); }
 fn dhvani_graph_node_latency(node) { return DhGraphNode_latency(node); }
 
-# process(): dispatch through the stored fn-ptr. inputs = vec of buffer ptrs,
-# output = a buffer ptr. The concrete fn reads its own `state`.
+# process(): dispatch through the stored fn-ptr. inputs = vec of buffer ptrs
+# (read-only -- see NODE INPUT CONTRACT), output = a buffer ptr. The concrete fn
+# reads its own `state`.
 fn dhvani_graph_node_process(node, inputs, output) {
     return fncall3(DhGraphNode_process_fp(node), DhGraphNode_state(node), inputs, output);
 }
@@ -133,64 +160,93 @@ fn dhvani_graph_connect(self, from, to) {
 fn dhvani_graph_node_count(self) { return vec_len(DhGraph_node_ids(self)); }
 fn dhvani_graph_connection_count(self) { return vec_len(DhGraph_conns(self)); }
 
-# ---- Topological sort (Kahn's algorithm) ----
+# ---- Topological sort (Kahn's algorithm, rust-old's queue reproduced) ----
 
-# Fill out_order with a deterministic topological order of node_ids given conns.
-# Returns 0 on success, -1 if a cycle is detected (order shorter than node set).
-# Determinism: matches the Rust queue (ascending sort, pop the largest ready id)
-# by always taking the max-id node whose in-degree has reached 0.
+# rust-old inserts a newly ready node at `queue.partition_point(|id| id.0 >=
+# succ.0)`. The queue starts ASCENDING, so that predicate is inverted relative to
+# the order it is applied to; the result is whatever std's binary search lands on.
+# This is that search, step for step (core::slice::binary_search_by as of the
+# rust-version 1.89 pin; partition_point maps pred -> Less, !pred -> Greater):
+# halve with `base = mid` on Less, then `base + (last cmp == Less)`.
+# Verified against rust-old compiled with rustc 1.89 and 1.100 on 400 random DAGs
+# (40 of them are embedded in tests/graph.tcyr).
+# queue holds node-table indices; node_ids gives their ids.
+fn dh_graph_partition_point(queue, node_ids, sid) {
+    var size = vec_len(queue);
+    if (size == 0) { return 0; }
+    var base = 0;
+    while (size > 1) {
+        var half = size / 2;
+        var mid = base + half;
+        if (vec_get(node_ids, vec_get(queue, mid)) >= sid) { base = mid; }
+        size = size - half;
+    }
+    if (vec_get(node_ids, vec_get(queue, base)) >= sid) { return base + 1; }
+    return base;
+}
+
+# Fill out_order with rust-old's topological order of node_ids given conns.
+# Returns 0 on success, -1 on the Err case: a cycle, or a connection whose
+# endpoint was never added (rust-old: such an edge leaves order.len() !=
+# nodes.len() -> "cycle detected"). Order: the ready queue is sorted ascending
+# and popped from the END (largest id first); nodes that become ready later are
+# inserted where Rust's partition_point puts them (dh_graph_partition_point), so
+# the resulting order -- and therefore which node is "last" (the graph output,
+# is_finished) -- matches rust-old, not a max-ready-first rule.
 fn dh_topological_sort(node_ids, conns, out_order) {
     var n = vec_len(node_ids);
-    # in-degree parallel to node_ids
-    var in_deg = vec_new();
-    var a = 0;
-    while (a < n) { vec_push(in_deg, 0); a = a + 1; }
-    # successors: a vec-of-vecs parallel to node_ids (each holds successor ids)
+    # in-degree + successor index lists, parallel to node_ids
+    var in_deg = dh_vec_zeros(n);
     var succ = vec_new();
     var b = 0;
     while (b < n) { vec_push(succ, vec_new()); b = b + 1; }
-    # tally connections
     var m = vec_len(conns);
     var c = 0;
     while (c < m) {
         var conn = vec_get(conns, c);
         var fi = dh_graph_find(node_ids, DhConnection_cfrom(conn));
         var ti = dh_graph_find(node_ids, DhConnection_cto(conn));
-        if (ti >= 0) { vec_set(in_deg, ti, vec_get(in_deg, ti) + 1); }
-        if (fi >= 0) { vec_push(vec_get(succ, fi), DhConnection_cto(conn)); }
+        if (fi < 0) { return -1; }
+        if (ti < 0) { return -1; }
+        vec_set(in_deg, ti, vec_get(in_deg, ti) + 1);
+        vec_push(vec_get(succ, fi), ti);
         c = c + 1;
     }
-    # process: repeatedly take the largest-id node with in-degree 0.
-    var processed = 0;
-    while (processed < n) {
-        # scan for the max-id ready (in_deg == 0) node
-        var best = -1;
-        var besti = -1;
-        var i = 0;
-        while (i < n) {
-            if (vec_get(in_deg, i) == 0) {
-                var id = vec_get(node_ids, i);
-                if (besti < 0) { best = id; besti = i; }
-                elif (id > best) { best = id; besti = i; }
+    # initial queue: every in-degree-0 node, ascending by id (ids are unique)
+    var queue = vec_new();
+    var i = 0;
+    while (i < n) {
+        if (vec_get(in_deg, i) == 0) {
+            var id = vec_get(node_ids, i);
+            var pos = 0;
+            var ql = vec_len(queue);
+            while (pos < ql) {
+                if (vec_get(node_ids, vec_get(queue, pos)) > id) { break; }
+                pos = pos + 1;
             }
-            i = i + 1;
+            dh_graph_vec_insert(queue, pos, i);
         }
-        if (besti < 0) { return -1; }   # nothing ready but nodes remain -> cycle
-        vec_set(in_deg, besti, -1);     # mark processed (never ready again)
-        vec_push(out_order, best);
-        processed = processed + 1;
-        # decrement successors' in-degrees
-        var sl = vec_get(succ, besti);
+        i = i + 1;
+    }
+    # while let Some(node) = queue.pop()
+    while (vec_len(queue) > 0) {
+        var node = vec_pop(queue);
+        vec_push(out_order, vec_get(node_ids, node));
+        var sl = vec_get(succ, node);
         var k = 0;
         var kn = vec_len(sl);
         while (k < kn) {
-            var si = dh_graph_find(node_ids, vec_get(sl, k));
-            if (si >= 0) {
-                if (vec_get(in_deg, si) >= 0) { vec_set(in_deg, si, vec_get(in_deg, si) - 1); }
+            var si = vec_get(sl, k);
+            var d = vec_get(in_deg, si) - 1;
+            vec_set(in_deg, si, d);
+            if (d == 0) {
+                var p = dh_graph_partition_point(queue, node_ids, vec_get(node_ids, si));
+                dh_graph_vec_insert(queue, p, si);
             }
             k = k + 1;
         }
     }
+    if (vec_len(out_order) != n) { return -1; }
     return 0;
 }
 
@@ -256,8 +312,25 @@ fn dh_compute_levels(order, im_ids, im_lists) {
 
 # ---- ExecutionPlan (compiled, topologically sorted) ----
 
+# order/levels/node table/input_map/latency_comp mirror rust-old's fields.
+# Render-path tables, one entry per DENSE SLOT (slot p = order position p):
+#   ord_nodes[p] = node ptr; ord_preds[p] = vec of predecessor SLOTS in
+#   input_map order, or 0 (no input_map entry). total_lat = total_latency(),
+#   computed once here (node latency is a fixed per-node field).
 #derive(accessors)
-struct DhExecPlan { order; levels; node_ids; node_ptrs; im_ids; im_lists; lc_ids; lc_vals; }
+struct DhExecPlan {
+    order;
+    levels;
+    node_ids;
+    node_ptrs;
+    im_ids;
+    im_lists;
+    lc_ids;
+    lc_vals;
+    ord_nodes;
+    ord_preds;
+    total_lat;
+}
 
 # node lookup by id inside a plan -> node ptr, or 0 if absent.
 fn dh_plan_node(plan, id) {
@@ -266,10 +339,25 @@ fn dh_plan_node(plan, id) {
     return vec_get(DhExecPlan_node_ptrs(plan), idx);
 }
 
-# Graph::compile -> ExecutionPlan pointer, or 0 on cycle (the Err case).
+# node lookup against raw parallel vecs (used during compile before the plan exists).
+fn dh_plan_node2(node_ids, node_ptrs, id) {
+    var idx = dh_graph_find(node_ids, id);
+    if (idx < 0) { return 0; }
+    return vec_get(node_ptrs, idx);
+}
+
+# Graph::compile -> ExecutionPlan pointer, or 0 on the Err case (cycle, or an
+# edge to/from a node that was never added).
+# rust-old's compile(self) MOVES the node table into the plan, so the graph can
+# never touch a compiled plan again. The plan here takes its own COPY of the
+# graph's node-id / node-ptr vecs: a later add_node (new id or replacement) or a
+# second compile cannot change a live plan's node table. The node objects (and
+# their opaque state) are shared, not cloned -- compiling one graph twice and
+# running both plans runs the same node state twice.
 fn dhvani_graph_compile(self) {
-    var node_ids = DhGraph_node_ids(self);
-    var node_ptrs = DhGraph_node_ptrs(self);
+    if (self == 0) { return 0; }
+    var node_ids = dh_vec_copy(DhGraph_node_ids(self));
+    var node_ptrs = dh_vec_copy(DhGraph_node_ptrs(self));
     var conns = DhGraph_conns(self);
 
     var order = vec_new();
@@ -296,8 +384,10 @@ fn dhvani_graph_compile(self) {
     }
 
     # path_latency: accumulated latency along the longest input path + own.
+    # Its max is total_latency() (rust-old recomputes the same pass per call).
     var pl_ids = vec_new();
     var pl_vals = vec_new();
+    var total_lat = 0;
     var no = vec_len(order);
     var oi = 0;
     while (oi < no) {
@@ -322,6 +412,7 @@ fn dhvani_graph_compile(self) {
         }
         vec_push(pl_ids, id);
         vec_push(pl_vals, input_max + own);
+        if (input_max + own > total_lat) { total_lat = input_max + own; }
         oi = oi + 1;
     }
 
@@ -369,6 +460,28 @@ fn dhvani_graph_compile(self) {
 
     var levels = dh_compute_levels(order, im_ids, im_lists);
 
+    # dense-slot render tables (every endpoint is a node, so every pred has a slot)
+    var ord_nodes = dh_vec_zeros(no);
+    var ord_preds = dh_vec_zeros(no);
+    var sp = 0;
+    while (sp < no) {
+        var sid = vec_get(order, sp);
+        vec_set(ord_nodes, sp, dh_plan_node2(node_ids, node_ptrs, sid));
+        var ims = dh_graph_find(im_ids, sid);
+        if (ims >= 0) {
+            var plist = vec_get(im_lists, ims);
+            var pn = vec_len(plist);
+            var slots = vec_new();
+            var pj = 0;
+            while (pj < pn) {
+                vec_push(slots, dh_graph_find(order, vec_get(plist, pj)));
+                pj = pj + 1;
+            }
+            vec_set(ord_preds, sp, slots);
+        }
+        sp = sp + 1;
+    }
+
     var plan = alloc(sizeof(DhExecPlan));
     DhExecPlan_set_order(plan, order);
     DhExecPlan_set_levels(plan, levels);
@@ -378,43 +491,51 @@ fn dhvani_graph_compile(self) {
     DhExecPlan_set_im_lists(plan, im_lists);
     DhExecPlan_set_lc_ids(plan, lc_ids);
     DhExecPlan_set_lc_vals(plan, lc_vals);
+    DhExecPlan_set_ord_nodes(plan, ord_nodes);
+    DhExecPlan_set_ord_preds(plan, ord_preds);
+    DhExecPlan_set_total_lat(plan, total_lat);
     return plan;
 }
 
-# node lookup against raw parallel vecs (used during compile before the plan exists).
-fn dh_plan_node2(node_ids, node_ptrs, id) {
-    var idx = dh_graph_find(node_ids, id);
-    if (idx < 0) { return 0; }
-    return vec_get(node_ptrs, idx);
+# Plan accessors: a 0 plan (failed compile) reads as absent -> 0.
+fn dhvani_plan_order(plan) {
+    if (plan == 0) { return 0; }
+    return DhExecPlan_order(plan);
 }
 
-fn dhvani_plan_order(plan) { return DhExecPlan_order(plan); }
-fn dhvani_plan_levels(plan) { return DhExecPlan_levels(plan); }
+fn dhvani_plan_levels(plan) {
+    if (plan == 0) { return 0; }
+    return DhExecPlan_levels(plan);
+}
 
 # is the last node in topo order finished?
 fn dhvani_plan_is_finished(plan) {
-    var order = DhExecPlan_order(plan);
-    var n = vec_len(order);
+    if (plan == 0) { return 0; }
+    var nodes = DhExecPlan_ord_nodes(plan);
+    var n = vec_len(nodes);
     if (n == 0) { return 0; }
-    var node = dh_plan_node(plan, vec_get(order, n - 1));
+    var node = vec_get(nodes, n - 1);
     if (node == 0) { return 0; }
     return dhvani_graph_node_is_finished(node);
 }
 
 # set bypass for a node; 0 if absent or unsupported.
 fn dhvani_plan_set_bypass(plan, id, bypassed) {
+    if (plan == 0) { return 0; }
     var node = dh_plan_node(plan, id);
     if (node == 0) { return 0; }
     return dhvani_graph_node_set_bypass(node, bypassed);
 }
 
 fn dhvani_plan_is_bypassed(plan, id) {
+    if (plan == 0) { return 0; }
     var node = dh_plan_node(plan, id);
     if (node == 0) { return 0; }
     return dhvani_graph_node_is_bypassed(node);
 }
 
 fn dhvani_plan_latency_frames(plan, id) {
+    if (plan == 0) { return 0; }
     var node = dh_plan_node(plan, id);
     if (node == 0) { return 0; }
     return dhvani_graph_node_latency(node);
@@ -422,57 +543,38 @@ fn dhvani_plan_latency_frames(plan, id) {
 
 # compensation delay for a node's output (0 if none).
 fn dhvani_plan_compensation_delay(plan, id) {
+    if (plan == 0) { return 0; }
     var idx = dh_graph_find(DhExecPlan_lc_ids(plan), id);
     if (idx < 0) { return 0; }
     return vec_get(DhExecPlan_lc_vals(plan), idx);
 }
 
 # total pipeline latency = max accumulated path latency from source to sink.
+# Computed once by compile (no per-call allocation).
 #must_use
 fn dhvani_plan_total_latency(plan) {
-    var order = DhExecPlan_order(plan);
-    var im_ids = DhExecPlan_im_ids(plan);
-    var im_lists = DhExecPlan_im_lists(plan);
-    var nl_ids = vec_new();
-    var nl_vals = vec_new();
-    var n = vec_len(order);
-    var maxlat = 0;
-    var i = 0;
-    while (i < n) {
-        var id = vec_get(order, i);
-        var node = dh_plan_node(plan, id);
-        var own = 0;
-        if (node != 0) { own = dhvani_graph_node_latency(node); }
-        var input_max = 0;
-        var imi = dh_graph_find(im_ids, id);
-        if (imi >= 0) {
-            var preds = vec_get(im_lists, imi);
-            var k = 0;
-            var kn = vec_len(preds);
-            while (k < kn) {
-                var pi = dh_graph_find(nl_ids, vec_get(preds, k));
-                if (pi >= 0) {
-                    var pv = vec_get(nl_vals, pi);
-                    if (pv > input_max) { input_max = pv; }
-                }
-                k = k + 1;
-            }
-        }
-        var total = input_max + own;
-        vec_push(nl_ids, id);
-        vec_push(nl_vals, total);
-        if (total > maxlat) { maxlat = total; }
-        i = i + 1;
-    }
-    return maxlat;
+    if (plan == 0) { return 0; }
+    return DhExecPlan_total_lat(plan);
 }
 
 # ---- GraphProcessor (RT-thread, double-buffered plan swap) ----
 
 # pending = a shared length-1 vec cell (Arc<Mutex<Option<plan>>>); node_outputs
-# indexed by NodeId value; 0 = None.
+# indexed by DENSE SLOT (0 = None); buf_pool = spare output buffers. Every
+# buffer this processor makes is channels x buffer_frames, so a plan swap parks
+# the outgoing plan's buffers in buf_pool and the new plan's slots draw from it:
+# a swap allocates nothing once the processor has held that many buffers.
 #derive(accessors)
-struct DhGraphProc { current_plan; pending; node_outputs; channels; sample_rate; buffer_frames; input_scratch; }
+struct DhGraphProc {
+    current_plan;
+    pending;
+    node_outputs;
+    channels;
+    sample_rate;
+    buffer_frames;
+    input_scratch;
+    buf_pool;
+}
 
 fn dhvani_graph_proc_new(channels, sample_rate, buffer_frames) {
     var self = alloc(sizeof(DhGraphProc));
@@ -486,10 +588,9 @@ fn dhvani_graph_proc_new(channels, sample_rate, buffer_frames) {
     DhGraphProc_set_buffer_frames(self, buffer_frames);
     # Reusable per-node input-gather vec. rust-old carries the same field
     # (`input_scratch: Vec<AudioBuffer>` on GraphProcessor, cleared per node);
-    # the port dropped it and re-minted a vec per node per audio cycle, which
-    # the free-less bump allocator never reclaims. vec_truncate rewinds len and
-    # keeps capacity, so steady state is 0 bytes/cycle.
+    # vec_truncate rewinds len and keeps capacity, so steady state is 0 bytes/cycle.
     DhGraphProc_set_input_scratch(self, vec_new());
+    DhGraphProc_set_buf_pool(self, vec_new());
     return self;
 }
 
@@ -499,45 +600,75 @@ fn dhvani_graph_proc_new(channels, sample_rate, buffer_frames) {
 struct DhSwapHandle { pending; }
 
 fn dhvani_graph_proc_swap_handle(self) {
+    if (self == 0) { return 0; }
     var h = alloc(sizeof(DhSwapHandle));
     DhSwapHandle_set_pending(h, DhGraphProc_pending(self));
     return h;
 }
 
+# swap(plan): hand a compiled plan to the processor's next cycle. Returns
+# DHVANI_ERR_NONE, or DHVANI_ERR_INVALID_PARAMETER (nothing queued) for a 0
+# handle or a 0 plan -- a failed compile is not silently ignored.
 fn dhvani_swap_handle_swap(self, plan) {
+    if (self == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (plan == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
     vec_set(DhSwapHandle_pending(self), 0, plan);
-    return 0;
+    return DHVANI_ERR_NONE;
 }
 
 # Arc clone -> another handle over the same pending cell.
 fn dhvani_swap_handle_clone(self) {
+    if (self == 0) { return 0; }
     var h = alloc(sizeof(DhSwapHandle));
     DhSwapHandle_set_pending(h, DhSwapHandle_pending(self));
     return h;
 }
 
+# An output buffer for a fresh slot: a pooled one (re-stamped with this
+# processor's format) when its storage still holds channels x frames samples,
+# else a new silent buffer. A pooled buffer a node reshaped is dropped.
+fn dh_graph_proc_take_buffer(self) {
+    var ch = DhGraphProc_channels(self);
+    var bf = DhGraphProc_buffer_frames(self);
+    var sr = DhGraphProc_sample_rate(self);
+    var pool = DhGraphProc_buf_pool(self);
+    while (vec_len(pool) > 0) {
+        var b = vec_pop(pool);
+        if (vec_len(DhAudioBuffer_samples(b)) == ch * bf) {
+            DhAudioBuffer_set_channels(b, ch);
+            DhAudioBuffer_set_frames(b, bf);
+            DhAudioBuffer_set_sample_rate(b, sr);
+            return b;
+        }
+    }
+    return dhvani_buffer_silence(ch, bf, sr);
+}
+
 # Process one buffer cycle. Returns the last node's output buffer ptr, or 0 if
 # no plan is active.
 fn dhvani_graph_proc_process(self) {
+    if (self == 0) { return 0; }
     # pick up a pending plan (take() the cell)
     var cell = DhGraphProc_pending(self);
     var newplan = vec_get(cell, 0);
     if (newplan != 0) {
         vec_set(cell, 0, 0);
-        # size node_outputs to (max node id + 1), all None
-        var norder = DhExecPlan_order(newplan);
-        var maxid = 0;
-        var mi = 0;
-        var mn = vec_len(norder);
-        while (mi < mn) {
-            var mv = vec_get(norder, mi);
-            if (mv > maxid) { maxid = mv; }
-            mi = mi + 1;
+        # park the outgoing plan's buffers, then one None slot per node of the
+        # new plan (rust-old: clear() + resize_with(max_id + 1, None)) -- reusing
+        # the slot vec's and the pool's capacity.
+        var old = DhGraphProc_node_outputs(self);
+        var pool = DhGraphProc_buf_pool(self);
+        var oi = 0;
+        var on = vec_len(old);
+        while (oi < on) {
+            var ob = vec_get(old, oi);
+            if (ob != 0) { vec_push(pool, ob); }
+            oi = oi + 1;
         }
-        var no = vec_new();
+        vec_truncate(old, 0);
+        var ns = vec_len(DhExecPlan_ord_nodes(newplan));
         var z = 0;
-        while (z <= maxid) { vec_push(no, 0); z = z + 1; }
-        DhGraphProc_set_node_outputs(self, no);
+        while (z < ns) { vec_push(old, 0); z = z + 1; }
         DhGraphProc_set_current_plan(self, newplan);
     }
 
@@ -545,73 +676,71 @@ fn dhvani_graph_proc_process(self) {
     if (plan == 0) { return 0; }
 
     var outputs = DhGraphProc_node_outputs(self);
-    var order = DhExecPlan_order(plan);
-    var im_ids = DhExecPlan_im_ids(plan);
-    var im_lists = DhExecPlan_im_lists(plan);
-    var ch = DhGraphProc_channels(self);
-    var sr = DhGraphProc_sample_rate(self);
-    var bf = DhGraphProc_buffer_frames(self);
-    var olen = vec_len(outputs);
+    var ord_nodes = DhExecPlan_ord_nodes(plan);
+    var ord_preds = DhExecPlan_ord_preds(plan);
+    var scratch = DhGraphProc_input_scratch(self);
 
-    var np = vec_len(order);
+    var np = vec_len(ord_nodes);
     var p = 0;
     while (p < np) {
-        var node_id = vec_get(order, p);
-        var idx = node_id;
-
-        # gather input buffers from predecessor output slots (reused scratch)
-        var scratch = DhGraphProc_input_scratch(self);
+        # gather input buffers from predecessor slots (reused scratch)
         vec_truncate(scratch, 0);
-        var imi = dh_graph_find(im_ids, node_id);
-        if (imi >= 0) {
-            var preds = vec_get(im_lists, imi);
+        var preds = vec_get(ord_preds, p);
+        if (preds != 0) {
             var k = 0;
             var kn = vec_len(preds);
             while (k < kn) {
-                var pid = vec_get(preds, k);
-                if (pid < olen) {
-                    var pbuf = vec_get(outputs, pid);
-                    if (pbuf != 0) { vec_push(scratch, pbuf); }
-                }
+                var pbuf = vec_get(outputs, vec_get(preds, k));
+                if (pbuf != 0) { vec_push(scratch, pbuf); }
                 k = k + 1;
             }
         }
 
-        # take (or create) this node's output buffer, then zero it
-        var output = 0;
-        if (idx < olen) { output = vec_get(outputs, idx); }
-        if (output == 0) { output = dhvani_buffer_silence(ch, bf, sr); }
+        # take (or create) this slot's output buffer, then zero it
+        var output = vec_get(outputs, p);
+        if (output == 0) { output = dh_graph_proc_take_buffer(self); }
         var osamp = dhvani_buffer_samples(output);
         var zn = vec_len(osamp);
-        var zi = 0;
-        while (zi < zn) { vec_set(osamp, zi, 0); zi = zi + 1; }
+        var od = dh_vec_data(osamp);
+        var zp = od;
+        var zend = od + zn * 8;
+        while (zp < zend) { store64(zp, 0); zp = zp + 8; }
 
         # process (or bypass: copy the first input straight through)
-        var node = dh_plan_node(plan, node_id);
+        var node = vec_get(ord_nodes, p);
         if (node != 0) {
             if (dhvani_graph_node_is_bypassed(node) == 1) {
                 if (vec_len(scratch) > 0) {
+                    # rust-old copy_from_slice panics on a length mismatch; copy
+                    # the common prefix instead (the rest stays silent).
                     var fs = dhvani_buffer_samples(vec_get(scratch, 0));
-                    var ci = 0;
-                    while (ci < zn) { vec_set(osamp, ci, vec_get(fs, ci)); ci = ci + 1; }
+                    var cn = vec_len(fs);
+                    if (cn > zn) { cn = zn; }
+                    var cs = dh_vec_data(fs);
+                    var cend = cs + cn * 8;
+                    var cd = od;
+                    while (cs < cend) {
+                        store64(cd, load64(cs));
+                        cs = cs + 8;
+                        cd = cd + 8;
+                    }
                 }
             } else {
                 dhvani_graph_node_process(node, scratch, output);
             }
         }
 
-        vec_set(outputs, idx, output);
+        vec_set(outputs, p, output);
         p = p + 1;
     }
 
     # return the last node's output slot (0 if None)
     if (np == 0) { return 0; }
-    var lastid = vec_get(order, np - 1);
-    if (lastid < vec_len(outputs)) { return vec_get(outputs, lastid); }
-    return 0;
+    return vec_get(outputs, np - 1);
 }
 
 fn dhvani_graph_proc_is_finished(self) {
+    if (self == 0) { return 0; }
     var plan = DhGraphProc_current_plan(self);
     if (plan == 0) { return 0; }
     return dhvani_plan_is_finished(plan);

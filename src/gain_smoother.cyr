@@ -2,6 +2,8 @@
 # Ports rust-old/src/dsp/gain_smoother.rs. L0, deps error only.
 # GainSmootherParams held by GainSmoother as a nested struct handle. Attack
 # (gain decreasing, fast) vs release (increasing, slow). serde dropped.
+# from_params()/set_params() COPY the params into storage the smoother owns (the
+# oracle takes them by value); validate() rejects NaN, as the oracle's `contains` does.
 
 #derive(accessors)
 struct DhGainSmootherParams { attack; release; }
@@ -26,16 +28,20 @@ fn dhvani_gsparams_attack(p) { return DhGainSmootherParams_attack(p); }
 #must_use
 fn dhvani_gsparams_release(p) { return DhGainSmootherParams_release(p); }
 
-# validate -- ERR_NONE if attack & release in [0,1], else ERR_INVALID_PARAMETER.
+# validate -- ERR_NONE if attack & release in [0,1] (NaN is outside), else
+# ERR_INVALID_PARAMETER.
 #must_use
 fn dhvani_gsparams_validate(p) {
-    var a = DhGainSmootherParams_attack(p);
-    var r = DhGainSmootherParams_release(p);
-    if (f64_lt(a, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_gt(a, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_lt(r, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_gt(r, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhGainSmootherParams_attack(p), 0, 1.0) == 0)  { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhGainSmootherParams_release(p), 0, 1.0) == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
     return DHVANI_ERR_NONE;
+}
+
+# copy src's fields into dst (a smoother's own params); returns dst.
+fn dh_gsparams_copy(dst, src) {
+    DhGainSmootherParams_set_attack(dst, DhGainSmootherParams_attack(src));
+    DhGainSmootherParams_set_release(dst, DhGainSmootherParams_release(src));
+    return dst;
 }
 
 # ---- GainSmoother ----
@@ -50,7 +56,7 @@ fn dhvani_gs_new(attack, release) {
 #must_use
 fn dhvani_gs_from_params(params) {
     var self = alloc(sizeof(DhGainSmoother));
-    DhGainSmoother_set_params(self, params);
+    DhGainSmoother_set_params(self, dh_gsparams_copy(alloc(sizeof(DhGainSmootherParams)), params));
     DhGainSmoother_set_current(self, 1.0);
     return self;
 }
@@ -71,7 +77,7 @@ fn dhvani_gs_smooth(self, target) {
 #must_use
 fn dhvani_gs_current(self) { return DhGainSmoother_current(self); }
 fn dhvani_gs_reset(self, value) { DhGainSmoother_set_current(self, value); return 0; }
-fn dhvani_gs_set_params(self, params) { DhGainSmoother_set_params(self, params); return 0; }
+fn dhvani_gs_set_params(self, params) { dh_gsparams_copy(DhGainSmoother_params(self), params); return 0; }
 #inline
 #must_use
 fn dhvani_gs_params(self) { return DhGainSmoother_params(self); }

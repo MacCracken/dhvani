@@ -5,6 +5,9 @@
 # Generator / Gain / Finished / BypassableGain / Latency) become fn-ptr process
 # functions here; bypass/latency/finished are carried as node flags, so
 # BypassableGain reuses gain_process and Latency reuses passthrough_process.
+# After those: the 2.2.3 alloc-free regression and the 2.3.3 P(-1) regressions
+# (rust-old topo-order oracle, edge-to-missing Err, swap buffer reuse, compile
+# snapshot, total_latency, null guards, dense slots, bypass copy).
 
 include "src/error.cyr"
 include "src/simd.cyr"
@@ -57,6 +60,132 @@ fn gain_process(state, inputs, output) {
 
 # FinishedNode: no-op process (is_finished carried as a node flag).
 fn finished_process(state, inputs, output) { return 0; }
+
+# SumNode (test-only): output = sum of every input, in input order.
+fn sum_process(state, inputs, output) {
+    var os = dhvani_buffer_samples(output);
+    var n = vec_len(os);
+    var k = 0;
+    var kn = vec_len(inputs);
+    while (k < kn) {
+        var is = dhvani_buffer_samples(vec_get(inputs, k));
+        var i = 0;
+        while (i < n) { vec_set(os, i, f64_add(vec_get(os, i), vec_get(is, i))); i = i + 1; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn noop_process(state, inputs, output) { return 0; }
+
+# PatternNode (test-only): output[i] = state[i % len(state)] (raw f64 bits).
+fn pattern_process(state, inputs, output) {
+    var os = dhvani_buffer_samples(output);
+    var n = vec_len(os);
+    var pn = vec_len(state);
+    var i = 0;
+    while (i < n) { vec_set(os, i, vec_get(state, i % pn)); i = i + 1; }
+    return 0;
+}
+
+# ShrinkNode (test-only, hostile): replaces its output's storage with the
+# shorter `state` vec, filled with 0.25.
+fn shrink_process(state, inputs, output) {
+    var i = 0;
+    var n = vec_len(state);
+    while (i < n) { vec_set(state, i, 0.25); i = i + 1; }
+    DhAudioBuffer_set_samples(output, state);
+    return 0;
+}
+
+fn gnode(v) { return dhvani_graph_node_new(&gen_process, mkf(v), 0, 1, 0, 0, 0, 0, "generator"); }
+fn knode(v) { return dhvani_graph_node_new(&gain_process, mkf(v), 1, 1, 0, 0, 0, 0, "gain"); }
+
+# rust-old oracle cases. Format: "n id1..idn m from1 to1 .. fromm tom k order1..orderk"
+# (k = -1 -> compile Err). Expected orders come from rust-old's topological_sort
+# compiled verbatim (rustc 1.89, the rust-version pin; 1.100 agrees on all 400
+# generated DAGs, of which the first 40 are below). A max-ready-first sort --
+# the pre-2.3.3 port -- disagrees with 226 of those 400.
+var tp_pos = 0;
+fn tp_int(s) {
+    while (load8(s + tp_pos) == 32) { tp_pos = tp_pos + 1; }
+    var neg = 0;
+    if (load8(s + tp_pos) == 45) { neg = 1; tp_pos = tp_pos + 1; }
+    var v = 0;
+    var c = load8(s + tp_pos);
+    while (c >= 48) {
+        if (c > 57) { break; }
+        v = v * 10 + (c - 48);
+        tp_pos = tp_pos + 1;
+        c = load8(s + tp_pos);
+    }
+    if (neg == 1) { return 0 - v; }
+    return v;
+}
+
+# 1 iff compiling the case gives exactly rust-old's order (or its Err).
+fn topo_check(s) {
+    tp_pos = 0;
+    var g = dhvani_graph_new();
+    var n = tp_int(s);
+    var i = 0;
+    while (i < n) {
+        var id = tp_int(s);
+        dhvani_graph_add_node(g, id, dhvani_graph_node_new(&noop_process, 0, 1, 1, 0, 0, 0, 0, "noop"));
+        i = i + 1;
+    }
+    var m = tp_int(s);
+    var j = 0;
+    while (j < m) {
+        var f = tp_int(s);
+        var t = tp_int(s);
+        dhvani_graph_connect(g, f, t);
+        j = j + 1;
+    }
+    var k = tp_int(s);
+    var plan = dhvani_graph_compile(g);
+    if (k < 0) {
+        if (plan == 0) { return 1; }
+        return 0;
+    }
+    if (plan == 0) { return 0; }
+    var o = dhvani_plan_order(plan);
+    if (vec_len(o) != k) { return 0; }
+    var ok = 1;
+    var q = 0;
+    while (q < k) {
+        if (vec_get(o, q) != tp_int(s)) { ok = 0; }
+        q = q + 1;
+    }
+    return ok;
+}
+
+# Long cases are fed in chunks (lint line limit): tc() appends a chunk to a case
+# buffer, tc_run() checks the assembled case and clears the buffer.
+var tc_buf = 0;
+var tc_len = 0;
+fn tc(s) {
+    if (tc_buf == 0) { tc_buf = alloc(4096); }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        store8(tc_buf + tc_len, load8(s + i));
+        tc_len = tc_len + 1;
+        i = i + 1;
+    }
+    store8(tc_buf + tc_len, 32);
+    tc_len = tc_len + 1;
+    store8(tc_buf + tc_len, 0);
+    return 0;
+}
+fn tc_run() {
+    var r = topo_check(tc_buf);
+    tc_len = 0;
+    store8(tc_buf, 0);
+    return r;
+}
+
+# first sample of a process() output
+fn out0(proc) { return vec_get(dhvani_buffer_samples(dhvani_graph_proc_process(proc)), 0); }
 
 alloc_init();
 
@@ -242,7 +371,8 @@ var btg = dhvani_graph_new();
 var bt_src = dhvani_node_id_next();
 var bt_gain = dhvani_node_id_next();
 dhvani_graph_add_node(btg, bt_src, dhvani_graph_node_new(&gen_process, mkf(1.0), 0, 1, 0, 0, 0, 0, "generator"));
-dhvani_graph_add_node(btg, bt_gain, dhvani_graph_node_new(&gain_process, mkf(0.5), 1, 1, 0, 0, 1, 0, "bypassable_gain"));
+var bt_node = dhvani_graph_node_new(&gain_process, mkf(0.5), 1, 1, 0, 0, 1, 0, "bypassable_gain");
+dhvani_graph_add_node(btg, bt_gain, bt_node);
 dhvani_graph_connect(btg, bt_src, bt_gain);
 var btp = dhvani_graph_compile(btg);
 assert_eq(dhvani_plan_is_bypassed(btp, bt_gain), 0, "not bypassed init");
@@ -323,6 +453,278 @@ dhvani_graph_proc_process(afproc);
 var af_after = alloc_used();
 assert_eq(af_after - af_before, 0, "graph_proc_process allocates 0 bytes in steady state");
 
+# ================================================================
+# 2.3.3 regressions (P(-1) sweep). Non-aborting groups first.
+# ================================================================
+
+# ---- topo_order_matches_rust_oracle ----
+# rust-old pops the ascending ready queue from the end and inserts later-ready
+# nodes at partition_point(|id| id >= succ) -- not max-ready-first.
+test_group("topo_order_matches_rust_oracle");
+assert_eq(topo_check("3 1 2 3 1 2 3 3 2 1 3"), 1, "A: sources 1,2; 2->3 -> [2,1,3]");
+assert_eq(topo_check("4 1 2 3 4 3 1 2 1 3 1 4 4 1 2 3 4"), 1, "G: fan-out 1->{2,3,4} -> [1,2,3,4]");
+assert_eq(topo_check("4 1 2 3 4 4 1 2 1 3 2 4 3 4 4 1 2 3 4"), 1, "B: diamond -> [1,2,3,4]");
+assert_eq(topo_check("5 1 2 3 4 5 4 1 3 3 5 2 4 4 5 5 2 1 3 4 5"), 1, "H: two chains into 5 -> [2,1,3,4,5]");
+assert_eq(topo_check("2 1 2 2 1 2 2 1 -1"), 1, "cycle -> Err");
+assert_eq(topo_check("7 16 29 10 20 1 31 13 3 29 10 13 31 1 13 7 29 10 20 16 1 13 31"), 1, "rust-old oracle DAG 0");
+tc("10 32 17 19 15 33 37 40 27 7 34 9 19 34 33 40 32 34 33 7 40 27 33 7 19 15 32 17 37 33 10");
+tc("37 32 17 19 15 33 7 34 40 27");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 1");
+assert_eq(topo_check("4 31 35 2 40 3 2 40 2 31 35 31 4 35 2 31 40"), 1, "rust-old oracle DAG 2");
+tc("10 28 16 31 19 8 37 33 24 27 34 4 8 37 19 28 33 19 16 8 10 34 33 19 31 27 24 16 8 28 37");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 3");
+tc("8 32 22 16 21 2 35 39 9 8 2 32 39 9 39 32 39 9 35 39 9 16 39 9 39 16 8 35 22 21 2 39 9 16");
+tc("32");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 4");
+assert_eq(topo_check("2 30 26 1 26 30 2 26 30"), 1, "rust-old oracle DAG 5");
+assert_eq(topo_check("2 25 29 2 29 25 29 25 2 29 25"), 1, "rust-old oracle DAG 6");
+assert_eq(topo_check("4 22 34 37 38 0 4 38 37 34 22"), 1, "rust-old oracle DAG 7");
+tc("7 21 37 7 8 22 4 27 10 22 8 22 37 27 37 7 22 21 37 7 22 7 27 21 8 27 37 4 27 7 21 7 4 22 8");
+tc("27 37");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 8");
+tc("9 39 19 36 18 25 34 8 40 32 13 36 25 32 40 8 32 19 34 8 19 8 25 32 40 36 19 8 32 8 34 32");
+tc("18 36 18 25 36 -1");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 9");
+assert_eq(topo_check("3 28 35 34 0 3 35 34 28"), 1, "rust-old oracle DAG 10");
+tc("6 22 40 37 2 14 39 5 37 22 37 14 37 40 39 22 2 22 6 39 37 2 14 22 40");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 11");
+assert_eq(topo_check("2 16 6 2 6 16 6 16 2 6 16"), 1, "rust-old oracle DAG 12");
+assert_eq(topo_check("2 40 27 0 2 40 27"), 1, "rust-old oracle DAG 13");
+assert_eq(topo_check("2 23 26 0 2 26 23"), 1, "rust-old oracle DAG 14");
+assert_eq(topo_check("3 3 30 9 4 3 9 3 9 30 9 3 9 3 30 3 9"), 1, "rust-old oracle DAG 15");
+tc("10 9 13 19 35 40 25 15 33 27 17 11 9 40 33 9 33 9 33 35 27 19 27 19 15 35 33 9 17 19 35 25");
+tc("25 40 10 33 9 27 17 15 13 19 35 25 40");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 16");
+tc("9 9 14 36 21 37 32 10 11 29 5 14 21 32 9 37 32 32 9 29 10 9 37 36 29 10 14 11 21 32 9");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 17");
+assert_eq(topo_check("6 27 18 22 17 38 28 3 18 38 27 28 28 38 6 27 22 18 17 28 38"), 1, "rust-old oracle DAG 18");
+assert_eq(topo_check("6 12 4 39 36 37 30 3 12 37 12 36 37 12 -1"), 1, "rust-old oracle DAG 19");
+assert_eq(topo_check("3 19 34 28 2 28 34 19 34 3 28 19 34"), 1, "rust-old oracle DAG 20");
+tc("9 7 2 36 11 26 1 39 18 37 3 39 2 39 1 26 7 9 39 1 2 37 36 26 7 18 11");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 21");
+tc("9 10 24 7 21 32 15 12 38 36 11 15 24 32 21 36 21 10 24 15 24 12 15 32 15 32 38 36 12 15 38");
+tc("32 10 9 36 12 32 7 10 15 21 24 38");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 22");
+tc("8 26 11 10 30 15 6 33 39 13 15 11 6 10 6 33 6 26 6 10 26 39 15 33 6 10 15 10 30 33 33 10");
+tc("11 33 6 11 8 30 15 6 11 26 33 10 39");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 23");
+assert_eq(topo_check("5 15 20 24 6 10 0 5 24 20 15 10 6"), 1, "rust-old oracle DAG 24");
+tc("6 9 37 34 6 2 40 9 34 2 37 9 34 37 6 40 34 2 6 37 40 2 37 9 40 2 6 34 6 37 9 40 2");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 25");
+tc("8 12 24 23 35 40 36 9 7 6 35 40 23 24 36 9 9 40 7 12 23 40 8 36 9 35 23 7 12 24 40");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 26");
+assert_eq(topo_check("9 36 16 28 7 3 6 30 17 14 2 36 30 30 3 9 36 28 17 16 14 7 6 30 3"), 1, "rust-old oracle DAG 27");
+assert_eq(topo_check("7 39 31 23 35 1 19 4 3 31 19 1 4 4 35 7 39 31 19 23 1 4 35"), 1, "rust-old oracle DAG 28");
+assert_eq(topo_check("2 13 39 0 2 39 13"), 1, "rust-old oracle DAG 29");
+assert_eq(topo_check("6 11 23 10 39 34 29 4 10 29 11 39 23 39 10 29 6 34 23 11 10 29 39"), 1, "rust-old oracle DAG 30");
+tc("9 40 30 11 12 33 4 23 6 18 6 12 18 40 6 6 33 18 30 18 6 23 18 9 40 23 12 11 4 18 6 30 33");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 31");
+assert_eq(topo_check("4 30 38 21 16 6 16 38 16 21 16 38 16 38 16 21 38 21 4 30 16 38 21"), 1, "rust-old oracle DAG 32");
+assert_eq(topo_check("4 31 18 38 16 1 18 31 4 38 18 16 31"), 1, "rust-old oracle DAG 33");
+assert_eq(topo_check("5 28 27 40 13 5 3 13 28 5 13 27 28 5 40 27 5 13 28"), 1, "rust-old oracle DAG 34");
+tc("9 19 29 12 15 16 30 40 13 4 10 4 12 30 12 4 40 4 13 29 4 29 12 19 12 13 15 16 15 13 15 9");
+tc("30 29 4 13 19 12 16 15 40");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 35");
+assert_eq(topo_check("2 19 15 0 2 19 15"), 1, "rust-old oracle DAG 36");
+assert_eq(topo_check("7 4 33 28 23 9 6 2 3 9 4 9 28 9 6 7 33 23 9 2 4 6 28"), 1, "rust-old oracle DAG 37");
+assert_eq(topo_check("3 40 34 2 3 2 34 40 2 40 34 3 40 2 34"), 1, "rust-old oracle DAG 38");
+tc("6 16 27 26 15 8 29 9 16 27 26 16 8 15 8 15 26 16 26 29 8 16 8 15 27 16 -1");
+assert_eq(tc_run(), 1, "rust-old oracle DAG 39");
+# ---- process_output_matches_rust_oracle ----
+# The graph output (and is_finished) is the LAST node in that order.
+test_group("process_output_matches_rust_oracle");
+var oa = dhvani_graph_new();
+dhvani_graph_add_node(oa, 1, gnode(0.1));
+dhvani_graph_add_node(oa, 2, gnode(0.2));
+dhvani_graph_add_node(oa, 3, knode(4.0));
+dhvani_graph_connect(oa, 2, 3);
+var oaproc = dhvani_graph_proc_new(1, 48000, 64);
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(oaproc), dhvani_graph_compile(oa));
+assert_eq(out0(oaproc), f64_mul(0.2, 4.0), "A: output = node 3 (0.8), as rust-old");
+var og = dhvani_graph_new();
+dhvani_graph_add_node(og, 1, gnode(0.1));
+dhvani_graph_add_node(og, 2, knode(1.0));
+dhvani_graph_add_node(og, 3, knode(2.0));
+dhvani_graph_add_node(og, 4, dhvani_graph_node_new(&gain_process, mkf(3.0), 1, 1, 1, 0, 0, 0, "gain"));
+dhvani_graph_connect(og, 1, 2);
+dhvani_graph_connect(og, 1, 3);
+dhvani_graph_connect(og, 1, 4);
+var ogp = dhvani_graph_compile(og);
+assert_eq(dhvani_plan_is_finished(ogp), 1, "G: is_finished reads node 4 (finished), as rust-old");
+var ogproc = dhvani_graph_proc_new(1, 48000, 64);
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(ogproc), ogp);
+assert_eq(out0(ogproc), f64_mul(0.1, 3.0), "G: output = node 4 (0.3), as rust-old");
+
+# ---- edge_to_missing_node_fails_compile ----
+# rust-old: an endpoint that was never added leaves order.len() != nodes.len().
+test_group("edge_to_missing_node_fails_compile");
+assert_eq(topo_check("2 1 2 1 1 9 -1"), 1, "edge to missing node -> Err");
+assert_eq(topo_check("2 1 2 1 9 2 -1"), 1, "edge from missing node -> Err");
+var em = dhvani_graph_new();
+dhvani_graph_add_node(em, 1, gnode(0.5));
+dhvani_graph_add_node(em, 2, knode(1.0));
+dhvani_graph_connect(em, 1, 2);
+dhvani_graph_connect(em, 2, 77);
+assert_eq(dhvani_graph_compile(em), 0, "valid chain + dangling edge -> Err");
+
+# ---- plan_swap_reuses_buffers ----
+# A swap parks the outgoing buffers in the processor's pool; the new plan's slots
+# draw from it. rust-old frees + re-allocates; under the bump allocator the
+# pre-2.3.3 port leaked ~32 KB per swap of this 4-node 2ch x 256 plan.
+test_group("plan_swap_reuses_buffers");
+fn mkdiamond(g1, g2) {
+    var g = dhvani_graph_new();
+    dhvani_graph_add_node(g, 1, gnode(0.5));
+    dhvani_graph_add_node(g, 2, knode(g1));
+    dhvani_graph_add_node(g, 3, knode(g2));
+    dhvani_graph_add_node(g, 4, dhvani_graph_node_new(&sum_process, 0, 2, 1, 0, 0, 0, 0, "sum"));
+    dhvani_graph_connect(g, 1, 2);
+    dhvani_graph_connect(g, 1, 3);
+    dhvani_graph_connect(g, 2, 4);
+    dhvani_graph_connect(g, 3, 4);
+    return dhvani_graph_compile(g);
+}
+var rsp = mkdiamond(0.5, 0.3);
+var rsp2 = mkdiamond(0.25, 0.125);
+var rsproc = dhvani_graph_proc_new(2, 48000, 256);
+var rsh = dhvani_graph_proc_swap_handle(rsproc);
+dhvani_swap_handle_swap(rsh, rsp);
+dhvani_graph_proc_process(rsproc);
+dhvani_swap_handle_swap(rsh, rsp);
+dhvani_graph_proc_process(rsproc);
+var rs0 = alloc_used();
+var rsi = 0;
+while (rsi < 10) { dhvani_swap_handle_swap(rsh, rsp); dhvani_graph_proc_process(rsproc); rsi = rsi + 1; }
+assert_eq(alloc_used() - rs0, 0, "10 re-swaps of the same plan allocate 0 bytes");
+var rs1 = alloc_used();
+dhvani_swap_handle_swap(rsh, rsp2);
+var rsv = out0(rsproc);
+assert_eq(alloc_used() - rs1, 0, "swap to another same-size plan allocates 0 bytes");
+assert_eq(rsv, f64_add(f64_add(0, f64_mul(0.5, 0.25)), f64_mul(0.5, 0.125)), "new plan's output after swap");
+var rs2 = alloc_used();
+dhvani_graph_proc_process(rsproc);
+assert_eq(alloc_used() - rs2, 0, "multi-input steady cycle allocates 0 bytes");
+
+# ---- compile_snapshots_node_table ----
+# rust-old's compile(self) moves the nodes; the port's plan copies the graph's
+# node table, so later add_node calls cannot reach a compiled plan.
+test_group("compile_snapshots_node_table");
+var cs = dhvani_graph_new();
+dhvani_graph_add_node(cs, 1, gnode(0.5));
+dhvani_graph_add_node(cs, 2, dhvani_graph_node_new(&gain_process, mkf(1.0), 1, 1, 0, 0, 0, 10, "gain"));
+dhvani_graph_connect(cs, 1, 2);
+var csp = dhvani_graph_compile(cs);
+dhvani_graph_add_node(cs, 2, dhvani_graph_node_new(&gain_process, mkf(3.0), 1, 1, 0, 0, 0, 77, "gain"));
+dhvani_graph_add_node(cs, 3, gnode(0.9));
+assert_eq(dhvani_plan_latency_frames(csp, 2), 10, "replacing node 2 in the graph leaves the plan's node 2");
+assert_eq(dhvani_plan_is_bypassed(csp, 3), 0, "node added after compile is absent from the plan");
+var csproc = dhvani_graph_proc_new(1, 48000, 64);
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(csproc), csp);
+assert_eq(out0(csproc), 0.5, "plan still runs the compiled gain (x1.0)");
+var csp2 = dhvani_graph_compile(cs);
+assert_eq(dhvani_plan_latency_frames(csp2, 2), 77, "a second compile sees the replacement");
+assert_eq(dhvani_plan_latency_frames(csp, 2), 10, "and the first plan is unchanged");
+
+# ---- total_latency_alloc_free ----
+test_group("total_latency_alloc_free");
+var tl = dhvani_graph_new();
+dhvani_graph_add_node(tl, 1, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 100, "latency"));
+dhvani_graph_add_node(tl, 2, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 200, "latency"));
+dhvani_graph_add_node(tl, 3, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 50, "latency"));
+dhvani_graph_add_node(tl, 4, dhvani_graph_node_new(&passthrough_process, 0, 1, 1, 0, 0, 0, 5, "latency"));
+dhvani_graph_connect(tl, 1, 2);
+dhvani_graph_connect(tl, 2, 3);
+dhvani_graph_connect(tl, 1, 4);
+var tlp = dhvani_graph_compile(tl);
+var tl0 = alloc_used();
+var tlv = 0;
+var tli = 0;
+while (tli < 100) { tlv = dhvani_plan_total_latency(tlp); tli = tli + 1; }
+assert_eq(alloc_used() - tl0, 0, "100 total_latency calls allocate 0 bytes");
+assert_eq(tlv, 350, "total = longest path 100+200+50");
+
+# ---- null_plan_and_swap_guards ----
+# compile's Err sentinel (0) reads as an absent plan; swap(h, 0) is an error and
+# keeps the active plan running. Pre-2.3.3: SIGSEGV / silent no-op.
+test_group("null_plan_and_swap_guards");
+assert_eq(dhvani_plan_order(0), 0, "order(0)");
+assert_eq(dhvani_plan_levels(0), 0, "levels(0)");
+assert_eq(dhvani_plan_is_finished(0), 0, "is_finished(0)");
+assert_eq(dhvani_plan_set_bypass(0, 1, 1), 0, "set_bypass(0)");
+assert_eq(dhvani_plan_is_bypassed(0, 1), 0, "is_bypassed(0)");
+assert_eq(dhvani_plan_latency_frames(0, 1), 0, "latency_frames(0)");
+assert_eq(dhvani_plan_compensation_delay(0, 1), 0, "compensation_delay(0)");
+assert_eq(dhvani_plan_total_latency(0), 0, "total_latency(0)");
+assert_eq(dhvani_graph_proc_process(0), 0, "process(0 proc)");
+assert_eq(dhvani_graph_proc_swap_handle(0), 0, "swap_handle(0 proc)");
+assert_eq(dhvani_swap_handle_clone(0), 0, "clone(0 handle)");
+assert_eq(dhvani_graph_compile(0), 0, "compile(0 graph)");
+var ng = dhvani_graph_new();
+dhvani_graph_add_node(ng, 1, gnode(0.7));
+var ngp = dhvani_graph_compile(ng);
+var ngproc = dhvani_graph_proc_new(1, 48000, 64);
+var ngh = dhvani_graph_proc_swap_handle(ngproc);
+assert_eq(dhvani_swap_handle_swap(ngh, ngp), DHVANI_ERR_NONE, "swap(plan) ok");
+assert_eq(out0(ngproc), 0.7, "plan active");
+assert_eq(dhvani_swap_handle_swap(ngh, 0), DHVANI_ERR_INVALID_PARAMETER, "swap(h, 0) -> error");
+assert_eq(dhvani_swap_handle_swap(0, ngp), DHVANI_ERR_INVALID_PARAMETER, "swap(0, plan) -> error");
+assert_eq(out0(ngproc), 0.7, "active plan keeps running after a rejected swap");
+
+# ---- dense_slots_any_node_id ----
+# Node ids are keys only: a negative or 2^40 id no longer indexes or sizes the
+# output slots (pre-2.3.3: "vec: index < 0" abort / an id-sized allocation).
+test_group("dense_slots_any_node_id");
+var dg = dhvani_graph_new();
+dhvani_graph_add_node(dg, 0 - 5, gnode(0.25));
+dhvani_graph_add_node(dg, 1099511627776, knode(2.0));
+dhvani_graph_connect(dg, 0 - 5, 1099511627776);
+var dgp = dhvani_graph_compile(dg);
+assert(dgp != 0, "compiles");
+var dgproc = dhvani_graph_proc_new(1, 48000, 64);
+var dg0 = alloc_used();
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(dgproc), dgp);
+assert_eq(out0(dgproc), 0.5, "-5 -> 2^40 chain processes");
+assert(alloc_used() - dg0 < 4096, "swap + first cycle sized by node count, not by id");
+
+# ---- bypass_copy_exact_and_length_guarded ----
+test_group("bypass_copy_exact_and_length_guarded");
+var bpat = vec_new();
+vec_push(bpat, 0x8000000000000000);   # -0.0
+vec_push(bpat, 1);                    # smallest denormal
+vec_push(bpat, 0x7FF8000000000123);   # NaN with payload
+vec_push(bpat, 1.5);
+var bxg = dhvani_graph_new();
+dhvani_graph_add_node(bxg, 1, dhvani_graph_node_new(&pattern_process, bpat, 0, 1, 0, 0, 0, 0, "pattern"));
+dhvani_graph_add_node(bxg, 2, dhvani_graph_node_new(&gain_process, mkf(0.5), 1, 1, 0, 1, 1, 0, "bypassable_gain"));
+dhvani_graph_connect(bxg, 1, 2);
+var bxproc = dhvani_graph_proc_new(2, 48000, 32);
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(bxproc), dhvani_graph_compile(bxg));
+var bxo = dhvani_buffer_samples(dhvani_graph_proc_process(bxproc));
+var bxok = 1;
+var bxi = 0;
+while (bxi < 64) {
+    if (vec_get(bxo, bxi) != vec_get(bpat, bxi % 4)) { bxok = 0; }
+    bxi = bxi + 1;
+}
+assert_eq(bxok, 1, "bypass copies input bits exactly");
+var bshort = dh_vec_zeros(16);
+var bsg = dhvani_graph_new();
+dhvani_graph_add_node(bsg, 1, dhvani_graph_node_new(&shrink_process, bshort, 0, 1, 0, 0, 0, 0, "shrink"));
+dhvani_graph_add_node(bsg, 2, dhvani_graph_node_new(&gain_process, mkf(0.5), 1, 1, 0, 1, 1, 0, "bypassable_gain"));
+dhvani_graph_connect(bsg, 1, 2);
+var bsproc = dhvani_graph_proc_new(1, 48000, 64);
+dhvani_swap_handle_swap(dhvani_graph_proc_swap_handle(bsproc), dhvani_graph_compile(bsg));
+dhvani_graph_proc_process(bsproc);
+var bso = dhvani_buffer_samples(dhvani_graph_proc_process(bsproc));
+var bsok = 1;
+var bsi = 0;
+while (bsi < 64) {
+    var bexp = 0;
+    if (bsi < 16) { bexp = 0.25; }
+    if (vec_get(bso, bsi) != bexp) { bsok = 0; }
+    bsi = bsi + 1;
+}
+assert_eq(bsok, 1, "shorter first input: prefix copied, rest silent, no abort");
 
 var rc = assert_summary();
 syscall(60, rc);

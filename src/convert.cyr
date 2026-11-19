@@ -17,10 +17,14 @@ var DH_FRAC_1_SQRT_2 = F64_FRAC_1_SQRT2;   # 1/sqrt(2), ITU downmix coeff (exact
 # i32_to_f32(src, dst) -- src[i] / 2^31.
 fn dhvani_convert_i32_to_f32(src, dst) {
     var len = dh_imin(vec_len(src), vec_len(dst));
-    var i = 0;
-    while (i < len) {
-        vec_set(dst, i, f64_div(f64_from(vec_get(src, i)), f64_from(2147483648)));
-        i = i + 1;
+    var full = f64_from(2147483648);
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(dst);
+    var end = s + len * 8;
+    while (s < end) {
+        store64(d, f64_div(f64_from(load64(s)), full));
+        s = s + 8;
+        d = d + 8;
     }
     return 0;
 }
@@ -28,28 +32,35 @@ fn dhvani_convert_i32_to_f32(src, dst) {
 # f32_to_i32(src, dst) -- (clamp(src,-1,1) * (2^31 - 1)) truncated to i32.
 fn dhvani_convert_f32_to_i32(src, dst) {
     var len = dh_imin(vec_len(src), vec_len(dst));
-    var i = 0;
-    while (i < len) {
-        var c = f64_clamp(vec_get(src, i), DH_NEG_ONE, 1.0);
-        vec_set(dst, i, f64_to(f64_trunc(f64_mul(c, f64_from(2147483647)))));
-        i = i + 1;
+    var full = f64_from(2147483647);
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(dst);
+    var end = s + len * 8;
+    while (s < end) {
+        # f64_clamp's two tests inline, in its order
+        var c = load64(s);
+        if (f64_lt(c, DH_NEG_ONE) == 1) { c = DH_NEG_ONE; }
+        else { if (f64_gt(c, 1.0) == 1) { c = 1.0; } }
+        store64(d, f64_to(f64_trunc(f64_mul(c, full))));
+        s = s + 8;
+        d = d + 8;
     }
     return 0;
 }
 
+# copy min(len) slots from src to dst (the f64 <-> f32 identity converters).
+fn dh_convert_copy(src, dst) {
+    var len = dh_imin(vec_len(src), vec_len(dst));
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(dst);
+    var end = s + len * 8;
+    while (s < end) { store64(d, load64(s)); s = s + 8; d = d + 8; }
+    return 0;
+}
+
 # ---- f64 <-> f32 (identity in the all-f64 port; kept for API parity) ----
-fn dhvani_convert_f64_to_f32(src, dst) {
-    var len = dh_imin(vec_len(src), vec_len(dst));
-    var i = 0;
-    while (i < len) { vec_set(dst, i, vec_get(src, i)); i = i + 1; }
-    return 0;
-}
-fn dhvani_convert_f32_to_f64(src, dst) {
-    var len = dh_imin(vec_len(src), vec_len(dst));
-    var i = 0;
-    while (i < len) { vec_set(dst, i, vec_get(src, i)); i = i + 1; }
-    return 0;
-}
+fn dhvani_convert_f64_to_f32(src, dst) { return dh_convert_copy(src, dst); }
+fn dhvani_convert_f32_to_f64(src, dst) { return dh_convert_copy(src, dst); }
 
 # ---- 24-bit packed bytes <-> f32 (3 bytes/sample, little-endian) ----
 

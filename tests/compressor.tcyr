@@ -102,5 +102,156 @@ var want7 = f64_mul(f64_neg(120.0), f64_exp(f64_neg(0.1)));
 var err7 = f64_abs(f64_sub(dhvani_comp_envelope_db(c7), want7));
 assert(f64_lt(err7, 0.000001), "10 ms attack @48k: env -120*exp(-0.1) after 1 ms");
 
+# ================================================================
+# 2.3.2 hardening regressions (each fails on the 2.3.2 code)
+# ================================================================
+var cx_nan = 0x7FF8000000000000;
+
+fn cx_mono(n, val) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, val); i = i + 1; }
+    return dhvani_buffer_from_interleaved(v, 1, 48000);
+}
+fn cx_stereo(frames, phase0) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var t = f64_from(i + phase0);
+        vec_push(v, f64_mul(f64_sin(f64_mul(t, 0.0627)), 0.9));
+        vec_push(v, f64_mul(f64_sin(f64_mul(t, 0.31)), 0.4));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, 48000);
+}
+
+# ---- nonfinite_sample_does_not_latch ----
+# In the oracle a single +Inf drove envelope_db to +Inf for good: gain -Inf failed
+# is_finite, so compression stopped, and the +Inf itself passed through.
+test_group("nonfinite_sample_does_not_latch");
+var cx_c = dhvani_comp_new(dhvani_compparams_default(), 48000);
+var cx_b1 = cx_mono(1, DH_POS_INF);
+dhvani_comp_process(cx_c, cx_b1);
+assert_eq(vec_get(dhvani_buffer_samples(cx_b1), 0), 0, "+Inf in -> 0 out");
+assert_eq(dhvani_is_finite(dhvani_comp_envelope_db(cx_c)), 1, "envelope stays finite");
+var cx_b2 = cx_mono(48000, 0.9);
+dhvani_comp_process(cx_c, cx_b2);
+assert(f64_lt(vec_get(dhvani_buffer_samples(cx_b2), 47999), 0.5), "a loud signal 1 s later is compressed");
+var cx_n = dhvani_comp_new(dhvani_compparams_default(), 48000);
+var cx_nv = vec_new(); vec_push(cx_nv, cx_nan); vec_push(cx_nv, 0.25);
+var cx_nb = dhvani_buffer_from_interleaved(cx_nv, 2, 48000);
+dhvani_comp_process(cx_n, cx_nb);
+assert_eq(vec_get(dhvani_buffer_samples(cx_nb), 0), 0, "NaN in -> 0 out");
+assert_eq(dhvani_is_finite(dhvani_comp_envelope_db(cx_n)), 1, "NaN never reaches the detector");
+# a frame whose gain is not finite (NaN attack coefficient) still zeroes a bad sample
+var cx_g = dhvani_comp_new(dhvani_compparams_default(), 48000);
+DhCompressorParams_set_attack_ms(DhCompressor_params(cx_g), cx_nan);
+var cx_gv = vec_new(); vec_push(cx_gv, 0.25); vec_push(cx_gv, DH_NEG_INF);   # frame 0 poisons the envelope
+var cx_gb = dhvani_buffer_from_interleaved(cx_gv, 1, 48000);
+dhvani_comp_process(cx_g, cx_gb);
+assert_eq(dhvani_is_finite(dhvani_comp_envelope_db(cx_g)), 0, "(the NaN coefficient left no finite gain)");
+assert_eq(vec_get(dhvani_buffer_samples(cx_gb), 1), 0, "-Inf -> 0 even with no gain applied");
+
+# ---- validate_rejects_nan ----
+# The oracle's `ratio < 1.0` / `attack_ms < 0.0` tests let a NaN through.
+test_group("validate_rejects_nan");
+fn cx_pv(ratio, attack, release, knee) {
+    return dhvani_compparams_validate(dhvani_compparams_new(f64_neg(20.0), ratio, attack, release, 0, knee, 1.0));
+}
+var cx_bad = DHVANI_ERR_INVALID_PARAMETER;
+assert_eq(cx_pv(cx_nan, 10.0, 100.0, 0), cx_bad, "NaN ratio");
+assert_eq(cx_pv(4.0, cx_nan, 100.0, 0), cx_bad, "NaN attack");
+assert_eq(cx_pv(4.0, 10.0, cx_nan, 0), cx_bad, "NaN release");
+assert_eq(cx_pv(4.0, 10.0, 100.0, cx_nan), cx_bad, "NaN knee");
+var cx_np = dhvani_compparams_new(f64_neg(20.0), cx_nan, 10.0, 100.0, 0, 0, 1.0);
+assert_eq(dhvani_comp_new(cx_np, 48000), 0, "new() refuses NaN ratio");
+assert_eq(cx_pv(1.0, 0, 0, 0), DHVANI_ERR_NONE, "bounds inclusive");
+
+# ---- params_owned ----
+# The oracle takes CompressorParams by value; the port stored the caller's handle, so a
+# later write to it (ratio 0.5: an expander) skipped validate().
+test_group("params_owned");
+var cx_p = dhvani_compparams_default();
+var cx_o = dhvani_comp_new(cx_p, 48000);
+DhCompressorParams_set_ratio(cx_p, F64_HALF);
+assert_eq(DhCompressorParams_ratio(DhCompressor_params(cx_o)), 4.0, "new(): ratio still 4");
+var cx_q = dhvani_compparams_new(f64_neg(10.0), 2.0, 5.0, 50.0, 0, 0, 1.0);
+var cx_u = alloc_used();
+assert_eq(dhvani_comp_set_params(cx_o, cx_q), DHVANI_ERR_NONE, "set_params ok");
+assert_eq(alloc_used() - cx_u, 0, "set_params allocates nothing");
+DhCompressorParams_set_ratio(cx_q, F64_HALF);
+assert_eq(DhCompressorParams_ratio(DhCompressor_params(cx_o)), 2.0, "set_params(): ratio still 2");
+
+# ---- process_matches_reference ----
+# The 2.3.2 loop, verbatim (vec_get/vec_set, dh_max_ignore_nan, compute_gain per
+# frame): the hoisted, storage-walking process() gives the same bits on finite input.
+fn cx_old_process(self, buf) {
+    var p = DhCompressor_params(self);
+    if (f64_le(DhCompressorParams_ratio(p), 1.0) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    var sr = f64_from(DhCompressor_sample_rate(self));
+    var attack_coeff = time_constant(DhCompressorParams_attack_ms(p), sr);
+    var release_coeff = time_constant(DhCompressorParams_release_ms(p), sr);
+    var makeup_lin = db_to_amplitude(DhCompressorParams_makeup_gain_db(p));
+    var mix = f64_clamp(DhCompressorParams_mix(p), 0, 1.0);
+    var dry = f64_sub(1.0, mix);
+    var env_db = DhCompressor_envelope_db(self);
+    var frame = 0;
+    while (frame < frames) {
+        var peak = 0;
+        var c = 0;
+        while (c < ch) {
+            peak = dh_max_ignore_nan(peak, f64_abs(vec_get(samples, frame * ch + c)));
+            c = c + 1;
+        }
+        var input_db = f64_max(amplitude_to_db(peak), f64_neg(120.0));
+        var coeff = release_coeff;
+        if (f64_gt(input_db, env_db) == 1) { coeff = attack_coeff; }
+        env_db = f64_add(f64_mul(coeff, env_db), f64_mul(f64_sub(1.0, coeff), input_db));
+        var gain_db = dhvani_comp_compute_gain(self, env_db);
+        DhCompressor_set_gain_reduction_db(self, gain_db);
+        if (dhvani_is_finite(gain_db) == 1) {
+            var gain_lin = f64_mul(db_to_amplitude(gain_db), makeup_lin);
+            var c2 = 0;
+            while (c2 < ch) {
+                var idx = frame * ch + c2;
+                var dry_sample = vec_get(samples, idx);
+                var wet_sample = f64_mul(dry_sample, gain_lin);
+                var out = f64_add(f64_mul(dry_sample, dry), f64_mul(wet_sample, mix));
+                if (dhvani_is_finite(out) == 0) { out = 0; }
+                vec_set(samples, idx, out);
+                c2 = c2 + 1;
+            }
+        }
+        frame = frame + 1;
+    }
+    DhCompressor_set_envelope_db(self, env_db);
+    return 0;
+}
+test_group("process_matches_reference");
+var cx_rp = dhvani_compparams_new(f64_neg(18.0), 3.0, 2.0, 40.0, 3.0, 6.0, 0.7);
+var cx_rn = dhvani_comp_new(cx_rp, 48000);
+var cx_ro = dhvani_comp_new(cx_rp, 48000);
+var cx_rok = 1;
+var cx_rb = 0;
+while (cx_rb < 3) {
+    var cx_ba = cx_stereo(500, cx_rb * 500);
+    var cx_bb = cx_stereo(500, cx_rb * 500);
+    var cx_ru = alloc_used();
+    dhvani_comp_process(cx_rn, cx_ba);
+    if (alloc_used() != cx_ru) { cx_rok = 0; }
+    cx_old_process(cx_ro, cx_bb);
+    var cx_sa = dhvani_buffer_samples(cx_ba);
+    var cx_sb = dhvani_buffer_samples(cx_bb);
+    var cx_ri = 0;
+    while (cx_ri < 1000) { if (vec_get(cx_sa, cx_ri) != vec_get(cx_sb, cx_ri)) { cx_rok = 0; } cx_ri = cx_ri + 1; }
+    if (dhvani_comp_envelope_db(cx_rn) != dhvani_comp_envelope_db(cx_ro)) { cx_rok = 0; }
+    if (dhvani_comp_gain_reduction_db(cx_rn) != dhvani_comp_gain_reduction_db(cx_ro)) { cx_rok = 0; }
+    cx_rb = cx_rb + 1;
+}
+assert_eq(cx_rok, 1, "bit-identical to the 2.3.2 loop (samples, envelope, gain reduction), 0 bytes");
+
 var rc = assert_summary();
 syscall(60, rc);

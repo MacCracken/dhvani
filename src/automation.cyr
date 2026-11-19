@@ -2,6 +2,16 @@
 # Ports rust-old/src/dsp/automation.rs. L0, deps error only (+ F64_PI stdlib).
 # CurveType enum -> codes; the Exponential(f32) payload becomes a separate `exp`
 # field on the breakpoint. serde dropped.
+#
+# Breakpoint search is the oracle's `binary_search_by_key(&frame, |b| b.frame)
+# .unwrap_or_else(|i| i)`, answered the way rust-old's toolchain answers it (1.89,
+# checked again on 1.100): Ok(the LAST breakpoint at that frame) when there is one,
+# else Err(the insertion point). That decides where add() puts a breakpoint at a frame
+# already taken (just before the last one there, so the first one added stays last)
+# and which pair value_at() interpolates between. Through 2.3.2 the port appended
+# same-frame breakpoints in insertion order and scanned linearly for the first
+# breakpoint >= the query, so a jump authored as two breakpoints at one frame
+# interpolated from the wrong one.
 
 var DH_CURVE_STEP        = 0;
 var DH_CURVE_LINEAR      = 1;
@@ -58,42 +68,66 @@ fn dhvani_auto_new(default_value) {
     return self;
 }
 
-# add(bp) -- insert keeping breakpoints sorted by frame (insertion bubble).
+# Index of the first breakpoint whose frame is > `frame` (binary search; the lane is
+# kept sorted by add()).
+#must_use
+fn dh_auto_upper(bps, frame) {
+    var lo = 0;
+    var hi = vec_len(bps);
+    while (lo < hi) {
+        var mid = lo + (hi - lo) / 2;
+        if (DhBreakpoint_frame(vec_get(bps, mid)) <= frame) { lo = mid + 1; } else { hi = mid; }
+    }
+    return lo;
+}
+
+# The oracle's binary_search_by_key(&frame).unwrap_or_else(|i| i) (see the header): the
+# last breakpoint at `frame` if there is one, else the insertion point.
+#must_use
+fn dh_auto_search(bps, frame) {
+    var ub = dh_auto_upper(bps, frame);
+    if (ub > 0) {
+        if (DhBreakpoint_frame(vec_get(bps, ub - 1)) == frame) { return ub - 1; }
+    }
+    return ub;
+}
+
+# add(bp) -- insert at the oracle's search position, keeping the lane sorted by frame.
 fn dhvani_auto_add(self, bp) {
     var bps = DhAutomationLane_breakpoints(self);
+    var pos = dh_auto_search(bps, DhBreakpoint_frame(bp));
     vec_push(bps, bp);
     var i = vec_len(bps) - 1;
-    var moving = 1;
-    while (moving == 1) {
-        if (i == 0) { moving = 0; }
-        else {
-            var left = vec_get(bps, i - 1);
-            if (DhBreakpoint_frame(left) > DhBreakpoint_frame(bp)) {
-                vec_set(bps, i, left);
-                vec_set(bps, i - 1, bp);
-                i = i - 1;
-            } else { moving = 0; }
-        }
+    while (i > pos) {
+        vec_set(bps, i, vec_get(bps, i - 1));
+        i = i - 1;
     }
+    vec_set(bps, pos, bp);
     return 0;
 }
 
-# remove_at(frame) -- drop all breakpoints at `frame`.
+# remove_at(frame) -- drop all breakpoints at `frame`, compacting in place (the
+# oracle's retain; no new vec).
 fn dhvani_auto_remove_at(self, frame) {
     var bps = DhAutomationLane_breakpoints(self);
-    var kept = vec_new();
     var n = vec_len(bps);
+    var kept = 0;
     var i = 0;
     while (i < n) {
         var bp = vec_get(bps, i);
-        if (DhBreakpoint_frame(bp) != frame) { vec_push(kept, bp); }
+        if (DhBreakpoint_frame(bp) != frame) {
+            if (kept != i) { vec_set(bps, kept, bp); }
+            kept = kept + 1;
+        }
         i = i + 1;
     }
-    DhAutomationLane_set_breakpoints(self, kept);
+    vec_truncate(bps, kept);
     return 0;
 }
 
-fn dhvani_auto_clear(self) { DhAutomationLane_set_breakpoints(self, vec_new()); return 0; }
+# clear -- drop every breakpoint, keeping the vec (no allocation).
+fn dhvani_auto_clear(self) { vec_truncate(DhAutomationLane_breakpoints(self), 0); return 0; }
+
 #inline
 #must_use
 fn dhvani_auto_len(self) { return vec_len(DhAutomationLane_breakpoints(self)); }
@@ -119,12 +153,7 @@ fn dhvani_auto_value_at(self, frame) {
     }
     var last = vec_get(bps, n - 1);
     if (frame >= DhBreakpoint_frame(last)) { return DhBreakpoint_value(last); }
-    # first index with frame >= query (binary-search insertion point)
-    var idx = 0;
-    var found = 0;
-    while (found == 0) {
-        if (DhBreakpoint_frame(vec_get(bps, idx)) >= frame) { found = 1; } else { idx = idx + 1; }
-    }
+    var idx = dh_auto_search(bps, frame);
     if (idx == 0) { return DhBreakpoint_value(first); }
     var prev = vec_get(bps, idx - 1);
     var next = vec_get(bps, idx);
@@ -155,7 +184,8 @@ fn dhvani_auto_render_fast(self, output, start_frame) {
         while (j < n) { vec_set(output, j, dv); j = j + 1; }
         return 0;
     }
-    var seg_idx = 0;
+    # seeded by the oracle's search, then walked forward (O(log n + block) per call)
+    var seg_idx = dh_auto_search(bps, start_frame);
     var i = 0;
     while (i < n) {
         var frame = start_frame + i;

@@ -1,6 +1,7 @@
 # beat.cyr -- Beat and tempo detection via autocorrelation of the onset
 # strength function. Ports rust-old/src/analysis/beat.rs. L1: deps error +
-# simd + buffer + abaco + analysis + fft + stft (dhvani_stft).
+# simd + buffer + abaco + analysis + fft + stft (dhvani_stft) + onset
+# (dhvani_spectral_flux).
 #
 # BeatResult had bpm (f32), confidence (f32), beat_positions (Vec<usize>).
 # Here bpm/confidence are f64 slots and beat_positions is a `vec` of integer
@@ -9,9 +10,9 @@
 # other early-return Ok(empty/zero) cases return a valid (non-null) handle with
 # bpm=0, confidence=0, empty beat_positions.
 #
-# The onset strength envelope here is spectral flux over EVERY STFT frame
-# (envelope[0] = 0), normalized by its peak -- distinct from onset.cyr's
-# peak-picked detect_onsets, so it is recomputed inline against dhvani_stft.
+# The onset strength envelope is spectral flux over EVERY STFT frame
+# (envelope[0] = 0), normalized by its peak -- exactly the flux onset.cyr's
+# detect_onsets peak-picks, so both use dhvani_spectral_flux (onset.cyr).
 
 #derive(accessors)
 struct DhBeatResult { bpm; confidence; beat_positions; }
@@ -56,41 +57,7 @@ fn dhvani_beat_zero_result() {
 fn dhvani_beat_onset_strength_envelope(buf, window_size, hop_size) {
     var sg = dhvani_stft(buf, window_size, hop_size);
     if (sg == 0) { return 0; }
-
-    var num_frames = dhvani_spectrogram_num_frames(sg);
-    if (num_frames < 2) { return vec_new(); }
-
-    var num_bins = dhvani_spectrogram_num_bins(sg);
-
-    var envelope = vec_new();
-    vec_push(envelope, 0); # first frame has no previous
-
-    var i = 1;
-    while (i < num_frames) {
-        var flux = 0;
-        var cur = dhvani_spectrogram_frame(sg, i);
-        var prev = dhvani_spectrogram_frame(sg, i - 1);
-        var bin = 0;
-        while (bin < num_bins) {
-            var diff = f64_sub(vec_get(cur, bin), vec_get(prev, bin));
-            if (f64_gt(diff, 0) == 1) { flux = f64_add(flux, diff); }
-            bin = bin + 1;
-        }
-        vec_push(envelope, flux);
-        i = i + 1;
-    }
-
-    # Normalize by peak (fold over 0.0, so >= 0).
-    var env_len = vec_len(envelope);
-    var max_flux = 0;
-    var m = 0;
-    while (m < env_len) { max_flux = f64_max(max_flux, vec_get(envelope, m)); m = m + 1; }
-    if (f64_gt(max_flux, 0) == 1) {
-        var n = 0;
-        while (n < env_len) { vec_set(envelope, n, f64_div(vec_get(envelope, n), max_flux)); n = n + 1; }
-    }
-
-    return envelope;
+    return dhvani_spectral_flux(sg);
 }
 
 # Autocorrelation of a signal over a lag range. result has length max_lag+1;
@@ -151,7 +118,9 @@ fn dhvani_beat_extract_beats(buf, onset_env, hop_size, period_frames) {
     if (env_len == 0) { return beats; }
 
     var half_window = period_frames / 4;
-    var total = f64_to(f64_mul(f64_from(DhAudioBuffer_frames(buf)), f64_from(DhAudioBuffer_channels(buf))));
+    # buf.frames * buf.channels (interleaved sample count; the oracle compares a
+    # mono-frame position against it -- kept for parity).
+    var total = DhAudioBuffer_frames(buf) * DhAudioBuffer_channels(buf);
 
     var pos = 0;
     while (pos < env_len) {
@@ -208,10 +177,11 @@ fn dhvani_detect_tempo(buf, min_bpm, max_bpm) {
     var min_lag = f64_to(f64_trunc(f64_div(f64_mul(onset_sr, 60.0), max_bpm)));
     # max_lag = (onset_sr * 60 / min_bpm) as usize
     var max_lag = f64_to(f64_trunc(f64_div(f64_mul(onset_sr, 60.0), min_bpm)));
-    # Rust's float->int `as usize` SATURATES (negative -> 0), so min_lag/max_lag
-    # could never go negative there. Cyrius f64_to truncates, so a negative or
-    # NaN bpm yields a negative lag that reaches vec_get as a negative index and
-    # aborts the process. Reproduce the saturating cast to keep oracle parity.
+    # Rust's float->int `as usize` SATURATES to 0..=usize::MAX. f64_to saturates
+    # too (NaN -> 0, +inf / too large -> i64::MAX, so min_bpm = 0 still means "no
+    # lower bound" and max_bpm = 0 an empty range, as in the oracle), but its
+    # range is signed: a negative bpm gives a negative lag, which reached vec_get
+    # as a negative index and aborted. Clamp it to usize's floor of 0.
     if (min_lag < 0) { min_lag = 0; }
     if (max_lag < 0) { max_lag = 0; }
     # max_lag = max_lag.min(onset_env.len() / 2)
@@ -224,13 +194,14 @@ fn dhvani_detect_tempo(buf, min_bpm, max_bpm) {
     var autocorr = dhvani_beat_autocorrelation(onset_env, min_lag, max_lag);
 
     # Step 3: find peak -> dominant tempo.
-    var best_lag_p = alloc(8);
-    var best_val_p = alloc(8);
-    var max_val_p = alloc(8);
-    dhvani_beat_find_peak(autocorr, min_lag, best_lag_p, best_val_p, max_val_p);
-    var best_lag = load64(best_lag_p);
-    var best_val = load64(best_val_p);
-    var max_val = load64(max_val_p);
+    # out-slots on the stack (a heap alloc(8) per slot leaked under the bump allocator)
+    var best_lag_p[8];
+    var best_val_p[8];
+    var max_val_p[8];
+    dhvani_beat_find_peak(autocorr, min_lag, &best_lag_p, &best_val_p, &max_val_p);
+    var best_lag = load64(&best_lag_p);
+    var best_val = load64(&best_val_p);
+    var max_val = load64(&max_val_p);
 
     if (f64_le(max_val, 0) == 1) { return dhvani_beat_zero_result(); }
 

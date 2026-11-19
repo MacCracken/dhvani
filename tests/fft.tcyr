@@ -33,14 +33,16 @@ assert_eq(z1, 1, "silence mags all 0");
 # ---- sine_dominant_frequency ----
 test_group("sine_dominant_frequency");
 var f2 = dhvani_fft_spectrum(make_sine(440.0, 44100, 4096), 4096);
-assert(f64_lt(f64_abs(f64_sub(dhvani_spectrum_dominant_frequency(f2), 440.0)), f64_mul(dhvani_spectrum_freq_resolution(f2), 2.0)), "dominant ~440");
+var f2_err = f64_abs(f64_sub(dhvani_spectrum_dominant_frequency(f2), 440.0));
+assert(f64_lt(f2_err, f64_mul(dhvani_spectrum_freq_resolution(f2), 2.0)), "dominant ~440");
 
 # ---- fft_matches_dft_roughly ----
 test_group("fft_matches_dft_roughly");
 var sig = make_sine(1000.0, 44100, 1024);
 var sdft = dhvani_analysis_spectrum_dft(sig, 1024);
 var sfft = dhvani_fft_spectrum(sig, 1024);
-assert(f64_lt(f64_abs(f64_sub(dhvani_spectrum_dominant_frequency(sdft), dhvani_spectrum_dominant_frequency(sfft))), f64_mul(dhvani_spectrum_freq_resolution(sfft), 2.0)), "DFT and FFT agree on dominant");
+var dom_gap = f64_abs(f64_sub(dhvani_spectrum_dominant_frequency(sdft), dhvani_spectrum_dominant_frequency(sfft)));
+assert(f64_lt(dom_gap, f64_mul(dhvani_spectrum_freq_resolution(sfft), 2.0)), "DFT and FFT agree on dominant");
 
 # ---- non_power_of_two_handled ----
 test_group("non_power_of_two_handled");
@@ -50,7 +52,79 @@ assert(dhvani_spectrum_bin_count(f4) <= 512, "1000 rounds down to <= 512 bins");
 # ---- frequency_resolution_correct ----
 test_group("frequency_resolution_correct");
 var f5 = dhvani_fft_spectrum(dhvani_buffer_silence(1, 2048, 48000), 2048);
-assert(near(dhvani_spectrum_freq_resolution(f5), f64_div(f64_from(48000), f64_from(2048)), 0.1), "48000/2048 Hz per bin");
+var f5_want = f64_div(f64_from(48000), f64_from(2048));
+assert(near(dhvani_spectrum_freq_resolution(f5), f5_want, 0.1), "48000/2048 Hz per bin");
+
+# ================================================================
+# 2.3.2 audit regressions (not in rust-old)
+# ================================================================
+
+# deterministic pseudo-random f64 in [-1, 1) (LCG), state in a 1-slot vec.
+fn lcg_next(st) {
+    var x = vec_get(st, 0) * 6364136223846793005 + 1442695040888963407;
+    vec_set(st, 0, x);
+    var r = (x >> 11) & 0xFFFFFFFFFFFFF;
+    return f64_sub(f64_mul(f64_div(f64_from(r), 4503599627370496.0), 2.0), 1.0);
+}
+
+# 1 if the table-driven dhvani_fft_in_place is bit-identical to the scalar
+# oracle (the pre-2.3.2 per-butterfly cos/sin loop) on an n-point input.
+fn fft_bits_match(n, seed) {
+    var st = vec_new(); vec_push(st, seed);
+    var r1 = dh_vec_zeros(n); var i1 = dh_vec_zeros(n);
+    var r2 = dh_vec_zeros(n); var i2 = dh_vec_zeros(n);
+    var i = 0;
+    while (i < n) {
+        var a = lcg_next(st); var b = lcg_next(st);
+        vec_set(r1, i, a); vec_set(r2, i, a); vec_set(i1, i, b); vec_set(i2, i, b);
+        i = i + 1;
+    }
+    if (dhvani_fft_in_place(r1, i1) != 1) { return 0; }
+    if (dhvani_fft_in_place_scalar(r2, i2) != 1) { return 0; }
+    var k = 0;
+    while (k < n) {
+        if (vec_get(r1, k) != vec_get(r2, k)) { return 0; }
+        if (vec_get(i1, k) != vec_get(i2, k)) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# ---- fft_table_bit_identical ----
+# Twiddle tables are evaluated with the loop's own accumulated-angle expression,
+# so every size (cached <= 2^16, uncached above) matches the oracle bit for bit,
+# on the first (table-building) and a repeat (cached) call.
+test_group("fft_table_bit_identical");
+var fsz = 1;
+var fok = 1;
+while (fsz <= 4096) {
+    if (fft_bits_match(fsz, fsz + 7) == 0) { fok = 0; }
+    if (fft_bits_match(fsz, fsz + 99) == 0) { fok = 0; }
+    fsz = fsz << 1;
+}
+assert_eq(fok, 1, "sizes 1..4096, first + cached call, bit-identical to scalar oracle");
+assert_eq(fft_bits_match(131072, 5), 1, "2^17 (uncached path) bit-identical");
+assert_eq(dhvani_fft_in_place(dh_vec_zeros(1000), dh_vec_zeros(1000)), 0, "non-pow2 still rejected");
+assert_eq(dhvani_fft_in_place(dh_vec_zeros(8), dh_vec_zeros(4)), 0, "mismatched still rejected");
+assert_eq(dhvani_fft_in_place(vec_new(), vec_new()), 0, "empty still rejected");
+
+# ---- next_pow2_cap ----
+# Pre-fix: the doubling wrapped to i64::MIN then 0 for v > 2^62 -> infinite loop.
+test_group("next_pow2_cap");
+assert_eq(dh_next_pow2(1000), 1024, "next_pow2(1000) = 1024");
+assert_eq(dh_next_pow2(1), 1, "next_pow2(1) = 1");
+assert_eq(dh_next_pow2(0x4000000000000000), 0x4000000000000000, "2^62 is its own next power");
+assert_eq(dh_next_pow2(0x4000000000000001), 0, "> 2^62 -> 0 (no 2^63 in i64), terminates");
+
+# ---- fft_spectrum_window_cap ----
+# Pre-fix: window_size > 2^28 aborted in the vec layer even on a 10-sample buffer,
+# and a non-pow2 size > 2^62 hung in dh_next_pow2.
+test_group("fft_spectrum_window_cap");
+var tiny = dhvani_buffer_from_interleaved(fill_np(10, 0.5), 1, 44100);
+assert_eq(dhvani_fft_spectrum(tiny, 0x20000000), 0, "2^29 window -> 0, no abort");
+assert_eq(dhvani_fft_spectrum(tiny, 0x4000000000000001), 0, "non-pow2 > 2^62 -> 0, no hang");
+assert_eq(dhvani_fft_spectrum(tiny, DH_MAX_FFT + 1), 0, "DH_MAX_FFT + 1 -> 0");
+assert(dhvani_fft_spectrum(tiny, 16) != 0, "small window still ok");
 
 var rc = assert_summary();
 syscall(60, rc);

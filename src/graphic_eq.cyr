@@ -9,12 +9,21 @@
 # ISO_BANDS / BAND_NAMES are functions returning the i-th entry (Cyrius has no
 # static array tables; a small if-chain is the idiom, mirroring dhvani_err_name).
 #
-# rebuild() -- ALLOC-FREE: the inner ParametricEq always has exactly 10 bands
-# (one per ISO frequency), so rebuild() reuses it via in-place
-# dhvani_eq_set_band on each band rather than allocating a fresh ParametricEq
-# every load_preset/set_band call. The bump allocator never frees, so replacing
-# the inner eq per parameter change would leak a full eq (10 biquads + configs)
-# each time. set_band recomputes only that band's coeffs and swaps its config.
+# rebuild() -- ALLOC-FREE (0 bytes per call): the inner ParametricEq always has
+# exactly 10 bands (one per ISO frequency), so rebuild() rewrites each band's
+# eq-owned config (gain, enabled) and coefficients in place
+# (dhvani_biquad_set_params) instead of allocating a fresh ParametricEq per
+# load_preset / set_band / set_settings -- the bump allocator never frees, so a
+# fresh eq per parameter change would leak 10 biquads + configs each time. Like the
+# oracle's fresh ParametricEq, rebuild() also ZEROES every band's filter state.
+#
+# Settings are instance-owned: new() starts from the default, load_preset() fills
+# the owned settings in place, set_settings() copies the caller's settings in (the
+# oracle moves them), so a caller mutating its own handle afterwards changes
+# nothing. dhvani_geq_settings() returns the LIVE owned handle (no per-call copy);
+# editing it -- e.g. dhvani_geq_settings_set_band(dhvani_geq_settings(eq), b, g) --
+# is picked up by the next process(), which rebuilds when the gains differ from the
+# ones last applied (the same rebuild set_band does, filter state zeroed).
 # serde round-trip + Display tests are the only drops.
 
 # GRAPHIC_EQ_Q = 1.4 (exact hex; 1.4 has no finite binary form so the decimal literal would misparse)
@@ -89,8 +98,9 @@ fn dhvani_geq_settings_is_flat(self) {
 }
 
 # set_band(band, gain_db) -- set a band's gain, clamped to [-12, 12]. No-op if
-# band >= 10.
+# band is outside 0..9.
 fn dhvani_geq_settings_set_band(self, band, gain_db) {
+    if (band < 0) { return 0; }
     if (band < 10) {
         vec_set(DhGraphicEqSettings_bands(self), band,
           f64_clamp(gain_db, f64_neg(DH_GEQ_MAX_GAIN), DH_GEQ_MAX_GAIN));
@@ -98,11 +108,11 @@ fn dhvani_geq_settings_set_band(self, band, gain_db) {
     return 0;
 }
 
-# preset(name) -- named preset. Unknown names -> flat (all 0), enabled=true.
+# write preset `name`'s 10 gains into the 10-slot vec b (unknown -> all 0).
 #                          31   62  125  250  500   1k   2k   4k   8k  16k
-#must_use
-fn dhvani_geq_settings_preset(name) {
-    var b = dh_vec_zeros(10);
+fn dh_geq_preset_fill(b, name) {
+    var z = 0;
+    while (z < 10) { vec_set(b, z, 0); z = z + 1; }
     if (streq(name, "rock") == 1) {
         vec_set(
           b,
@@ -141,6 +151,14 @@ fn dhvani_geq_settings_preset(name) {
         vec_set(b, 5, 1.0); vec_set(b, 6, 2.0); vec_set(b, 7, 3.0); vec_set(b, 8, 2.0); vec_set(b, 9, 1.0);
     }
     # else: unknown -> all zeros (already zeroed).
+    return 0;
+}
+
+# preset(name) -- named preset. Unknown names -> flat (all 0), enabled=true.
+#must_use
+fn dhvani_geq_settings_preset(name) {
+    var b = dh_vec_zeros(10);
+    dh_geq_preset_fill(b, name);
     var s = alloc(sizeof(DhGraphicEqSettings));
     DhGraphicEqSettings_set_bands(s, b);
     DhGraphicEqSettings_set_enabled(s, 1);
@@ -170,11 +188,28 @@ fn dhvani_geq_preset_name(i) {
 #inline
 #must_use
 fn dhvani_geq_settings_bands(self) { return DhGraphicEqSettings_bands(self); }
-# band gain at index i (0 if out of range).
-#inline
+# band gain at index i (0 if outside 0..9).
 #must_use
 fn dhvani_geq_settings_band(self, i) {
+    if (i < 0) { return 0; }
     if (i < 10) { return vec_get(DhGraphicEqSettings_bands(self), i); }
+    return 0;
+}
+
+# copy src's 10 gains + enabled into dst (no allocation). A caller-built settings
+# whose bands vec is shorter than 10 reads as 0 dB for the missing bands.
+fn dh_geq_settings_copy_into(dst, src) {
+    var db = DhGraphicEqSettings_bands(dst);
+    var sb = DhGraphicEqSettings_bands(src);
+    var n = dh_imin(vec_len(sb), 10);
+    var i = 0;
+    while (i < 10) {
+        var g = 0;
+        if (i < n) { g = vec_get(sb, i); }
+        vec_set(db, i, g);
+        i = i + 1;
+    }
+    DhGraphicEqSettings_set_enabled(dst, DhGraphicEqSettings_enabled(src));
     return 0;
 }
 #inline
@@ -182,8 +217,9 @@ fn dhvani_geq_settings_band(self, i) {
 fn dhvani_geq_settings_enabled(self) { return DhGraphicEqSettings_enabled(self); }
 
 # ---- GraphicEq ----
+# applied = the 10 gains the inner eq was last rebuilt with (see header).
 #derive(accessors)
-struct DhGraphicEq { inner; settings; sample_rate; channels; }
+struct DhGraphicEq { inner; settings; sample_rate; channels; applied; }
 
 # build_eq(settings, sample_rate, channels) -- a fresh ParametricEq with 10
 # peaking bands at the ISO frequencies, Q=1.4, each enabled iff |gain| >= 0.01.
@@ -211,67 +247,103 @@ fn dhvani_geq_new(sample_rate, channels) {
     DhGraphicEq_set_inner(self, dhvani_geq_build_eq(settings, sample_rate, channels));
     DhGraphicEq_set_sample_rate(self, sample_rate);
     DhGraphicEq_set_channels(self, channels);
+    DhGraphicEq_set_applied(self, dh_vec_zeros(10));
     return self;
 }
 
-# rebuild -- ALLOC-FREE: re-derive the 10 band configs from the current settings
-# and push them into the existing inner ParametricEq via in-place set_band (only
-# each band's coeffs are recomputed; no eq/biquad allocation). Rust allocated a
-# fresh ParametricEq here; under the bump allocator that leaks, so we mutate.
+# rebuild -- ALLOC-FREE: re-derive the 10 bands from the current settings into
+# the existing inner ParametricEq: each band's owned config gets its gain + enabled
+# flag (|gain| >= 0.01), its coefficients are redesigned in place at the inner
+# eq's rate, and its filter state is zeroed -- the values of the oracle's fresh
+# `build_eq`, with no eq/biquad/config allocation.
 fn dhvani_geq_rebuild(self) {
     var inner = DhGraphicEq_inner(self);
-    var settings = DhGraphicEq_settings(self);
-    var bands = DhGraphicEqSettings_bands(settings);
+    var cfgs = DhParametricEq_configs(inner);
+    var filts = DhParametricEq_filts(inner);
+    var bands = DhGraphicEqSettings_bands(DhGraphicEq_settings(self));
+    var applied = DhGraphicEq_applied(self);
     var i = 0;
     while (i < 10) {
         var gain_db = vec_get(bands, i);
         var enabled = 0;
         if (f64_ge(f64_abs(gain_db), DH_GEQ_FLAT_EPS) == 1) { enabled = 1; }
-        dhvani_eq_set_band(inner, i,
-          dhvani_eq_band_config_new(DH_BAND_PEAKING, dhvani_geq_iso_band(i), gain_db, DH_GEQ_Q, enabled));
+        var cfg = vec_get(cfgs, i);
+        DhEqBandConfig_set_gain_db(cfg, gain_db);
+        DhEqBandConfig_set_enabled(cfg, enabled);
+        var filt = vec_get(filts, i);
+        dhvani_biquad_set_params(filt, DH_BQ_PEAKING, gain_db, dhvani_geq_iso_band(i), DH_GEQ_Q);
+        dhvani_biquad_reset(filt);
+        vec_set(applied, i, gain_db);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 iff the settings' gains differ (bitwise) from the ones last applied.
+#must_use
+fn dh_geq_settings_changed(self) {
+    var bands = DhGraphicEqSettings_bands(DhGraphicEq_settings(self));
+    var applied = DhGraphicEq_applied(self);
+    var i = 0;
+    while (i < 10) {
+        if (vec_get(bands, i) != vec_get(applied, i)) { return 1; }
         i = i + 1;
     }
     return 0;
 }
 
 # process(buf) -- run the 10-band EQ in place. Bypass entirely if flat/disabled.
-# Adapts to a changed sample rate before processing.
-#inline
+# Adapts to a changed sample rate (or to settings edited through the live
+# dhvani_geq_settings handle) with a rebuild before processing.
 fn dhvani_geq_process(self, buf) {
     if (dhvani_geq_settings_is_flat(DhGraphicEq_settings(self)) == 1) { return 0; }
     var bsr = DhAudioBuffer_sample_rate(buf);
     if (bsr != DhGraphicEq_sample_rate(self)) {
         DhGraphicEq_set_sample_rate(self, bsr);
-        # sample rate changed: rebuild inner coeffs at the new rate.
-        dhvani_eq_set_sample_rate(DhGraphicEq_inner(self), bsr);
+        # sample rate changed: move the inner eq + its filters to the new rate
+        # (fields only), then one rebuild designs every band at it.
+        var inner = DhGraphicEq_inner(self);
+        DhParametricEq_set_sample_rate(inner, bsr);
+        var filts = DhParametricEq_filts(inner);
+        var f = 0;
+        while (f < vec_len(filts)) { DhBiquadFilter_set_sample_rate(vec_get(filts, f), bsr); f = f + 1; }
+        dhvani_geq_rebuild(self);
+    } elif (dh_geq_settings_changed(self) == 1) {
         dhvani_geq_rebuild(self);
     }
     dhvani_eq_process(DhGraphicEq_inner(self), buf);
     return 0;
 }
 
-# load_preset(name) -- replace settings with a named preset, rebuild coeffs.
+# load_preset(name) -- fill the owned settings with a named preset (enabled),
+# rebuild coeffs. Zero bytes per call.
 fn dhvani_geq_load_preset(self, name) {
-    DhGraphicEq_set_settings(self, dhvani_geq_settings_preset(name));
+    var settings = DhGraphicEq_settings(self);
+    dh_geq_preset_fill(DhGraphicEqSettings_bands(settings), name);
+    DhGraphicEqSettings_set_enabled(settings, 1);
     dhvani_geq_rebuild(self);
     return 0;
 }
 
-# set_band(band, gain_db) -- set a band's gain, rebuild coeffs.
+# set_band(band, gain_db) -- set a band's gain, rebuild coeffs (state zeroed, as
+# the oracle; an out-of-range band still rebuilds, as the oracle). Zero bytes.
 fn dhvani_geq_set_band(self, band, gain_db) {
     dhvani_geq_settings_set_band(DhGraphicEq_settings(self), band, gain_db);
     dhvani_geq_rebuild(self);
     return 0;
 }
 
-# set_settings(settings) -- apply full settings, rebuild coeffs.
+# set_settings(settings) -- copy the caller's settings into the owned ones (the
+# caller keeps its handle), rebuild coeffs. Zero bytes per call.
 fn dhvani_geq_set_settings(self, settings) {
-    DhGraphicEq_set_settings(self, settings);
+    var own = DhGraphicEq_settings(self);
+    if (settings != own) { dh_geq_settings_copy_into(own, settings); }
     dhvani_geq_rebuild(self);
     return 0;
 }
 
-# settings() -- current settings handle.
+# settings() -- the LIVE owned settings handle (no copy, no allocation). Gains
+# edited through it are applied by the next process() (see header).
 #inline
 #must_use
 fn dhvani_geq_settings(self) { return DhGraphicEq_settings(self); }

@@ -112,5 +112,16 @@ assert_eq(dhvani_lfo_rate(lx), 5.0, "rate = 5.0");
 assert(f64_lt(f64_abs(f64_sub(dhvani_lfo_depth(lx), 0.8)), 0.0000001), "depth = 0.8");
 assert_eq(dhvani_lfo_shape(lx), DH_LFO_SQUARE, "shape = square");
 
+# ---- validate_rejects_nan (2.3.2 hardening) ----
+# The oracle's `rate < 0.0` / `depth < 0.0` let a NaN through; dh_in_range rejects it.
+test_group("validate_rejects_nan");
+var lvn = dhvani_lfo_new(DH_LFO_SINE, 0x7FF8000000000000, 0.5, 44100);
+assert_eq(dhvani_lfo_validate(lvn), DHVANI_ERR_INVALID_PARAMETER, "NaN rate rejected");
+var lvd = dhvani_lfo_new(DH_LFO_SINE, 1.0, 0x7FF8000000000000, 44100);
+assert_eq(dhvani_lfo_validate(lvd), DHVANI_ERR_INVALID_PARAMETER, "NaN depth rejected");
+var lv0 = dhvani_lfo_new(DH_LFO_SINE, 1.0, 0.5, 0);
+assert_eq(dhvani_lfo_validate(lv0), DHVANI_ERR_INVALID_SAMPLE_RATE, "0 Hz rejected");
+assert_eq(dhvani_lfo_validate(dhvani_lfo_new(DH_LFO_SINE, 0, 0, 44100)), DHVANI_ERR_NONE, "rate 0, depth 0 valid");
+
 var rc = assert_summary();
 syscall(60, rc);

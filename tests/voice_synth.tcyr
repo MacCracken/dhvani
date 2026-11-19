@@ -274,5 +274,45 @@ assert(vec_len(kps) > 0, "keypoints not empty");
 assert(f64_ge(SvFormantKeypoint_resistance(vec_get(kps, 0)), 0), "resistance >= 0");
 assert(f64_gt(SvVowelTarget_f1(SvFormantKeypoint_target(vec_get(kps, 0))), 0), "kp f1 > 0");
 
+# ---- bridge_handles (2.3.2) ----
+# svara reads the sequence and voice with no check; a null handle was a wild read.
+test_group("bridge_handles");
+var vh = svara_voice_new_male();
+var sqh = svara_sequence_new();
+svara_sequence_push(sqh, svara_phoneme_event_new(SVARA_PH_VOWEL_A, 0.1, SVARA_STRESS_PRIMARY));
+assert_eq(dhvani_vsynth_render_sequence(0, vh, 44100), 0, "render_sequence(sequence 0) -> 0");
+assert_eq(dhvani_vsynth_render_sequence(sqh, 0, 44100), 0, "render_sequence(voice 0) -> 0");
+assert_eq(dhvani_vsynth_render_phoneme(SVARA_PH_VOWEL_A, 0, 44100, 0.1), 0, "render_phoneme(voice 0) -> 0");
+
+# ---- vocal_tract_alloc (2.3.2) ----
+# one exact allocation per call (push growth was ~2x the payload), and the _into
+# form allocates nothing while producing the same samples.
+test_group("vocal_tract_alloc");
+var vsa = svara_voice_create_glottal_source(vh, f64_from(44100));
+var vta = svara_tract_new(f64_from(44100));
+var vsb = svara_voice_create_glottal_source(vh, f64_from(44100));
+var vtb = svara_tract_new(f64_from(44100));
+var vw0 = dhvani_vsynth_render_vocal_tract(vsa, vta, 1024, 44100);
+var vwb = dhvani_buffer_from_interleaved(dh_vec_zeros(1024), 1, 44100);
+var vwr = dhvani_vsynth_render_vocal_tract_into(vsb, vtb, vwb);
+var va0 = alloc_used();
+var vr = dhvani_vsynth_render_vocal_tract(vsa, vta, 1024, 44100);
+var va1 = alloc_used();
+assert(va1 - va0 <= 8192 + 128, "render_vocal_tract: one exact sample allocation");
+var vib = dhvani_buffer_from_interleaved(dh_vec_zeros(1024), 1, 44100);
+var vb0 = alloc_used();
+assert_eq(dhvani_vsynth_render_vocal_tract_into(vsb, vtb, vib), DHVANI_ERR_NONE, "render_vocal_tract_into ok");
+var vb1 = alloc_used();
+assert_eq(vb1 - vb0, 0, "render_vocal_tract_into allocates nothing");
+var vsame = 1;
+var vk = 0;
+while (vk < 1024) {
+    if (vec_get(dhvani_buffer_samples(vr), vk) != vec_get(dhvani_buffer_samples(vib), vk)) { vsame = 0; }
+    vk = vk + 1;
+}
+assert_eq(vsame, 1, "render_vocal_tract_into == render_vocal_tract for identical state");
+assert_eq(dhvani_vsynth_render_vocal_tract_into(0, vtb, vib), DHVANI_ERR_INVALID_PARAMETER,
+  "render_vocal_tract_into(null source) -> invalid");
+
 var rc = assert_summary();
 syscall(60, rc);

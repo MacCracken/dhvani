@@ -79,5 +79,40 @@ n_engine_note_off(e3, 69);
 var b3 = dhvani_sampler_render_to_buffer(e3, 1, 44100, 44100);
 assert_eq(all_finite(b3), 1, "all finite through release");
 
+# ---- error_handles (2.3.2) ----
+# n_engine_new answers 0 on a refused allocation and n_engine_next_sample reads
+# the engine unchecked: a forwarded 0 was a wild read.
+test_group("error_handles");
+assert_eq(dhvani_sampler_render_to_buffer(0, 2, 64, 44100), 0, "render_to_buffer(engine 0) -> 0");
+assert_eq(dhvani_sampler_render_to_buffer(0 - 3, 2, 64, 44100), 0, "render_to_buffer(negative engine) -> 0");
+var eb = dhvani_buffer_from_interleaved(dh_vec_zeros(8), 2, 44100);
+assert_eq(dhvani_sampler_render_into(0, eb), DHVANI_ERR_INVALID_PARAMETER, "render_into(engine 0) -> invalid");
+
+# ---- render_alloc (2.3.2) ----
+test_group("render_alloc");
+var e4 = make_engine();
+var e5 = make_engine();
+var v4 = n_engine_note_on(e4, 69, 100);
+var v5 = n_engine_note_on(e5, 69, 100);
+var w4 = dhvani_sampler_render_to_buffer(e4, 2, 1024, 44100);
+var wb5 = dhvani_buffer_from_interleaved(dh_vec_zeros(2048), 2, 44100);
+var w5 = dhvani_sampler_render_into(e5, wb5);
+var a0 = alloc_used();
+var r4 = dhvani_sampler_render_to_buffer(e4, 2, 1024, 44100);
+var a1 = alloc_used();
+assert(a1 - a0 <= 16384 + 128, "render_to_buffer: one exact sample allocation");
+var rb5 = dhvani_buffer_from_interleaved(dh_vec_zeros(2048), 2, 44100);
+var b0 = alloc_used();
+assert_eq(dhvani_sampler_render_into(e5, rb5), DHVANI_ERR_NONE, "render_into ok");
+var b1 = alloc_used();
+assert_eq(b1 - b0, 0, "render_into allocates nothing");
+var same = 1;
+var k = 0;
+while (k < 2048) {
+    if (vec_get(dhvani_buffer_samples(r4), k) != vec_get(dhvani_buffer_samples(rb5), k)) { same = 0; }
+    k = k + 1;
+}
+assert_eq(same, 1, "render_into == render_to_buffer for identical engines");
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -161,5 +161,92 @@ var orms14 = dhvani_buffer_rms(buf14);
 dhvani_eq_process(eq14, buf14);
 assert(f64_lt(dhvani_buffer_rms(buf14), f64_mul(orms14, 0.3)), "bandpass attenuates 100Hz off-center");
 
+# ---- negative_index_guards (regression, 2.3.2) ----
+# The oracle's index is a usize; through 2.3.1 the port guarded only
+# `index < len`, so a -1 (the usual "none" sentinel) reached vec_get and aborted
+# the process ("vec: index < 0").
+test_group("negative_index_guards");
+var bands20 = vec_new();
+vec_push(bands20, dhvani_eq_band_config_new(DH_BAND_PEAKING, 1000.0, 3.0, 1.0, 1));
+var eq20 = dhvani_eq_new(bands20, 44100, 1);
+assert_eq(dhvani_eq_band(eq20, 0 - 1), 0, "band(-1) -> none");
+dhvani_eq_set_band(eq20, 0 - 1, dhvani_eq_band_config_new(DH_BAND_NOTCH, 500.0, 0, 1.0, 1));
+assert_eq(dhvani_eq_band_config_band_type(dhvani_eq_band(eq20, 0)), DH_BAND_PEAKING, "set_band(-1) is a no-op");
+dhvani_eq_remove_band(eq20, 0 - 1);
+assert_eq(dhvani_eq_band_count(eq20), 1, "remove_band(-1) is a no-op");
+
+# ---- configs_are_copied (regression, 2.3.2) ----
+# The oracle moves each EqBandConfig in. Through 2.3.1 the port stored the
+# caller's handle, so mutating it later half-applied: `enabled` changed live while
+# the coefficients stayed stale.
+test_group("configs_are_copied");
+var cfg21 = dhvani_eq_band_config_new(DH_BAND_PEAKING, 440.0, 12.0, 1.0, 1);
+var bands21 = vec_new();
+vec_push(bands21, cfg21);
+var eq21 = dhvani_eq_new(bands21, 44100, 1);
+DhEqBandConfig_set_enabled(cfg21, 0);
+DhEqBandConfig_set_gain_db(cfg21, 0);
+assert_eq(dhvani_eq_band_config_enabled(dhvani_eq_band(eq21, 0)), 1, "new() copied the config");
+var buf21 = make_sine(440.0, 44100, 4096);
+var rms21 = dhvani_buffer_rms(buf21);
+dhvani_eq_process(eq21, buf21);
+assert(f64_gt(dhvani_buffer_rms(buf21), f64_mul(rms21, 1.5)), "band still boosts after the caller's edit");
+var cfg21b = dhvani_eq_band_config_new(DH_BAND_LOWPASS, 2000.0, 0, 0.707, 1);
+dhvani_eq_set_band(eq21, 0, cfg21b);
+DhEqBandConfig_set_freq_hz(cfg21b, 9000.0);
+assert_eq(dhvani_eq_band_config_freq_hz(dhvani_eq_band(eq21, 0)), 2000.0, "set_band copied the config");
+dhvani_eq_add_band(eq21, cfg21b);
+DhEqBandConfig_set_q(cfg21b, 3.0);
+assert_eq(dhvani_eq_band_config_q(dhvani_eq_band(eq21, 1)), 0.707, "add_band copied the config");
+
+# ---- set_band_is_alloc_free (regression, 2.3.2) ----
+# Band automation calls set_band per block. Through 2.3.1 every call allocated a
+# fresh coefficient struct (an unbounded leak at the automation rate).
+test_group("set_band_is_alloc_free");
+var eq22 = dhvani_eq_new(bands20, 44100, 2);
+var cfg22 = dhvani_eq_band_config_new(DH_BAND_PEAKING, 1200.0, 4.0, 1.4, 1);
+dhvani_eq_set_band(eq22, 0, cfg22);
+var u22a = alloc_used();
+var k22 = 0;
+while (k22 < 100) {
+    DhEqBandConfig_set_freq_hz(cfg22, f64_add(1000.0, f64_from(k22)));
+    dhvani_eq_set_band(eq22, 0, cfg22);
+    k22 = k22 + 1;
+}
+var u22b = alloc_used();
+assert_eq(u22b - u22a, 0, "100x set_band allocate 0 bytes");
+assert_eq(dhvani_eq_band_config_freq_hz(dhvani_eq_band(eq22, 0)), 1099.0, "last set_band applied");
+
+# ---- mix_blend_walk (2.3.2) ----
+# The dry/wet blend walks the storage; it must equal dry*(1-mix) + wet*mix bit for
+# bit, with wet = the same EQ at full mix.
+test_group("mix_blend_walk");
+var eq23w = dhvani_eq_new(bands20, 44100, 1);
+var eq23m = dhvani_eq_new(bands20, 44100, 1);
+dhvani_eq_set_mix(eq23m, 0.3);
+var dry23 = make_sine(700.0, 44100, 2000);
+var wet23 = make_sine(700.0, 44100, 2000);
+var mix23 = make_sine(700.0, 44100, 2000);
+dhvani_eq_process(eq23w, wet23);
+dhvani_eq_process(eq23m, mix23);
+var sd23 = dhvani_buffer_samples(dry23);
+var sw23 = dhvani_buffer_samples(wet23);
+var sm23 = dhvani_buffer_samples(mix23);
+var bad23 = 0;
+var i23 = 0;
+while (i23 < 2000) {
+    var want23 = f64_add(f64_mul(vec_get(sd23, i23), f64_sub(1.0, 0.3)), f64_mul(vec_get(sw23, i23), 0.3));
+    if (vec_get(sm23, i23) != want23) { bad23 = bad23 + 1; }
+    i23 = i23 + 1;
+}
+assert_eq(bad23, 0, "mix 0.3 == dry*0.7 + wet*0.3, bit for bit");
+var u23a = alloc_used();
+var mix23b = make_sine(700.0, 44100, 2000);
+var u23b = alloc_used();
+dhvani_eq_process(eq23m, mix23b);
+var u23c = alloc_used();
+assert_eq(u23c - u23b, 0, "steady-state mix<1 process allocates 0 bytes");
+assert(u23b - u23a > 0, "sanity: building the input did allocate");
+
 var rc = assert_summary();
 syscall(60, rc);

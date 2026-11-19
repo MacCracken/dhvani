@@ -102,5 +102,76 @@ var buf4 = dhvani_buffer_from_interleaved(samps4, 1, sr4);
 var r4 = dhvani_loudness_measure_r128(buf4);
 assert(f64_ge(dhvani_r128_range_lu(r4), 0.0), "range_lu >= 0");
 
+# ================================================================
+# 2.3.2 audit regressions (not in rust-old)
+# ================================================================
+
+# The pre-2.3.2 O(n^2) insertion sort, kept as the reference order.
+fn ref_insertion_sort(v) {
+    var n = vec_len(v);
+    var i = 1;
+    while (i < n) {
+        var key = vec_get(v, i);
+        var j = i - 1;
+        var cont = 1;
+        while (cont == 1) {
+            if (j < 0) { cont = 0; }
+            elif (f64_gt(vec_get(v, j), key) == 1) {
+                vec_set(v, j + 1, vec_get(v, j));
+                j = j - 1;
+            } else { cont = 0; }
+        }
+        vec_set(v, j + 1, key);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn ref_lra(blocks) {
+    var n = vec_len(blocks);
+    if (n < 2) { return 0; }
+    var sorted = vec_new();
+    var s = 0;
+    while (s < n) { vec_push(sorted, vec_get(blocks, s)); s = s + 1; }
+    ref_insertion_sort(sorted);
+    var nf = f64_from(n);
+    var p10 = vec_get(sorted, f64_to(f64_mul(nf, 0.1)));
+    var p95 = vec_get(sorted, f64_to(f64_min(f64_mul(nf, 0.95), f64_sub(nf, 1.0))));
+    return f64_sub(p95, p10);
+}
+
+# ---- lra_sort_matches_insertion ----
+# 6000 pseudo-random block loudness values (with duplicates and -inf): the
+# vec_sort_by order and the LRA percentiles are bit-identical to the old sort,
+# and the input block list is left untouched.
+test_group("lra_sort_matches_insertion");
+var lb = vec_new();
+var lseed = 987654321;
+var li = 0;
+while (li < 6000) {
+    lseed = lseed * 6364136223846793005 + 1442695040888963407;
+    var lr = (lseed >> 33) & 0x3FF;
+    var lv = f64_sub(f64_div(f64_from(lr), 16.0), 40.0);
+    if ((li % 997) == 0) { lv = DH_NEG_INF; }
+    vec_push(lb, lv);
+    li = li + 1;
+}
+var lb_first = vec_get(lb, 1);
+var lra_new = dhvani_loudness_compute_lra(lb);
+var lra_ref = ref_lra(lb);
+assert_eq(lra_new, lra_ref, "LRA bit-identical to insertion-sort reference");
+assert_eq(vec_get(lb, 1), lb_first, "compute_lra leaves the input unsorted");
+var ls1 = vec_new(); var ls2 = vec_new();
+var lj = 0;
+while (lj < 6000) { vec_push(ls1, vec_get(lb, lj)); vec_push(ls2, vec_get(lb, lj)); lj = lj + 1; }
+dhvani_loudness_sort_asc(ls1);
+ref_insertion_sort(ls2);
+var lsame = 1;
+var lk = 0;
+while (lk < 6000) { if (vec_get(ls1, lk) != vec_get(ls2, lk)) { lsame = 0; } lk = lk + 1; }
+assert_eq(lsame, 1, "sort_asc order bit-identical to insertion sort");
+var l2 = vec_new(); vec_push(l2, f64_neg(20.0)); vec_push(l2, f64_neg(10.0));
+assert_eq(dhvani_loudness_compute_lra(l2), ref_lra(l2), "2 blocks == reference");
+
 var rc = assert_summary();
 syscall(60, rc);

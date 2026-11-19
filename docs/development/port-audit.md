@@ -206,7 +206,7 @@ confirm the link.
 | `dsp/automation` | 349 | B | 10 | Automation curves; closures → loops. |
 | `analysis/waveform` | 155 | D | 5 | Peak/RMS envelope; out-slice. |
 | `analysis/zcr` | 121 | D | 4 | Zero-crossing rate. |
-| `midi/mod` | 642 | E | 16 | Message/status enums → codes; parser; 5 alloc scratch to preallocate. |
+| `midi/mod` | 642 | E | 16 | Message/status enums → codes; parser; 5 alloc scratch to preallocate (2.3.3: the clip queries' `_into` forms). |
 | `midi/voice` | 413 | E | 11 | Voice alloc/steal; **3 abaco const gaps → define locally**. |
 | `capture/mod` | 162 | E | 4 | Config + capture trait; portable (no FFI). |
 | `capture/record` | 319 | E | 12 | WAV/ring recorder; portable (no PipeWire). |
@@ -409,7 +409,9 @@ independently reviewed (hex constants, dry/wet blend, reduction formula) — par
 
 **Wave E (MIDI / meter / capture / graph) — COMPLETE (47/64, 1067 assertions):**
 - ✅ `midi/mod` → `src/midi.cyr` — NoteEvent/CC/MidiEvent(kind-code + fat struct)/
-  MidiClip; bubble-insert sorted add; binary-search range. **51 green** (hand-ported).
+  MidiClip; bubble-insert sorted add; range query by scan (the oracle's
+  `partition_point` over note ends is unsound with varying durations; since 2.3.3 the scan
+  starts from a sound lower bound and stops early). **51 green** (hand-ported).
 - ✅ `midi/voice`(25), `midi/routing`(28→`midi_routing.cyr`), `midi/v2`(4→`midi_v2.cyr`),
   `midi/translate`(273 — full 0..127 roundtrips→`translate.cyr`), `meter`(53,
   atomics→plain fields), `capture/mod`(26→`capture.cyr`), `capture/record`(21→
@@ -418,7 +420,8 @@ independently reviewed (hex constants, dry/wet blend, reduction formula) — par
 - ✅ `graph` → `src/graph.cyr` — RT-safe node graph, the largest module (1174 LOC).
   AudioNode trait → **fn-ptr dispatch** (`DhGraphNode{process_fp;state;flags}` +
   `fncall3`); NodeId atomic → module-level `var DH_GRAPH_NEXT_ID`; HashMap → parallel
-  vecs + linear scan; Kahn topo sort (max-ready-first = Rust's ascending-pop);
+  vecs + linear scan; Kahn topo sort (2.3.3: replicates rust-old's ready queue exactly,
+  partition_point insert included; "max-ready-first" was not Rust's order);
   double-buffered plan swap → shared length-1 pending cell. Dropped
   `process_parallel` (`#[cfg(feature="parallel")]`, rayon). **37 green (20/21 tests)**.
 

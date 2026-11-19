@@ -67,7 +67,11 @@ fn dhvani_stft_hann_window(window_size) {
 }
 
 # shared STFT core: given a precomputed window (len window_size), a buffer, and a
-# hop_size, build the frames vec. Preallocates real/imag scratch ONCE.
+# hop_size (> 0), build the frames vec. Preallocates real/imag scratch ONCE and
+# walks raw storage; per frame only imag is re-zeroed (real is fully overwritten
+# by the windowed samples). Bit-identical to the vec-accessor loop it replaced.
+# The loop bound is `pos <= frames - window_size`, so pos + window_size never
+# overflows however large hop_size is (pos <= frames before every add).
 #must_use
 fn dhvani_stft_run(window, window_size, buf, hop_size) {
     var num_bins = window_size / 2;
@@ -76,38 +80,53 @@ fn dhvani_stft_run(window, window_size, buf, hop_size) {
     var total_mono_frames = DhAudioBuffer_frames(buf);
 
     var frames = vec_new();
+    if (ch < 1) { return frames; }
+    if (hop_size < 1) { return frames; }
+    # never read past the sample storage, whatever the frames field says
+    var avail = vec_len(samples) / ch;
+    if (total_mono_frames > avail) { total_mono_frames = avail; }
+    var last_pos = total_mono_frames - window_size;
     var pos = 0;
     # Pre-allocate scratch buffers ONCE to avoid per-frame heap allocation.
     var real = dh_vec_zeros(window_size);
     var imag = dh_vec_zeros(window_size);
+    if (vec_len(real) != window_size) { return frames; }
+    if (vec_len(imag) != window_size) { return frames; }
+    var sd = dh_vec_data(samples);
+    var wd = dh_vec_data(window);
+    var rd = dh_vec_data(real);
+    var id = dh_vec_data(imag);
+    var stride = ch * 8;
+    var ws_f = f64_from(window_size);
 
-    while ((pos + window_size) <= total_mono_frames) {
-        # zero the scratch (real.fill(0.0); imag.fill(0.0))
+    while (pos <= last_pos) {
+        # imag.fill(0.0); real is overwritten below
         var z = 0;
-        while (z < window_size) { vec_set(real, z, 0); vec_set(imag, z, 0); z = z + 1; }
+        while (z < window_size) { store64(id + z * 8, 0); z = z + 1; }
 
+        var sp = sd + pos * stride;
         var i = 0;
         while (i < window_size) {
-            vec_set(real, i, f64_mul(vec_get(samples, (pos + i) * ch), vec_get(window, i)));
+            store64(rd + i * 8, f64_mul(load64(sp), load64(wd + i * 8)));
+            sp = sp + stride;
             i = i + 1;
         }
 
         if (dhvani_fft_in_place(real, imag) == 0) {
             vec_push(frames, dh_vec_zeros(num_bins));
-            pos = pos + hop_size;
         } else {
             var magnitudes = dh_vec_zeros(num_bins);
+            var md = dh_vec_data(magnitudes);
             var k = 0;
             while (k < num_bins) {
-                var re = vec_get(real, k);
-                var im = vec_get(imag, k);
-                var mag = f64_div(f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im))), f64_from(window_size));
-                vec_set(magnitudes, k, mag);
+                var re = load64(rd + k * 8);
+                var im = load64(id + k * 8);
+                store64(md + k * 8, f64_div(f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im))), ws_f));
                 k = k + 1;
             }
             vec_push(frames, magnitudes);
-            pos = pos + hop_size;
         }
+        pos = pos + hop_size;
     }
     return frames;
 }
@@ -125,13 +144,16 @@ fn dhvani_stft_make_spectrogram(frames, num_bins, sample_rate, window_size, hop_
 }
 
 # stft(buf, window_size, hop_size) -- Hann-windowed spectrogram, or 0 on error.
-# Errors: empty buffer, window_size not a power of two, window_size < 4, hop_size == 0.
+# Errors: empty buffer, window_size not a power of two, window_size < 4 or
+# > DH_MAX_FFT, hop_size <= 0 (rust-old's usize hop could not be negative; a
+# negative hop here walked pos below 0 and aborted the process in vec_get).
 #must_use
 fn dhvani_stft(buf, window_size, hop_size) {
     if (vec_len(DhAudioBuffer_samples(buf)) == 0) { return 0; }
     if (dh_is_pow2(window_size) == 0) { return 0; }
     if (window_size < 4) { return 0; }
-    if (hop_size == 0) { return 0; }
+    if (window_size > DH_MAX_FFT) { return 0; }
+    if (hop_size <= 0) { return 0; }
     var num_bins = window_size / 2;
     var window = dhvani_stft_hann_window(window_size);
     var frames = dhvani_stft_run(window, window_size, buf, hop_size);
@@ -142,11 +164,13 @@ fn dhvani_stft(buf, window_size, hop_size) {
 #derive(accessors)
 struct DhStftProcessor { window; window_size; }
 
-# new(window_size) -- precompute the Hann window; 0 if window not pow2 or < 4.
+# new(window_size) -- precompute the Hann window; 0 if window not pow2, < 4 or
+# > DH_MAX_FFT.
 #must_use
 fn dhvani_stftproc_new(window_size) {
     if (dh_is_pow2(window_size) == 0) { return 0; }
     if (window_size < 4) { return 0; }
+    if (window_size > DH_MAX_FFT) { return 0; }
     var self = alloc(sizeof(DhStftProcessor));
     DhStftProcessor_set_window(self, dhvani_stft_hann_window(window_size));
     DhStftProcessor_set_window_size(self, window_size);
@@ -154,11 +178,11 @@ fn dhvani_stftproc_new(window_size) {
 }
 
 # compute(self, buf, hop_size) -- spectrogram using the cached window, or 0 on error.
-# Errors: empty buffer, hop_size == 0.
+# Errors: empty buffer, hop_size <= 0.
 #must_use
 fn dhvani_stftproc_compute(self, buf, hop_size) {
     if (vec_len(DhAudioBuffer_samples(buf)) == 0) { return 0; }
-    if (hop_size == 0) { return 0; }
+    if (hop_size <= 0) { return 0; }
     var window_size = DhStftProcessor_window_size(self);
     var num_bins = window_size / 2;
     var frames = dhvani_stft_run(DhStftProcessor_window(self), window_size, buf, hop_size);

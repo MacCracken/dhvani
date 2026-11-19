@@ -35,6 +35,8 @@ fn dhvani_waveform_compute(buf, peaks_per_second) {
     var ch = DhAudioBuffer_channels(buf);
     var frames = DhAudioBuffer_frames(buf);
     var samples = DhAudioBuffer_samples(buf);
+    if (ch < 1) { frames = 0; } else { frames = dh_imin(frames, vec_len(samples) / ch); }
+    var d = dh_vec_data(samples);
     var spp = f64_to(f64_ceil(f64_div(f64_from(DhAudioBuffer_sample_rate(buf)), f64_from(pps))));
     if (spp < 1) { spp = 1; }
     var num_peaks = (frames + spp - 1) / spp;   # div_ceil
@@ -50,12 +52,21 @@ fn dhvani_waveform_compute(buf, peaks_per_second) {
         while (c < ch) {
             var min_val = DH_POS_INF;
             var max_val = DH_NEG_INF;
-            var frame = start_frame;
-            while (frame < end_frame) {
-                var sample = vec_get(samples, frame * ch + c);
-                min_val = f64_min(min_val, sample);
-                max_val = f64_max(max_val, sample);
-                frame = frame + 1;
+            # NaN-ignoring folds, as the oracle's f32::min / f32::max: the bare f64_min /
+            # f64_max are asymmetric on NaN, so [0.9, NaN, 0.1] read max 0.1 (2.3.2).
+            # dh_min_ignore_nan / dh_max_ignore_nan inline, with their exact selection
+            # (take x unless acc < x, resp. acc > x, and x is not NaN), so the bits match
+            # them, signed zeros included, without four calls per sample.
+            var p = d + (start_frame * ch + c) * 8;
+            var end = d + (end_frame * ch + c) * 8;
+            var stride = ch * 8;
+            while (p < end) {
+                var sample = load64(p);
+                if (f64_eq(sample, sample) == 1) {
+                    if (f64_lt(min_val, sample) == 0) { min_val = sample; }
+                    if (f64_gt(max_val, sample) == 0) { max_val = sample; }
+                }
+                p = p + stride;
             }
             if (min_val == DH_POS_INF) { min_val = 0; max_val = 0; }
             var chan = vec_get(channels, c);

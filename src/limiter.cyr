@@ -2,6 +2,12 @@
 # Ports rust-old/src/dsp/limiter.rs. L1: deps error + simd + buffer + dsp
 # (soft_knee_gain) + abaco (time_constant, amplitude_to_db, db_to_amplitude).
 # Limiter = inf:1 compression -> soft_knee slope = -1.0. serde + with_* dropped.
+#
+# Hardening beyond the oracle (as in compressor.cyr): the params are COPIED into
+# storage the limiter owns; validate() rejects NaN in every bound; a non-finite sample
+# is left out of the envelope detector and comes out as 0. In the oracle a single +Inf
+# latched envelope_db at +Inf for good, leaving a hard clipper with no release, and a
+# NaN sample passed straight through the "brick wall".
 
 #derive(accessors)
 struct DhLimiterParams { ceiling_db; release_ms; knee_db; mix; }
@@ -22,21 +28,31 @@ fn dhvani_limparams_new(ceiling_db, release_ms, knee_db, mix) {
 #must_use
 fn dhvani_limparams_default() { return dhvani_limparams_new(f64_neg(0.3), 50.0, 0, 1.0); }
 
-# validate -- ceiling <= 0, release/knee >= 0.
+# copy src's fields into dst (a limiter's own params); returns dst.
+fn dh_limparams_copy(dst, src) {
+    DhLimiterParams_set_ceiling_db(dst, DhLimiterParams_ceiling_db(src));
+    DhLimiterParams_set_release_ms(dst, DhLimiterParams_release_ms(src));
+    DhLimiterParams_set_knee_db(dst, DhLimiterParams_knee_db(src));
+    DhLimiterParams_set_mix(dst, DhLimiterParams_mix(src));
+    return dst;
+}
+
+# validate -- ceiling <= 0, release/knee >= 0 (NaN rejected).
 #must_use
 fn dhvani_limparams_validate(p) {
-    if (f64_gt(DhLimiterParams_ceiling_db(p), 0) == 1)    { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_lt(DhLimiterParams_release_ms(p), 0) == 1)    { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_lt(DhLimiterParams_knee_db(p), 0) == 1)       { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhLimiterParams_ceiling_db(p), DH_NEG_INF, 0) == 0)    { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhLimiterParams_release_ms(p), 0, DH_POS_INF) == 0)    { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhLimiterParams_knee_db(p), 0, DH_POS_INF) == 0)       { return DHVANI_ERR_INVALID_PARAMETER; }
     return DHVANI_ERR_NONE;
 }
 
 # ---- EnvelopeLimiter ----
+# new(params, sample_rate) -- handle, or 0 if params invalid. The params are copied.
 #must_use
 fn dhvani_lim_new(params, sample_rate) {
     if (dhvani_is_err(dhvani_limparams_validate(params)) == 1) { return 0; }
     var self = alloc(sizeof(DhEnvelopeLimiter));
-    DhEnvelopeLimiter_set_params(self, params);
+    DhEnvelopeLimiter_set_params(self, dh_limparams_copy(alloc(sizeof(DhLimiterParams)), params));
     DhEnvelopeLimiter_set_envelope_db(self, f64_neg(120.0));
     DhEnvelopeLimiter_set_sample_rate(self, sample_rate);
     DhEnvelopeLimiter_set_bypassed(self, 0);
@@ -50,58 +66,71 @@ fn dhvani_lim_compute_gain(self, env_db) {
     return dhvani_dsp_soft_knee_gain(env_db, DhLimiterParams_ceiling_db(p), DhLimiterParams_knee_db(p), f64_neg(1.0));
 }
 
-# process(buf) -- limit in place with a hard-clamp safety net.
+# process(buf) -- limit in place with a hard-clamp safety net. The gain curve's ceiling
+# and knee are read once per block (dhvani_lim_compute_gain's values, same bits), and the
+# samples are walked in place.
 fn dhvani_lim_process(self, buf) {
     if (DhEnvelopeLimiter_bypassed(self) == 1) { return 0; }
     var p = DhEnvelopeLimiter_params(self);
     var ch = DhAudioBuffer_channels(buf);
     var samples = DhAudioBuffer_samples(buf);
     var frames = DhAudioBuffer_frames(buf);
+    if (ch < 1) { return 0; }
+    frames = dh_imin(frames, vec_len(samples) / ch);
+    if (frames < 1) { return 0; }
     # f64 rate for abaco's time_constant (see dhvani_comp_process).
     var release_coeff = time_constant(DhLimiterParams_release_ms(p), f64_from(DhEnvelopeLimiter_sample_rate(self)));
-    var ceiling_lin = db_to_amplitude(DhLimiterParams_ceiling_db(p));
+    var ceiling_db = DhLimiterParams_ceiling_db(p);
+    var knee = DhLimiterParams_knee_db(p);
+    var neg_one = f64_neg(1.0);
+    var ceiling_lin = db_to_amplitude(ceiling_db);
     var neg_ceiling = f64_neg(ceiling_lin);
     var mix = f64_clamp(DhLimiterParams_mix(p), 0, 1.0);
     var dry = f64_sub(1.0, mix);
+    var floor_db = f64_neg(120.0);
     var env_db = DhEnvelopeLimiter_envelope_db(self);
-    var frame = 0;
-    while (frame < frames) {
+    var stride = ch * 8;
+    var fp = dh_vec_data(samples);
+    var end = fp + frames * stride;
+    while (fp < end) {
+        var fe = fp + stride;
+        # frame peak over the finite samples (a NaN or Inf never reaches the detector)
         var peak = 0;
-        var c = 0;
-        while (c < ch) {
-            peak = dh_max_ignore_nan(peak, f64_abs(vec_get(samples, frame * ch + c)));
-            c = c + 1;
+        var q = fp;
+        while (q < fe) {
+            var a = f64_abs(load64(q));
+            if (f64_lt(a, DH_POS_INF) == 1) {
+                if (f64_gt(a, peak) == 1) { peak = a; }
+            }
+            q = q + 8;
         }
-        var input_db = f64_max(amplitude_to_db(peak), f64_neg(120.0));
+        var input_db = f64_max(amplitude_to_db(peak), floor_db);
         if (f64_gt(input_db, env_db) == 1) {
             env_db = input_db;
         } else {
             env_db = f64_add(f64_mul(release_coeff, env_db), f64_mul(f64_sub(1.0, release_coeff), input_db));
         }
-        var gain_db = dhvani_lim_compute_gain(self, env_db);
+        var gain_db = dhvani_dsp_soft_knee_gain(env_db, ceiling_db, knee, neg_one);
         if (f64_lt(gain_db, 0) == 1) {
             if (dhvani_is_finite(gain_db) == 1) {
                 var gain_lin = db_to_amplitude(gain_db);
-                var c2 = 0;
-                while (c2 < ch) {
-                    var idx = frame * ch + c2;
-                    var dry_sample = vec_get(samples, idx);
-                    vec_set(
-                      samples,
-                      idx,
-                      f64_add(f64_mul(dry_sample, dry), f64_mul(f64_mul(dry_sample, gain_lin), mix)));
-                    c2 = c2 + 1;
+                q = fp;
+                while (q < fe) {
+                    var dry_sample = load64(q);
+                    store64(q, f64_add(f64_mul(dry_sample, dry), f64_mul(f64_mul(dry_sample, gain_lin), mix)));
+                    q = q + 8;
                 }
             }
         }
-        # hard-clamp safety net on every channel
-        var c3 = 0;
-        while (c3 < ch) {
-            var idx3 = frame * ch + c3;
-            vec_set(samples, idx3, f64_clamp(vec_get(samples, idx3), neg_ceiling, ceiling_lin));
-            c3 = c3 + 1;
+        # hard-clamp safety net on every channel; a non-finite sample comes out as 0
+        q = fp;
+        while (q < fe) {
+            var x = load64(q);
+            if (dhvani_is_finite(x) == 0) { x = 0; }
+            store64(q, f64_clamp(x, neg_ceiling, ceiling_lin));
+            q = q + 8;
         }
-        frame = frame + 1;
+        fp = fe;
     }
     DhEnvelopeLimiter_set_envelope_db(self, env_db);
     return 0;
@@ -118,9 +147,10 @@ fn dhvani_lim_is_bypassed(self) { if (DhEnvelopeLimiter_bypassed(self) == 1) { r
 fn dhvani_lim_set_sample_rate(self, sample_rate) { DhEnvelopeLimiter_set_sample_rate(self, sample_rate); return 0; }
 fn dhvani_lim_reset(self) { DhEnvelopeLimiter_set_envelope_db(self, f64_neg(120.0)); return 0; }
 
+# set_params -- validate, then copy into the limiter's own params; error code on invalid.
 fn dhvani_lim_set_params(self, params) {
     var rc = dhvani_limparams_validate(params);
     if (dhvani_is_err(rc) == 1) { return rc; }
-    DhEnvelopeLimiter_set_params(self, params);
+    dh_limparams_copy(DhEnvelopeLimiter_params(self), params);
     return DHVANI_ERR_NONE;
 }

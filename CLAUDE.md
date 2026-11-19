@@ -92,6 +92,15 @@ Full per-module ledger + established conventions live in
   per-sample or per-block heap allocation leaks unboundedly across a render.
   Every process loop must allocate zero bytes/sample; reuse scratch owned by the
   processor struct. (See naad 2.1.0: 4 hot paths fixed to 0 bytes/sample.)
+- **Bounds checks must reject NaN.** Write every `validate()` range with
+  `dh_in_range(x, lo, hi)` (error.cyr), the form of Rust's `(lo..=hi).contains`. The
+  negated `f64_lt(x, lo) || f64_gt(x, hi)` lets NaN through, since both compares are
+  false. Integer indices need `>= 0` as well as `< len`: Rust's `usize` gave the lower
+  bound for free.
+- **A bad sample must not persist in state.** Filter state, delay/reverb rings and meter
+  sums must not keep a NaN/Inf past the sample or block it arrived in (ADR 005). Where
+  the oracle panics, define the behaviour (refuse, pass through, clamp) and record it
+  in ADR 005. Never let a public entry point reach `vec_get`'s `exit(1)`.
 - **f32 → f64** throughout (the hisab/ganita math is f64-only; widening is
   forced and improves precision). Loosen f32-oracle test tolerances where
   bit-exactness isn't meaningful.

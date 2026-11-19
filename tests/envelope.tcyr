@@ -78,5 +78,46 @@ dhvani_env_trigger(e7);
 dhvani_env_tick(e7);
 assert_eq(dhvani_env_state(e7), DH_ENV_ATTACK, "uses new attack (still ramping)");
 
+# ================================================================
+# 2.3.2 hardening regressions (each fails on the 2.3.2 code)
+# ================================================================
+var env_nan = 0x7FF8000000000000;
+
+# ---- validate_rejects_nan ----
+# Rust: !(0.0..=1.0).contains(&sustain) rejects a NaN sustain; the port's negated
+# tests let it through, and the envelope then ticked NaN. The time bounds reject NaN too.
+test_group("validate_rejects_nan");
+assert_eq(dhvani_adsr_validate(dhvani_adsr_new(0.01, 0.1, env_nan, 0.3)), DHVANI_ERR_INVALID_PARAMETER, "NaN sustain");
+assert_eq(dhvani_adsr_validate(dhvani_adsr_new(env_nan, 0.1, 0.7, 0.3)), DHVANI_ERR_INVALID_PARAMETER, "NaN attack");
+assert_eq(dhvani_adsr_validate(dhvani_adsr_new(0.01, env_nan, 0.7, 0.3)), DHVANI_ERR_INVALID_PARAMETER, "NaN decay");
+assert_eq(dhvani_adsr_validate(dhvani_adsr_new(0.01, 0.1, 0.7, env_nan)), DHVANI_ERR_INVALID_PARAMETER, "NaN release");
+assert_eq(dhvani_adsr_validate(dhvani_adsr_new(0, 0, 1.0, 0)), DHVANI_ERR_NONE, "bounds inclusive");
+var env_n1 = dhvani_env_new(dhvani_adsr_default(), 1000);
+var env_bad = dhvani_adsr_new(0, 0, env_nan, 0.3);
+assert_eq(dhvani_env_set_params(env_n1, env_bad), DHVANI_ERR_INVALID_PARAMETER, "set_params rejects NaN sustain");
+dhvani_env_trigger(env_n1);
+var env_t = 0;
+var env_lv = 0;
+while (env_t < 300) { env_lv = dhvani_env_tick(env_n1); env_t = env_t + 1; }
+assert(f64_eq(env_lv, env_lv), "envelope still ticks real levels");
+
+# ---- params_owned ----
+# The oracle takes AdsrParams by value. The port stored the caller's handle, so a
+# later write to it skipped validate(); new() and set_params() now copy.
+test_group("params_owned");
+var env_p = dhvani_adsr_new(0, 0, 0.7, 0.3);
+var env_o = dhvani_env_new(env_p, 1000);
+DhAdsrParams_set_sustain(env_p, env_nan);
+dhvani_env_trigger(env_o);
+var env_k = 0;
+while (env_k < 10) { env_lv = dhvani_env_tick(env_o); env_k = env_k + 1; }
+assert_eq(env_lv, 0.7, "new(): sustain still 0.7 after the caller's handle changed");
+var env_q = dhvani_adsr_new(0, 0, 0.4, 0.3);
+var env_u = alloc_used();
+assert_eq(dhvani_env_set_params(env_o, env_q), DHVANI_ERR_NONE, "set_params ok");
+assert_eq(alloc_used() - env_u, 0, "set_params allocates nothing");
+DhAdsrParams_set_sustain(env_q, 0.9);
+assert_eq(dhvani_env_tick(env_o), 0.4, "set_params(): sustain 0.4, not the handle's later 0.9");
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -49,11 +49,33 @@ fn dhvani_resample_windowed_sinc(x, half_width) {
     return f64_mul(sinc, window);
 }
 
-# resample_sinc(buf, target_rate, quality) -- buffer handle, or 0 on rate==0.
+# 1 iff `buf` can be resampled to `target_rate` without either path walking past
+# memory: both rates in 1..=DH_MAX_SAMPLE_RATE (a 0 Hz source makes the ratio
+# infinite, f64_to then saturates the output frame count, and the old default path
+# stored past the heap), at least one channel, and a vec that really holds
+# frames * channels samples. The oracle checks only target_rate == 0 (and panics
+# or wraps on the rest).
+#must_use
+fn dh_resample_rates_ok(buf, target_rate) {
+    if (target_rate <= 0) { return 0; }
+    if (target_rate > DH_MAX_SAMPLE_RATE) { return 0; }
+    var src_rate = DhAudioBuffer_sample_rate(buf);
+    if (src_rate <= 0) { return 0; }
+    if (src_rate > DH_MAX_SAMPLE_RATE) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    if (ch < 1) { return 0; }
+    var frames = DhAudioBuffer_frames(buf);
+    if (frames < 0) { return 0; }
+    if (frames > vec_len(DhAudioBuffer_samples(buf)) / ch) { return 0; }
+    return 1;
+}
+
+# resample_sinc(buf, target_rate, quality) -- buffer handle, or 0 when
+# dh_resample_rates_ok refuses the shapes.
 # same rate -> clone; empty -> silence. The oracle's default path (see the header).
 #must_use
 fn dhvani_resample_sinc(buf, target_rate, quality) {
-    if (target_rate == 0) { return 0; }
+    if (dh_resample_rates_ok(buf, target_rate) == 0) { return 0; }
     var src_rate = DhAudioBuffer_sample_rate(buf);
     if (target_rate == src_rate) { return dhvani_buffer_clone(buf); }
     var frames = DhAudioBuffer_frames(buf);
@@ -62,6 +84,7 @@ fn dhvani_resample_sinc(buf, target_rate, quality) {
 
     var ratio = f64_div(f64_from(target_rate), f64_from(src_rate));
     var new_frames = f64_to(f64_ceil(f64_mul(f64_from(frames), ratio)));
+    if (new_frames > VEC_CAP_MAX / ch) { return 0; }
     var half_width = dhvani_resample_kernel_half_width(quality);
     # downsampling scales the kernel to avoid aliasing.
     var filter_scale = 1.0;
@@ -73,6 +96,7 @@ fn dhvani_resample_sinc(buf, target_rate, quality) {
     var out = dh_vec_zeros(new_frames * ch);
     # The weight row and the gathered-tap row: once per call, like `out`, never per frame.
     var max_kernel_len = f64_to(f64_ceil(f64_div(f64_from(half_width), filter_scale))) * 2 + 1;
+    if (max_kernel_len > VEC_CAP_MAX) { return 0; }
     var kw = dh_vec_zeros(max_kernel_len);
     var ks = dh_vec_zeros(max_kernel_len);
     var wp = dh_vec_data(kw);
@@ -107,12 +131,17 @@ fn dhvani_resample_sinc(buf, target_rate, quality) {
         var weight_sum = dh_simd_row_sum(wp, kernel_len);
         var c = 0;
         while (c < ch) {
-            var k = 0;
-            while (k < kernel_len) {
-                store64(kp + k * 8, load64(sp + ((first_valid + k) * ch + c) * 8));
-                k = k + 1;
+            # mono taps are already one contiguous row; other layouts gather a channel's
+            var row = sp + first_valid * 8;
+            if (ch > 1) {
+                var k = 0;
+                while (k < kernel_len) {
+                    store64(kp + k * 8, load64(sp + ((first_valid + k) * ch + c) * 8));
+                    k = k + 1;
+                }
+                row = kp;
             }
-            var sum = dh_simd_row_dot(kp, wp, kernel_len);
+            var sum = dh_simd_row_dot(row, wp, kernel_len);
             if (f64_gt(f64_abs(weight_sum), 0.000001) == 1) {
                 store64(op + (frame * ch + c) * 8, f64_div(sum, weight_sum));
             }
@@ -132,7 +161,7 @@ fn dhvani_resample_sinc(buf, target_rate, quality) {
 # same contract, the windowed sinc recomputed per channel and summed left to right.
 #must_use
 fn dhvani_resample_sinc_scalar(buf, target_rate, quality) {
-    if (target_rate == 0) { return 0; }
+    if (dh_resample_rates_ok(buf, target_rate) == 0) { return 0; }
     var src_rate = DhAudioBuffer_sample_rate(buf);
     if (target_rate == src_rate) { return dhvani_buffer_clone(buf); }
     var frames = DhAudioBuffer_frames(buf);
@@ -141,6 +170,7 @@ fn dhvani_resample_sinc_scalar(buf, target_rate, quality) {
 
     var ratio = f64_div(f64_from(target_rate), f64_from(src_rate));
     var new_frames = f64_to(f64_ceil(f64_mul(f64_from(frames), ratio)));
+    if (new_frames > VEC_CAP_MAX / ch) { return 0; }
     var half_width = dhvani_resample_kernel_half_width(quality);
     # downsampling scales the kernel to avoid aliasing.
     var filter_scale = 1.0;

@@ -1,6 +1,7 @@
 # midi_v2.tcyr -- parity tests for src/midi_v2.cyr
 # Ported one-for-one from the 5 #[test] blocks in rust-old/src/midi/v2.rs.
 # DROPPED: serde_roundtrip (Cyrius has no derive-serde; serialization untestable).
+# `v2_init_reuse` is a port regression (zero-alloc `_init` twins).
 
 include "src/error.cyr"
 include "src/midi.cyr"
@@ -30,6 +31,44 @@ assert_eq(dhvani_midi2_per_note_pitch_bend_value(pb1), 0x80000000, "value = cent
 test_group("ump_message_types");
 var mt1 = DH_UMP_MIDI2_CHANNEL_VOICE;
 assert_eq(mt1, DH_UMP_MIDI2_CHANNEL_VOICE, "mt == Midi2ChannelVoice");
+
+# ---- v2_init_reuse ----
+test_group("v2_init_reuse");
+var hon = dhvani_midi2_note_on_new(1, 2, 3, 4, 5, 6);
+var hoff = dhvani_midi2_note_off_new(1, 2, 3, 4, 5, 6);
+var hcc = dhvani_midi2_cc_new(1, 2, 3, 4);
+var hpb = dhvani_midi2_per_note_pitch_bend_new(1, 2, 3, 4);
+var hpc = dhvani_midi2_per_note_controller_new(1, 2, 3, 4, 5);
+var hcp = dhvani_midi2_channel_pressure_new(1, 2, 3);
+var hpp = dhvani_midi2_poly_pressure_new(1, 2, 3, 4);
+var hgb = dhvani_midi2_pitch_bend_new(1, 2, 3);
+var ia0 = alloc_used();
+assert_eq(dhvani_midi2_note_on_init(hon, 10, 60, 65535, 9, 3, 512), hon, "note_on_init returns e");
+dhvani_midi2_note_off_init(hoff, 11, 61, 1000, 8, 0, 0);
+dhvani_midi2_cc_init(hcc, 12, 74, U32_MAX, 7);
+dhvani_midi2_per_note_pitch_bend_init(hpb, 13, 62, 6, 0x80000000);
+dhvani_midi2_per_note_controller_init(hpc, 14, 63, 5, 74, 77);
+dhvani_midi2_channel_pressure_init(hcp, 15, 4, 88);
+dhvani_midi2_poly_pressure_init(hpp, 16, 64, 3, 99);
+dhvani_midi2_pitch_bend_init(hgb, 17, 2, 0x80000000);
+assert_eq(alloc_used() - ia0, 0, "v2 _init: 0 B");
+assert_eq(dhvani_midi2_note_on_position(hon), 10, "on pos");
+assert_eq(dhvani_midi2_note_on_velocity(hon), 65535, "on vel");
+assert_eq(dhvani_midi2_note_on_channel(hon), 9, "on ch");
+assert_eq(dhvani_midi2_note_on_attribute_type(hon), 3, "on attr type");
+assert_eq(dhvani_midi2_note_on_attribute_data(hon), 512, "on attr data");
+assert_eq(dhvani_midi2_note_off_velocity(hoff), 1000, "off vel");
+assert_eq(dhvani_midi2_note_off_attribute_type(hoff), 0, "off attr reset");
+assert_eq(dhvani_midi2_cc_controller(hcc), 74, "cc ctrl");
+assert_eq(dhvani_midi2_cc_value(hcc), U32_MAX, "cc value");
+assert_eq(dhvani_midi2_per_note_pitch_bend_value(hpb), 0x80000000, "pnpb value");
+assert_eq(dhvani_midi2_per_note_controller_controller(hpc), 74, "pnc ctrl");
+assert_eq(dhvani_midi2_per_note_controller_value(hpc), 77, "pnc value");
+assert_eq(dhvani_midi2_channel_pressure_value(hcp), 88, "cp value");
+assert_eq(dhvani_midi2_poly_pressure_note(hpp), 64, "pp note");
+assert_eq(dhvani_midi2_poly_pressure_value(hpp), 99, "pp value");
+assert_eq(dhvani_midi2_pitch_bend_position(hgb), 17, "pb pos");
+assert_eq(dhvani_midi2_pitch_bend_value(hgb), 0x80000000, "pb value");
 
 var rc = assert_summary();
 syscall(60, rc);

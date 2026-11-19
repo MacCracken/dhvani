@@ -164,5 +164,15 @@ assert_eq(shabda_ssml_node_rate(vec_get(n7, 0)), SHABDA_RATE_FAST, "rate == Some
 test_group("ssml_speaking_rate_wpm");
 assert_eq(shabda_speaking_rate_wpm(SHABDA_RATE_MEDIUM), f64_from(150), "Medium.wpm() == 150");
 
+# ---- bridge_handles (2.3.2) ----
+# shabda reads the engine (and svara the voice) unchecked: a null handle or text
+# was a wild read.
+test_group("bridge_handles");
+assert_eq(dhvani_g2p_text_to_phonemes(0, "hello"), 0, "text_to_phonemes(engine 0) -> 0");
+assert_eq(dhvani_g2p_text_to_phonemes(g, 0), 0, "text_to_phonemes(text 0) -> 0");
+assert_eq(dhvani_g2p_speak(0, "hello", voice_f, 44100), 0, "speak(engine 0) -> 0");
+assert_eq(dhvani_g2p_speak(g, "hello", 0, 44100), 0, "speak(voice 0) -> 0");
+assert_eq(dhvani_g2p_speak(g, 0, voice_f, 44100), 0, "speak(text 0) -> 0");
+
 var rc = assert_summary();
 syscall(60, rc);

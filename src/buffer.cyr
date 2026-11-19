@@ -47,12 +47,38 @@ fn dhvani_format_name(fmt) {
     return "unknown";
 }
 
-# build a `vec` of n zeros (was vec![0.0; n]).
+# build a `vec` of n zeros (was vec![0.0; n]): one header plus exactly n slots, zeroed
+# in place (lib/vec.cyr's layout is { data_ptr, len, cap }). Through 2.3.2 this pushed n
+# times, so the vec doubled from 16 and kept every outgrown copy: about 2x the bytes
+# under the free-less allocator, for every buffer the library made. n <= 0, or past
+# vec.cyr's VEC_CAP_MAX, gives an empty vec (the push loop aborted the process there).
 #must_use
 fn dh_vec_zeros(n) {
-    var v = vec_new();
-    var i = 0;
-    while (i < n) { vec_push(v, 0); i = i + 1; }
+    if (n <= 0) { return vec_new(); }
+    if (n > VEC_CAP_MAX) { return vec_new(); }
+    var data = alloc(n * 8);
+    if (data == 0) { return vec_new(); }
+    var p = data;
+    var end = data + n * 8;
+    while (p < end) { store64(p, 0); p = p + 8; }
+    var v = alloc(24);
+    if (v == 0) { return vec_new(); }
+    store64(v, data);
+    store64(v + 8, n);
+    store64(v + 16, n);
+    return v;
+}
+
+# a copy of vec `src` with exactly its length (the same layout as dh_vec_zeros).
+#must_use
+fn dh_vec_copy(src) {
+    var n = vec_len(src);
+    var v = dh_vec_zeros(n);
+    if (vec_len(v) != n) { return v; }
+    var s = dh_vec_data(src);
+    var d = dh_vec_data(v);
+    var end = s + n * 8;
+    while (s < end) { store64(d, load64(s)); s = s + 8; d = d + 8; }
     return v;
 }
 
@@ -60,11 +86,12 @@ fn dh_vec_zeros(n) {
 struct DhAudioBuffer { samples; channels; sample_rate; frames; }
 
 # from_interleaved(samples, channels, sample_rate) -> buffer handle, or 0 on
-# error (0 channels, bad sample rate, or length not divisible by channels).
+# error (channels or sample rate <= 0, a rate past the max, or a length not divisible
+# by channels; the oracle's u16 / u32 could not be negative).
 #must_use
 fn dhvani_buffer_from_interleaved(samples, channels, sample_rate) {
-    if (channels == 0) { return 0; }
-    if (sample_rate == 0) { return 0; }
+    if (channels <= 0) { return 0; }
+    if (sample_rate <= 0) { return 0; }
     if (sample_rate > DH_MAX_SAMPLE_RATE) { return 0; }
     var len = vec_len(samples);
     if (len > 0) {
@@ -78,9 +105,17 @@ fn dhvani_buffer_from_interleaved(samples, channels, sample_rate) {
     return self;
 }
 
-# silence(channels, frames, sample_rate) -- a zero-filled buffer.
+# silence(channels, frames, sample_rate) -- a zero-filled buffer. 0 for a negative
+# channel or frame count, or one whose channels * frames would overflow the vec cap:
+# the header must never claim more samples than the vec holds, since the kernels walk
+# the storage by it.
 #must_use
 fn dhvani_buffer_silence(channels, frames, sample_rate) {
+    if (channels < 0) { return 0; }
+    if (frames < 0) { return 0; }
+    if (channels > 0) {
+        if (frames > VEC_CAP_MAX / channels) { return 0; }
+    }
     var self = alloc(sizeof(DhAudioBuffer));
     DhAudioBuffer_set_samples(self, dh_vec_zeros(channels * frames));
     DhAudioBuffer_set_channels(self, channels);
@@ -144,11 +179,7 @@ fn dhvani_buffer_clamp(self) {
 # deep-copy a buffer (was #[derive(Clone)]).
 #must_use
 fn dhvani_buffer_clone(self) {
-    var src = DhAudioBuffer_samples(self);
-    var len = vec_len(src);
-    var dst = vec_new();
-    var i = 0;
-    while (i < len) { vec_push(dst, vec_get(src, i)); i = i + 1; }
+    var dst = dh_vec_copy(DhAudioBuffer_samples(self));
     var b = alloc(sizeof(DhAudioBuffer));
     DhAudioBuffer_set_samples(b, dst);
     DhAudioBuffer_set_channels(b, DhAudioBuffer_channels(self));
@@ -198,15 +229,19 @@ fn dhvani_buffer_mix(buffers) {
 # Bad rate -> 0; same rate -> clone; empty -> silence.
 #must_use
 fn dhvani_buffer_resample_linear(buf, target_rate) {
-    if (target_rate == 0) { return 0; }
+    if (target_rate <= 0) { return 0; }
     if (target_rate > DH_MAX_SAMPLE_RATE) { return 0; }
     var src_rate = DhAudioBuffer_sample_rate(buf);
     if (target_rate == src_rate) { return dhvani_buffer_clone(buf); }
     var frames = DhAudioBuffer_frames(buf);
     var ch = DhAudioBuffer_channels(buf);
     if (frames == 0) { return dhvani_buffer_silence(ch, 0, target_rate); }
+    # a 0 Hz (or negative) source rate makes the ratio infinite and new_frames saturate
+    if (src_rate <= 0) { return 0; }
+    if (ch < 1) { return 0; }
     var ratio = f64_div(f64_from(target_rate), f64_from(src_rate));
     var new_frames = f64_to(f64_ceil(f64_mul(f64_from(frames), ratio)));
+    if (new_frames > VEC_CAP_MAX / ch) { return 0; }
     var src = DhAudioBuffer_samples(buf);
     var src_len = vec_len(src);
     var out = dh_vec_zeros(new_frames * ch);
@@ -272,9 +307,9 @@ fn dhvani_pool_acquire(self) {
 # release -- silence a buffer and return it to the pool.
 fn dhvani_pool_release(self, buf) {
     var samples = DhAudioBuffer_samples(buf);
-    var len = vec_len(samples);
-    var i = 0;
-    while (i < len) { vec_set(samples, i, 0); i = i + 1; }
+    var p = dh_vec_data(samples);
+    var end = p + vec_len(samples) * 8;
+    while (p < end) { store64(p, 0); p = p + 8; }
     vec_push(DhBufferPool_buffers(self), buf);
     return 0;
 }

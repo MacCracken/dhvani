@@ -1,5 +1,9 @@
 # midi.tcyr -- parity tests for src/midi.cyr
-# Ported one-for-one from the 16 #[test] blocks in rust-old/src/midi/mod.rs.
+# Ported one-for-one from the 16 #[test] blocks in rust-old/src/midi/mod.rs
+# (`events_in_range_binary_search` runs here as `events_in_range_uniform`: the
+# port's range query is not the oracle's binary search). The groups after
+# `midi_event_all_variants_position_channel` are port regressions: zero-alloc
+# `_into`/`_init` forms, query pruning vs brute force, and the merge fixes.
 
 include "src/error.cyr"
 include "src/midi.cyr"
@@ -46,8 +50,8 @@ assert_eq(vec_len(dhvani_midi_clip_note_ons_at(c4, 101)), 0, "0 note-ons @101");
 assert_eq(vec_len(dhvani_midi_clip_note_offs_at(c4, 300)), 1, "1 note-off @300");
 assert_eq(vec_len(dhvani_midi_clip_note_offs_at(c4, 400)), 1, "1 note-off @400");
 
-# ---- events_in_range_binary_search ----
-test_group("events_in_range_binary_search");
+# ---- events_in_range_uniform (oracle: events_in_range_binary_search) ----
+test_group("events_in_range_uniform");
 var c5 = dhvani_midi_clip_new("test", 0, 100000);
 var i5 = 0;
 while (i5 < 100) { dhvani_midi_clip_add_note(c5, i5 * 1000, 500, 60, 100, 0); i5 = i5 + 1; }
@@ -170,6 +174,165 @@ while (vi < 7) {
     vi = vi + 1;
 }
 assert_eq(vok, 1, "all variants position=i+1, channel=i");
+
+# ---- events_in_range_overlapping_long_note (oracle-divergent) ----
+# rust-old's partition_point over end times (non-monotone in position order)
+# lands past the long note and returns []; the note at 0 is active in [500,600).
+test_group("events_in_range_overlapping_long_note");
+var cl = dhvani_midi_clip_new("long", 0, 10000);
+dhvani_midi_clip_add_note(cl, 0, 1000, 60, 100, 0);
+dhvani_midi_clip_add_note(cl, 100, 10, 62, 100, 0);
+dhvani_midi_clip_add_note(cl, 200, 10, 64, 100, 0);
+var rl = dhvani_midi_clip_events_in_range(cl, 500, 600);
+assert_eq(vec_len(rl), 1, "long note overlaps [500,600)");
+assert_eq(dhvani_note_event_note(vec_get(rl, 0)), 60, "it is note 60");
+assert_eq(vec_len(dhvani_midi_clip_notes_at(cl, 550)), 1, "long note active at 550");
+
+# ---- clip_queries_into_zero_alloc ----
+test_group("clip_queries_into_zero_alloc");
+var cz = dhvani_midi_clip_new("z", 0, 100000);
+var iz = 0;
+while (iz < 100) { dhvani_midi_clip_add_note(cz, iz * 1000, 500, 60, 100, 0); iz = iz + 1; }
+var qout = vec_new();
+assert_eq(dhvani_midi_clip_events_in_range_into(cz, 10000, 15000, qout), 5, "into: 5 in range");
+assert_eq(dhvani_note_event_position(vec_get(qout, 0)), 10000, "into: first @10000");
+var a0 = alloc_used();
+dhvani_midi_clip_events_in_range_into(cz, 10000, 15000, qout);
+assert_eq(alloc_used() - a0, 0, "events_in_range_into 0 B/call");
+a0 = alloc_used();
+assert_eq(dhvani_midi_clip_notes_at_into(cz, 12250, qout), 1, "into: 1 active @12250");
+assert_eq(alloc_used() - a0, 0, "notes_at_into 0 B/call");
+a0 = alloc_used();
+assert_eq(dhvani_midi_clip_note_ons_at_into(cz, 13000, qout), 1, "into: 1 on @13000");
+assert_eq(alloc_used() - a0, 0, "note_ons_at_into 0 B/call");
+a0 = alloc_used();
+assert_eq(dhvani_midi_clip_note_offs_at_into(cz, 13500, qout), 1, "into: 1 off @13500");
+assert_eq(alloc_used() - a0, 0, "note_offs_at_into 0 B/call");
+assert_eq(dhvani_midi_clip_note_ons_at_into(cz, 13001, qout), 0, "into: truncates to 0");
+assert_eq(vec_len(qout), 0, "out emptied on no match");
+
+# ---- clip_queries_match_bruteforce ----
+# Mixed short/long/zero durations (added in random order, some via merge), then
+# a quantize: every pruned query must equal a full linear filter.
+test_group("clip_queries_match_bruteforce");
+var cq = dhvani_midi_clip_new("q", 0, 8000);
+var cm = dhvani_midi_clip_new("m", 0, 8000);
+var seed = 12345;
+var bi = 0;
+while (bi < 240) {
+    seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    var bp = seed % 6000;
+    seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    var bd = 1 + seed % 40;
+    if (bi % 17 == 0) { bd = 1500 + seed % 900; }
+    if (bi % 23 == 0) { bd = 0; }
+    if (bi % 2 == 0) { dhvani_midi_clip_add_note(cq, bp, bd, 60, 100, 0); }
+    else { dhvani_midi_clip_add_note(cm, bp, bd, 62, 100, 1); }
+    bi = bi + 1;
+}
+dhvani_midi_clip_merge(cq, cm);
+var bad = 0;
+var tot = 0;
+var pass = 0;
+while (pass < 2) {
+    var notes_q = dhvani_midi_clip_notes(cq);
+    var nq = vec_len(notes_q);
+    var f = 0;
+    while (f < 8200) {
+        var e_at = 0;
+        var e_on = 0;
+        var e_off = 0;
+        var e_rg = 0;
+        var k = 0;
+        while (k < nq) {
+            var nk = vec_get(notes_q, k);
+            var pk = DhNoteEvent_position(nk);
+            var ek = pk + DhNoteEvent_duration(nk);
+            if (pk <= f) { if (f < ek) { e_at = e_at + 1; } }
+            if (pk == f) { e_on = e_on + 1; }
+            if (ek == f) { e_off = e_off + 1; }
+            if (pk < f + 64) { if (ek > f) { e_rg = e_rg + 1; } }
+            k = k + 1;
+        }
+        tot = tot + e_at + e_on + e_off + e_rg;
+        if (dhvani_midi_clip_notes_at_into(cq, f, qout) != e_at) { bad = bad + 1; }
+        if (dhvani_midi_clip_note_ons_at_into(cq, f, qout) != e_on) { bad = bad + 1; }
+        if (dhvani_midi_clip_note_offs_at_into(cq, f, qout) != e_off) { bad = bad + 1; }
+        if (dhvani_midi_clip_events_in_range_into(cq, f, f + 64, qout) != e_rg) { bad = bad + 1; }
+        f = f + 3;
+    }
+    dhvani_midi_clip_quantize(cq, 16);
+    pass = pass + 1;
+}
+assert_eq(vec_len(dhvani_midi_clip_notes(cq)), 240, "240 notes after merge");
+assert(tot > 10000, "brute-force expectations are non-trivial");
+assert_eq(bad, 0, "pruned queries == brute force (pre/post quantize)");
+
+# ---- merge_self ----
+test_group("merge_self");
+var cs = dhvani_midi_clip_new("s", 0, 2000);
+dhvani_midi_clip_add_note(cs, 0, 100, 60, 100, 0);
+dhvani_midi_clip_add_note(cs, 500, 100, 62, 100, 0);
+dhvani_midi_clip_add_cc(cs, 10, 1, 64, 0);
+dhvani_midi_clip_add_cc(cs, 700, 7, 100, 0);
+dhvani_midi_clip_merge(cs, cs);
+var ns = dhvani_midi_clip_notes(cs);
+var at0 = 0;
+var at500 = 0;
+var si = 0;
+while (si < vec_len(ns)) {
+    var ps = DhNoteEvent_position(vec_get(ns, si));
+    if (ps == 0) { at0 = at0 + 1; }
+    if (ps == 500) { at500 = at500 + 1; }
+    si = si + 1;
+}
+assert_eq(vec_len(ns), 4, "self-merge: 4 notes");
+assert_eq(at0, 2, "self-merge: 2 copies of note@0");
+assert_eq(at500, 2, "self-merge: 2 copies of note@500");
+var css = dhvani_midi_clip_control_changes(cs);
+assert_eq(vec_len(css), 4, "self-merge: 4 CCs");
+assert_eq(dhvani_cc_position(vec_get(css, 1)), 10, "self-merge: CCs sorted [1]=10");
+assert_eq(dhvani_cc_position(vec_get(css, 2)), 700, "self-merge: CCs sorted [2]=700");
+
+# ---- merge_duration_max_end (oracle-divergent) ----
+# rust-old extends to the LAST-STARTING note's end (100+10 -> no change).
+test_group("merge_duration_max_end");
+var md_a = dhvani_midi_clip_new("a", 0, 2000);
+var md_b = dhvani_midi_clip_new("b", 0, 2000);
+dhvani_midi_clip_add_note(md_b, 0, 5000, 60, 100, 0);
+dhvani_midi_clip_add_note(md_b, 100, 10, 62, 100, 0);
+dhvani_midi_clip_merge(md_a, md_b);
+assert_eq(dhvani_midi_clip_duration(md_a), 5000, "duration -> max note end 5000");
+var md_c = dhvani_midi_clip_new("c", 0, 9000);
+dhvani_midi_clip_merge(md_c, md_b);
+assert_eq(dhvani_midi_clip_duration(md_c), 9000, "never shrinks");
+
+# ---- event_init_reuse ----
+test_group("event_init_reuse");
+var re = dhvani_midi_control_change(5, 7, 99, 3);
+var ne2 = dhvani_note_event_new(1, 2, 3, 4, 5);
+var ce2 = dhvani_cc_new(1, 2, 3, 4);
+a0 = alloc_used();
+assert_eq(dhvani_midi_note_on_init(re, 9, 61, 90, 2), re, "note_on_init returns e");
+dhvani_note_event_init(ne2, 100, 200, 60, 127, 3);
+dhvani_cc_init(ce2, 500, 7, 100, 0);
+assert_eq(alloc_used() - a0, 0, "_init allocates 0 B");
+assert_eq(dhvani_midi_event_kind(re), DH_MIDI_NOTE_ON, "re-tagged NOTE_ON");
+assert_eq(DhMidiEvent_note(re), 61, "note 61");
+assert_eq(DhMidiEvent_velocity(re), 90, "velocity 90");
+assert_eq(DhMidiEvent_controller(re), 0, "old controller zeroed");
+assert_eq(DhMidiEvent_value(re), 0, "old value zeroed");
+assert_eq(dhvani_midi_event_position(re), 9, "position 9");
+assert_eq(dhvani_midi_event_channel(re), 2, "channel 2");
+dhvani_midi_pitch_bend_init(re, 4, 8192, 1);
+assert_eq(dhvani_midi_event_kind(re), DH_MIDI_PITCH_BEND, "re-tagged PITCH_BEND");
+assert_eq(DhMidiEvent_value(re), 8192, "bend 8192");
+assert_eq(DhMidiEvent_note(re), 0, "note zeroed");
+assert_eq(dhvani_note_event_position(ne2), 100, "ne init pos");
+assert_eq(dhvani_note_event_duration(ne2), 200, "ne init dur");
+assert_eq(dhvani_note_event_velocity(ne2), 127, "ne init vel");
+assert_eq(dhvani_cc_controller(ce2), 7, "cc init ctrl");
+assert_eq(dhvani_cc_value(ce2), 100, "cc init val");
 
 var rc = assert_summary();
 syscall(60, rc);

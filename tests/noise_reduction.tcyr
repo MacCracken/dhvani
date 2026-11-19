@@ -17,7 +17,8 @@ fn nr_make_sine(amp, freq, sr, frames) {
     var v = vec_new();
     var i = 0;
     while (i < frames) {
-        vec_push(v, f64_mul(amp, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr)))));
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), freq), f64_from(i)), f64_from(sr));
+        vec_push(v, f64_mul(amp, f64_sin(ph)));
         i = i + 1;
     }
     return v;
@@ -54,7 +55,8 @@ test_group("noise_reduced");
 var samples_n = vec_new();
 var in1 = 0;
 while (in1 < 44100) {
-    var signal = f64_mul(0.5, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(in1)), f64_from(44100))));
+    var ph1 = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(in1)), f64_from(44100));
+    var signal = f64_mul(0.5, f64_sin(ph1));
     var noise = f64_mul(0.02, f64_sin(f64_mul(f64_from(in1), 12345.679)));
     vec_push(samples_n, f64_add(signal, noise));
     in1 = in1 + 1;
@@ -78,7 +80,8 @@ test_group("stereo_processing");
 var samples_st = vec_new();
 var ist = 0;
 while (ist < 88200) {
-    vec_push(samples_st, f64_mul(0.5, f64_sin(f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(ist / 2)), f64_from(44100)))));
+    var phst = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), f64_from(ist / 2)), f64_from(44100));
+    vec_push(samples_st, f64_mul(0.5, f64_sin(phst)));
     ist = ist + 1;
 }
 var buf_st = dhvani_buffer_from_interleaved(samples_st, 2, 44100);
@@ -97,6 +100,59 @@ while (iof < 44100) {
 var buf_of = dhvani_buffer_from_interleaved(samples_of, 1, 44100);
 dhvani_noise_reduce(buf_of, 1.0);
 assert_eq(nr_all_finite(buf_of), 1, "ramp output all finite");
+
+# ---- reducer_is_alloc_free (regression, 2.3.2) ----
+# NoiseReducer exists to reuse its buffers across calls. Through 2.3.1 process()
+# still allocated the per-channel `mono`, `output` and `window_sum` vecs on every
+# call (392,592 bytes per stereo 4096-frame call, never freed). They are now
+# grow-only fields: after the first call at a size, later calls allocate nothing.
+test_group("reducer_is_alloc_free");
+fn nr_stereo(frames, f0) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames * 2) {
+        var t = f64_div(f64_from(f0 + i / 2), f64_from(44100));
+        var x = f64_mul(0.4, f64_sin(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 440.0), t)));
+        if ((i % 7) == 3) { x = f64_add(x, 0.05); }
+        vec_push(v, x);
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, 44100);
+}
+var nr9 = dhvani_noise_reducer_new();
+var w9 = nr_stereo(4096, 0);
+dhvani_noise_reducer_process(nr9, w9, 0.5);
+var b9 = nr_stereo(4096, 100);
+var u9a = alloc_used();
+dhvani_noise_reducer_process(nr9, b9, 0.5);
+var u9b = alloc_used();
+assert_eq(u9b - u9a, 0, "steady-state stereo 4096-frame process allocates 0 bytes");
+var s9 = nr_stereo(2500, 7);
+var u9c = alloc_used();
+dhvani_noise_reducer_process(nr9, s9, 0.7);
+var u9d = alloc_used();
+assert_eq(u9d - u9c, 0, "a shorter buffer reuses the scratch (0 bytes)");
+
+# ---- reused_scratch_matches_fresh ----
+# The reused scratch is zeroed in place, so a reducer that already processed a
+# longer buffer gives bit-identical output to a fresh one-shot reduce.
+test_group("reused_scratch_matches_fresh");
+var a10 = nr_stereo(3000, 11);
+var b10 = nr_stereo(3000, 11);
+dhvani_noise_reducer_process(nr9, a10, 0.6);
+dhvani_noise_reduce(b10, 0.6);
+var sa10 = dhvani_buffer_samples(a10);
+var sb10 = dhvani_buffer_samples(b10);
+var d10 = 0;
+var i10 = 0;
+while (i10 < vec_len(sa10)) { if (vec_get(sa10, i10) != vec_get(sb10, i10)) { d10 = d10 + 1; } i10 = i10 + 1; }
+assert_eq(d10, 0, "reused reducer == fresh one-shot, bit for bit");
+
+# ---- zero_channel_buffer (hardening, 2.3.2) ----
+test_group("zero_channel_buffer");
+var z11 = dhvani_buffer_silence(0, 4096, 44100);
+dhvani_noise_reducer_process(nr9, z11, 0.5);
+assert_eq(vec_len(dhvani_buffer_samples(z11)), 0, "0-channel buffer is a no-op");
 
 var rc = assert_summary();
 syscall(60, rc);

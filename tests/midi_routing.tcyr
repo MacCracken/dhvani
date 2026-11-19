@@ -1,6 +1,8 @@
 # midi_routing.tcyr -- parity tests for src/midi_routing.cyr
 # Ported one-for-one from the 11 #[test] blocks in rust-old/src/midi/routing.rs.
 # No serde round-trip or Display-string tests exist in the oracle, so none dropped.
+# Groups after `cc_mapping_custom_range` are port regressions (u8 saturation,
+# curve-code validation, zero-alloc filter_event_into).
 
 include "src/error.cyr"
 include "src/midi.cyr"
@@ -86,6 +88,56 @@ test_group("cc_mapping_custom_range");
 var mcr = dhvani_midiroute_cc_new(7, 0, 20.0, 20000.0);
 assert(f64_lt(f64_abs(f64_sub(dhvani_midiroute_cc_map_value(mcr, 0), 20.0)), 0.01), "cc 0 -> 20.0");
 assert(f64_lt(f64_abs(f64_sub(dhvani_midiroute_cc_map_value(mcr, 127), 20000.0)), 1.0), "cc 127 -> 20000.0");
+
+# ---- velocity_curve_as_u8_saturates (parity: Rust float `as u8`) ----
+test_group("velocity_curve_as_u8_saturates");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_HARD, 0, 180), 255, "hard 180 -> 255.1 -> 255");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_HARD, 0, 181), 255, "hard 181 (257.9) saturates 255");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_HARD, 0, 200), 255, "hard 200 (314.9) saturates 255");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_HARD, 0, 255), 255, "hard 255 (512.0) saturates 255");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_HARD, 0, 100), 78, "hard 100 -> 78.7 -> 78");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_SOFT, 0, 255), 179, "soft 255 -> 179");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_SOFT, 0, (0 - 1)), 0, "soft -1 (NaN) -> 0");
+assert_eq(dhvani_midiroute_curve_apply(DH_MIDIROUTE_CURVE_HARD, 0, 1), 0, "hard 1 -> 0.0079 -> 0");
+
+# ---- velocity_curve_unknown_code_is_linear ----
+test_group("velocity_curve_unknown_code_is_linear");
+assert_eq(dhvani_midiroute_curve_apply(9, 0, 100), 100, "apply: code 9 acts as linear");
+assert_eq(dhvani_midiroute_curve_apply((0 - 1), 50, 100), 100, "apply: code -1 acts as linear");
+var ru = dhvani_midiroute_new((0 - 1), 9, 0, 0, 127);
+assert_eq(dhvani_midiroute_velocity_curve(ru), DH_MIDIROUTE_CURVE_LINEAR, "new stores LINEAR");
+var eu = dhvani_note_event_new(0, 100, 60, 100, 0);
+assert_eq(dhvani_note_event_velocity(dhvani_midiroute_filter_event(ru, eu)), 100, "velocity kept (not Fixed(0))");
+dhvani_midiroute_set_velocity_curve(ru, 42, 7);
+assert_eq(dhvani_midiroute_velocity_curve(ru), DH_MIDIROUTE_CURVE_LINEAR, "set stores LINEAR");
+dhvani_midiroute_set_velocity_curve(ru, DH_MIDIROUTE_CURVE_FIXED, 7);
+assert_eq(dhvani_midiroute_velocity_curve(ru), DH_MIDIROUTE_CURVE_FIXED, "known code kept");
+assert_eq(dhvani_note_event_velocity(dhvani_midiroute_filter_event(ru, eu)), 7, "fixed 7 applied");
+
+# ---- filter_event_into ----
+test_group("filter_event_into");
+var rfi = dhvani_midiroute_new(5, DH_MIDIROUTE_CURVE_FIXED, 80, 36, 96);
+var efi = dhvani_note_event_new(10, 20, 60, 127, 5);
+var ofi = dhvani_note_event_new(0, 0, 0, 0, 0);
+assert_eq(dhvani_midiroute_filter_event_into(rfi, efi, ofi), 1, "passes -> 1");
+assert_eq(dhvani_note_event_position(ofi), 10, "out pos");
+assert_eq(dhvani_note_event_duration(ofi), 20, "out dur");
+assert_eq(dhvani_note_event_note(ofi), 60, "out note");
+assert_eq(dhvani_note_event_velocity(ofi), 80, "out velocity transformed");
+assert_eq(dhvani_note_event_channel(ofi), 5, "out channel");
+assert_eq(dhvani_note_event_velocity(efi), 127, "source untouched");
+var erej = dhvani_note_event_new(99, 1, 60, 50, 0);
+assert_eq(dhvani_midiroute_filter_event_into(rfi, erej, ofi), 0, "wrong channel -> 0");
+assert_eq(dhvani_note_event_position(ofi), 10, "rejected: out untouched");
+var erng = dhvani_note_event_new(99, 1, 20, 50, 5);
+assert_eq(dhvani_midiroute_filter_event_into(rfi, erng, ofi), 0, "out of note range -> 0");
+assert_eq(dhvani_midiroute_filter_event_into(rfi, efi, efi), 1, "in-place passes");
+assert_eq(dhvani_note_event_velocity(efi), 80, "in-place velocity transformed");
+assert_eq(dhvani_note_event_note(efi), 60, "in-place note kept");
+var fa0 = alloc_used();
+var fk = 0;
+while (fk < 100) { dhvani_midiroute_filter_event_into(rfi, efi, ofi); fk = fk + 1; }
+assert_eq(alloc_used() - fa0, 0, "filter_event_into 0 B/call");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -25,9 +25,14 @@ fn dhvani_chroma_pitch_class_name(idx) {
 #derive(accessors)
 struct DhChromagram { chroma; }
 
-# from_array(chroma) -- wrap a 12-slot `vec` of pitch-class energies.
+# from_array(chroma) -- wrap a 12-slot `vec` of pitch-class energies; 0 (null)
+# unless it holds exactly 12 values (the oracle's `[f32; 12]` enforced the length
+# at compile time; a short vec here made dominant_class / detect_key_from_chroma
+# read past it and abort the process).
 #must_use
 fn dhvani_chromagram_from_array(chroma) {
+    if (chroma == 0) { return 0; }
+    if (vec_len(chroma) != 12) { return 0; }
     var self = alloc(sizeof(DhChromagram));
     DhChromagram_set_chroma(self, chroma);
     return self;
@@ -38,9 +43,11 @@ fn dhvani_chromagram_from_array(chroma) {
 #must_use
 fn dhvani_chromagram_chroma(self) { return DhChromagram_chroma(self); }
 
-# dominant_class() -- index of the dominant (max-energy) pitch class.
-# argmax with partial_cmp: first index reached whose value is strictly greater
-# than the running best wins (ties keep the earlier index), starting from 0.
+# dominant_class() -- index of the dominant (max-energy) pitch class, as the
+# oracle's `max_by(partial_cmp().unwrap_or(Equal))`: starting from class 0, class
+# i replaces the running best unless the best is strictly greater, so the LAST of
+# equal maxima wins (silence -> 11, "B") and a NaN compares Equal (it is taken,
+# then replaced by the next class).
 #must_use
 fn dhvani_chromagram_dominant_class(self) {
     var chroma = DhChromagram_chroma(self);
@@ -49,7 +56,7 @@ fn dhvani_chromagram_dominant_class(self) {
     var i = 1;
     while (i < 12) {
         var v = vec_get(chroma, i);
-        if (f64_gt(v, best_val) == 1) { best_val = v; best_idx = i; }
+        if (f64_gt(best_val, v) == 0) { best_val = v; best_idx = i; }
         i = i + 1;
     }
     return best_idx;
@@ -63,7 +70,8 @@ fn dhvani_chromagram_dominant_name(self) {
 
 # chromagram(buf, window_size) -- compute a chromagram from an audio buffer.
 # Maps FFT bin freqs to 12 pitch classes: class = round(12*log2(freq/C0)) mod 12
-# with C0 = 16.3516 Hz. Bins below C0 or below 1 Hz are skipped. 0 on FFT error.
+# with C0 = 16.3516 Hz. Bins below C0 or below 1 Hz are skipped. 0 on FFT error
+# (empty buffer, zero channels, window_size > DH_MAX_FFT).
 #must_use
 fn dhvani_chroma_chromagram(buf, window_size) {
     var spec = dhvani_fft_spectrum(buf, window_size);

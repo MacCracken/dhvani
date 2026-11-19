@@ -9,48 +9,130 @@
 # closures -> fn-ptr + opaque state, dispatched with fncall1 / fncall3 (fnptr
 # stdlib). The per-frame sample callback returns an f64 (bit pattern in the
 # i64 return slot), so naad's `*_next_sample(self)` fns are valid callbacks as-is.
+#
+# `state` is opaque and may legitimately be 0 (a stateless callback), but it is
+# never NEGATIVE: that is a sibling constructor's error code (naad's osc_new etc.),
+# which the callback would dereference. The bridges refuse a negative state and a
+# null fn-ptr (0) before calling anything.
+#
+# Output is built with ONE exact allocation (dh_vec_zeros, then walked stores):
+# the push-grown vec this replaced allocated ~2x the payload per call. For
+# per-block rendering use the `_into` forms, which write a caller-owned buffer and
+# allocate nothing.
 
 # render_to_buffer: call sample_fp(state) once per frame, duplicate the mono
 # sample across `channels`, and assemble an interleaved AudioBuffer. Falls back
-# to silence if construction fails (matches the Rust unwrap_or_else).
+# to silence if construction fails (matches the Rust unwrap_or_else). 0 for a null
+# sample_fp, a negative (error-code) state, or a refused allocation.
+#must_use
 fn dhvani_synth_render_to_buffer(sample_fp, state, channels, frames, sample_rate) {
-    var samples = vec_new();
+    if (sample_fp == 0) { return 0; }
+    if (state < 0) { return 0; }
+    var nf = frames;
+    if (nf < 0) { nf = 0; }
+    var n = 0;
+    if (channels > 0) { n = nf * channels; }
+    var samples = dh_vec_zeros(n);
+    if (vec_len(samples) != n) { return 0; }
+    var d = dh_vec_data(samples);
     var i = 0;
-    while (i < frames) {
+    while (i < nf) {
         var s = fncall1(sample_fp, state);
         var c = 0;
-        while (c < channels) { vec_push(samples, s); c = c + 1; }
+        while (c < channels) { store64(d, s); d = d + 8; c = c + 1; }
         i = i + 1;
     }
-    var buf = dhvani_buffer_from_interleaved(samples, channels, sample_rate);
+    # channels < 1: rust-old's from_interleaved fails (u32 0) -> silence(1, ..); a
+    # negative count must not reach from_interleaved, which only rejects 0.
+    var buf = 0;
+    if (channels > 0) { buf = dhvani_buffer_from_interleaved(samples, channels, sample_rate); }
     if (buf == 0) {
         var ch = channels;
         if (ch < 1) { ch = 1; }
         var sr = sample_rate;
         if (sr < 1) { sr = 1; }
-        return dhvani_buffer_silence(ch, frames, sr);
+        return dhvani_buffer_silence(ch, nf, sr);
     }
     return buf;
 }
 
-# render_stereo_to_buffer: sample_fp(state, out_l, out_r) writes (left, right)
-# per frame through out-pointers (the Rust closure returned an (f32, f32) tuple).
-fn dhvani_synth_render_stereo_to_buffer(sample_fp, state, frames, sample_rate) {
-    var samples = vec_new();
-    var lp = alloc(8);
-    var rp = alloc(8);
+# render_into: the alloc-free per-block form. Calls sample_fp(state) once per frame
+# of `buf` (its own frame count) and writes the sample into every channel, in
+# place. DHVANI_ERR_NONE, or DHVANI_ERR_INVALID_PARAMETER for a null buffer / fn-ptr
+# or a negative state (buf untouched).
+fn dhvani_synth_render_into(sample_fp, state, buf) {
+    if (buf == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (sample_fp == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (state < 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var ch = dhvani_buffer_channels(buf);
+    if (ch < 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var samples = dhvani_buffer_samples(buf);
+    var frames = dh_imin(dhvani_buffer_frames(buf), vec_len(samples) / ch);
+    var d = dh_vec_data(samples);
     var i = 0;
     while (i < frames) {
-        fncall3(sample_fp, state, lp, rp);
-        vec_push(samples, load64(lp));
-        vec_push(samples, load64(rp));
+        var s = fncall1(sample_fp, state);
+        var c = 0;
+        while (c < ch) { store64(d, s); d = d + 8; c = c + 1; }
+        i = i + 1;
+    }
+    return DHVANI_ERR_NONE;
+}
+
+# render_stereo_to_buffer: sample_fp(state, out_l, out_r) writes (left, right)
+# per frame through out-pointers (the Rust closure returned an (f32, f32) tuple).
+# The out slots live on this frame's stack. 0 for a null fn-ptr, a negative state,
+# or a refused allocation.
+#must_use
+fn dhvani_synth_render_stereo_to_buffer(sample_fp, state, frames, sample_rate) {
+    if (sample_fp == 0) { return 0; }
+    if (state < 0) { return 0; }
+    var nf = frames;
+    if (nf < 0) { nf = 0; }
+    var samples = dh_vec_zeros(nf * 2);
+    if (vec_len(samples) != nf * 2) { return 0; }
+    var lr[16];
+    store64(&lr, 0);
+    store64(&lr + 8, 0);
+    var d = dh_vec_data(samples);
+    var i = 0;
+    while (i < nf) {
+        fncall3(sample_fp, state, &lr, &lr + 8);
+        store64(d, load64(&lr));
+        store64(d + 8, load64(&lr + 8));
+        d = d + 16;
         i = i + 1;
     }
     var buf = dhvani_buffer_from_interleaved(samples, 2, sample_rate);
     if (buf == 0) {
         var sr = sample_rate;
         if (sr < 1) { sr = 1; }
-        return dhvani_buffer_silence(2, frames, sr);
+        return dhvani_buffer_silence(2, nf, sr);
     }
     return buf;
+}
+
+# render_stereo_into: alloc-free per-block form over a caller-owned STEREO buffer.
+# DHVANI_ERR_NONE, or DHVANI_ERR_INVALID_PARAMETER (null buffer / fn-ptr, negative
+# state, or a buffer that is not 2-channel).
+fn dhvani_synth_render_stereo_into(sample_fp, state, buf) {
+    if (buf == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (sample_fp == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (state < 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dhvani_buffer_channels(buf) != 2) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var samples = dhvani_buffer_samples(buf);
+    var frames = dh_imin(dhvani_buffer_frames(buf), vec_len(samples) / 2);
+    var lr[16];
+    store64(&lr, 0);
+    store64(&lr + 8, 0);
+    var d = dh_vec_data(samples);
+    var i = 0;
+    while (i < frames) {
+        fncall3(sample_fp, state, &lr, &lr + 8);
+        store64(d, load64(&lr));
+        store64(d + 8, load64(&lr + 8));
+        d = d + 16;
+        i = i + 1;
+    }
+    return DHVANI_ERR_NONE;
 }

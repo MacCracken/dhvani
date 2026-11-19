@@ -104,5 +104,124 @@ var b7b = make_sine(6000.0, 0.8, 1024);
 dhvani_deesser_process(d7, b7b);
 assert_eq(vec_len(DhDeEsser_sidechain(d7)), len_after_first, "sidechain length stable (reused)");
 
+# ---- block_split_invariance (regression, 2.3.2) ----
+# The de-esser is block-partition invariant: the detector state is continuous and
+# the gain is decided per frame, so the same signal split as 4x256 frames or as
+# 512+256+256 must come out bit-identical. Through 2.3.1 the sidechain vec only
+# grew, and the biquad stereo fast path ran vec_len/2 frames, so after a 512-frame
+# block every 256-frame block also filtered the stale tail of the previous one:
+# the detector state ran 256 frames ahead and the next block's gains were wrong
+# (58 of 512 samples differed). Mono never took the fast path and was unaffected.
+test_group("block_split_invariance");
+fn ds_sig(f0, n, ch) {
+    var v = vec_new();
+    var f = 0;
+    while (f < n) {
+        var ph = f64_div(f64_mul(f64_mul(f64_mul(2.0, F64_PI), 6000.0), f64_from(f0 + f)), f64_from(44100));
+        var s = f64_mul(0.5, f64_sin(ph));
+        var c = 0;
+        while (c < ch) { vec_push(v, s); c = c + 1; }
+        f = f + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, ch, 44100);
+}
+fn ds_ndiff(a, b) {
+    var sa = dhvani_buffer_samples(a);
+    var sb = dhvani_buffer_samples(b);
+    var n = vec_len(sa);
+    var i = 0;
+    var d = 0;
+    while (i < n) { if (vec_get(sa, i) != vec_get(sb, i)) { d = d + 1; } i = i + 1; }
+    return d;
+}
+fn ds_split_diffs(ch) {
+    var da = dhvani_deesser_new(dhvani_deesserparams_new(6000.0, f64_neg(30.0), 12.0, 2.0), 44100, ch);
+    var db = dhvani_deesser_new(dhvani_deesserparams_new(6000.0, f64_neg(30.0), 12.0, 2.0), 44100, ch);
+    var a0 = ds_sig(0, 256, ch);
+    dhvani_deesser_process(da, a0);
+    var a1 = ds_sig(256, 256, ch);
+    dhvani_deesser_process(da, a1);
+    var a2 = ds_sig(512, 256, ch);
+    dhvani_deesser_process(da, a2);
+    var a3 = ds_sig(768, 256, ch);
+    dhvani_deesser_process(da, a3);
+    var b0 = ds_sig(0, 512, ch);
+    dhvani_deesser_process(db, b0);
+    var b2 = ds_sig(512, 256, ch);
+    dhvani_deesser_process(db, b2);
+    # the sidechain is exactly this block's length, as the oracle's resize(len)
+    assert_eq(vec_len(DhDeEsser_sidechain(db)), 256 * ch, "sidechain sized to the block");
+    var b3 = ds_sig(768, 256, ch);
+    dhvani_deesser_process(db, b3);
+    return ds_ndiff(a2, b2) + ds_ndiff(a3, b3);
+}
+assert_eq(ds_split_diffs(1), 0, "mono: 4x256 == 512+256+256, bit for bit");
+assert_eq(ds_split_diffs(2), 0, "stereo: 4x256 == 512+256+256, bit for bit");
+
+# ---- set_params_is_alloc_free (regression, 2.3.2) ----
+# Through 2.3.1 set_params / set_sample_rate built a whole new detector biquad per
+# call (296 bytes) -- an unbounded leak under parameter automation.
+test_group("set_params_is_alloc_free");
+var d8 = dhvani_deesser_new(dhvani_deesserparams_default(), 44100, 2);
+var p8 = dhvani_deesserparams_new(7000.0, f64_neg(20.0), 6.0, 2.0);
+var rc8 = dhvani_deesser_set_params(d8, p8);
+var u8a = alloc_used();
+var k8 = 0;
+while (k8 < 100) { rc8 = dhvani_deesser_set_params(d8, p8); k8 = k8 + 1; }
+dhvani_deesser_set_sample_rate(d8, 48000);
+var u8b = alloc_used();
+assert_eq(u8b - u8a, 0, "100x set_params + set_sample_rate allocate 0 bytes");
+assert_eq(rc8, DHVANI_ERR_NONE, "set_params ok");
+# the in-place rebuild is the oracle's fresh filter: same coefficients, zero state
+var fresh8 = dhvani_biquad_new(DH_BQ_BANDPASS, 0, 7000.0, 2.0, 48000, 2);
+var c8 = DhBiquadFilter_coeffs(dhvani_deesser_detector(d8));
+var f8 = DhBiquadFilter_coeffs(fresh8);
+assert_eq(DhBiquadCoeffs_b0(c8), DhBiquadCoeffs_b0(f8), "b0 == fresh filter");
+assert_eq(DhBiquadCoeffs_a1(c8), DhBiquadCoeffs_a1(f8), "a1 == fresh filter");
+assert_eq(DhBiquadCoeffs_a2(c8), DhBiquadCoeffs_a2(f8), "a2 == fresh filter");
+var b8 = ds_sig(0, 512, 2);
+dhvani_deesser_process(d8, b8);
+var rc8b = dhvani_deesser_set_params(d8, p8);
+assert_eq(dhvani_biquad_process_sample(dhvani_deesser_detector(d8), 0, 0), 0, "set_params zeroes detector state");
+assert_eq(rc8b, DHVANI_ERR_NONE, "set_params ok");
+var u8c = alloc_used();
+var b8b = ds_sig(512, 512, 2);
+var u8d = alloc_used();
+dhvani_deesser_process(d8, b8b);
+var u8e = alloc_used();
+assert_eq(u8e - u8d, 0, "steady-state process allocates 0 bytes");
+assert(u8d - u8c > 0, "sanity: building the input buffer did allocate");
+
+# ---- params_are_copied (regression, 2.3.2) ----
+# The oracle moves DeEsserParams into the processor. Through 2.3.1 the port kept the
+# caller's handle, so mutating it later half-applied: threshold/reduction changed
+# live while freq/q stayed baked into the detector.
+test_group("params_are_copied");
+var p9 = dhvani_deesserparams_new(6000.0, f64_neg(30.0), 12.0, 2.0);
+var d9 = dhvani_deesser_new(p9, 44100, 1);
+var dref9 = dhvani_deesser_new(dhvani_deesserparams_new(6000.0, f64_neg(30.0), 12.0, 2.0), 44100, 1);
+DhDeEsserParams_set_threshold_db(p9, 0);
+DhDeEsserParams_set_reduction_db(p9, 0);
+var b9 = ds_sig(0, 1024, 1);
+var bref9 = ds_sig(0, 1024, 1);
+dhvani_deesser_process(d9, b9);
+dhvani_deesser_process(dref9, bref9);
+assert_eq(ds_ndiff(b9, bref9), 0, "mutating the caller's handle after new() changes nothing");
+var p9b = dhvani_deesserparams_new(6000.0, f64_neg(30.0), 12.0, 2.0);
+var rc9 = dhvani_deesser_set_params(d9, p9b);
+DhDeEsserParams_set_threshold_db(p9b, 0);
+assert_eq(rc9, DHVANI_ERR_NONE, "set_params ok");
+assert_eq(DhDeEsserParams_threshold_db(DhDeEsser_params(d9)), f64_neg(30.0), "set_params copied, not aliased");
+var bad9 = dhvani_deesser_set_params(d9, dhvani_deesserparams_new(0, 0, 0, 0));
+assert_eq(bad9, DHVANI_ERR_INVALID_PARAMETER, "invalid params rejected");
+assert_eq(DhDeEsserParams_freq_hz(DhDeEsser_params(d9)), 6000.0, "rejected params leave the old ones");
+
+# ---- zero_channel_buffer (hardening, 2.3.2) ----
+test_group("zero_channel_buffer");
+var d10 = dhvani_deesser_new(dhvani_deesserparams_default(), 44100, 1);
+var z10 = dhvani_buffer_silence(0, 16, 44100);
+dhvani_deesser_process(d10, z10);
+assert_eq(vec_len(dhvani_buffer_samples(z10)), 0, "0-channel buffer is a no-op");
+
 var rc = assert_summary();
 syscall(60, rc);

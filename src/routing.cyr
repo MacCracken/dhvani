@@ -16,8 +16,11 @@ fn dhvani_routing_new(inputs, outputs) {
     return self;
 }
 
-# set_gain(output_ch, input_ch, gain) -- 1 on success, 0 if out of bounds.
+# set_gain(output_ch, input_ch, gain) -- 1 on success, 0 if out of bounds (a
+# negative index included: it would otherwise land on another crosspoint of the flat
+# arena, or abort in vec_set).
 fn dhvani_routing_set_gain(self, output_ch, input_ch, gain) {
+    if (output_ch < 0 || input_ch < 0) { return 0; }
     if (output_ch < DhRoutingMatrix_outputs(self)) {
         if (input_ch < DhRoutingMatrix_inputs(self)) {
             vec_set(DhRoutingMatrix_gains(self), output_ch * DhRoutingMatrix_inputs(self) + input_ch, gain);
@@ -27,9 +30,10 @@ fn dhvani_routing_set_gain(self, output_ch, input_ch, gain) {
     return 0;
 }
 
-# gain(output_ch, input_ch) -- crosspoint gain, or 0.0 if out of bounds.
+# gain(output_ch, input_ch) -- crosspoint gain, or 0.0 if out of bounds (negative too).
 #must_use
 fn dhvani_routing_gain(self, output_ch, input_ch) {
+    if (output_ch < 0 || input_ch < 0) { return 0; }
     if (output_ch < DhRoutingMatrix_outputs(self)) {
         if (input_ch < DhRoutingMatrix_inputs(self)) {
             return vec_get(DhRoutingMatrix_gains(self), output_ch * DhRoutingMatrix_inputs(self) + input_ch);
@@ -106,7 +110,9 @@ fn dhvani_routing_apply(self, buf) {
             var i = 0;
             while (i < inputs) {
                 var gain = vec_get(gains, o * inputs + i);
-                if (gain != 0) {
+                # the oracle's `gain != 0.0`: -0.0 is a zero too (a bit compare missed it,
+                # letting a NaN/Inf sample through a muted crosspoint)
+                if (f64_eq(gain, 0) == 0) {
                     sum = f64_add(sum, f64_mul(vec_get(samples, frame * in_ch + i), gain));
                 }
                 i = i + 1;

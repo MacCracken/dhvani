@@ -25,12 +25,17 @@ fn dhvani_osc_new(waveform, sample_rate) {
     return self;
 }
 
-# validate -- ERR_NONE if sample_rate > 0, else ERR_INVALID_SAMPLE_RATE.
+# validate -- ERR_NONE if sample_rate > 0 (a NaN rate is rejected), else
+# ERR_INVALID_SAMPLE_RATE.
 #must_use
 fn dhvani_osc_validate(self) {
-    if (f64_le(DhOscillator_sample_rate(self), 0) == 1) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
+    if (f64_gt(DhOscillator_sample_rate(self), 0) == 0) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
     return DHVANI_ERR_NONE;
 }
+
+# Phase wraps use dh_fmod1 (error.cyr), Rust's `x % 1.0`. Through 2.3.2 the port
+# subtracted 1 once when x >= 1, which differs from x >= 2 on (a frequency above the
+# sample rate grows the phase past 1.5).
 
 # sample(freq) -- next sample; advances phase. Call once per sample.
 fn dhvani_osc_sample(self, freq) {
@@ -49,14 +54,12 @@ fn dhvani_osc_sample(self, freq) {
     } elif (wf == DH_WAVE_SQUARE) {
         naive = f64_neg(1.0);
         if (f64_lt(phase, 0.5) == 1) { naive = 1.0; }
-        p2 = f64_add(phase, 0.5);
-        if (f64_ge(p2, 1.0) == 1) { p2 = f64_sub(p2, 1.0); }
+        p2 = dh_fmod1(f64_add(phase, 0.5));
         value = f64_sub(f64_add(naive, poly_blep(phase, dt)), poly_blep(p2, dt));
     } elif (wf == DH_WAVE_TRIANGLE) {
         naive = f64_neg(1.0);
         if (f64_lt(phase, 0.5) == 1) { naive = 1.0; }
-        p2 = f64_add(phase, 0.5);
-        if (f64_ge(p2, 1.0) == 1) { p2 = f64_sub(p2, 1.0); }
+        p2 = dh_fmod1(f64_add(phase, 0.5));
         var sq_blep = f64_sub(f64_add(naive, poly_blep(phase, dt)), poly_blep(p2, dt));
         # leaky integrator (stored unclamped; returned value is clamped)
         var tri = f64_add(DhOscillator_tri_integrator(self), f64_mul(f64_mul(sq_blep, 4.0), dt));

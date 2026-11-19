@@ -3,9 +3,24 @@
 # Ports rust-old/src/midi/translate.rs. L1: deps error + midi (DhNoteEvent /
 # DhControlChange consumed) + midi_v2 (DhNoteOnV2 / DhControlChangeV2 target
 # types + dhvani_midi2_* constructors/accessors -- reused, not redefined here).
-# Pure INTEGER bit logic -- no floats. Rust's u8/u16/u32 shifts truncate to the
-# type width; the Cyrius port uses i64 slots, so every widening shift result is
-# masked (& 0xFFFF / & 0xFFFFFFFF) to reproduce the Rust wrapping exactly.
+# Pure INTEGER bit logic -- no floats. Rust gets its widths from the types; the
+# Cyrius port uses i64 slots, so every scaler masks its INPUT to the Rust type
+# width (u8 & 0xFF, u16 & 0xFFFF, u32 & 0xFFFFFFFF -- what the Rust argument
+# type would have held) and its OUTPUT to the result width (u16/u32 for the
+# up-scalers, the 7/14-bit domain for the down-scalers). For every in-type input
+# the result is bit-identical to rust-old; out-of-type input (a negative or
+# sign-extended word, >32-bit garbage) can no longer leak past the 7/14-bit range.
+#
+# UP-SCALING IS BIT REPLICATION, NOT THE MIDI 2.0 MIN-CENTER-MAX RULE. rust-old's
+# doc calls `v << 9 | v << 2 | v >> 5` "MIDI 2.0 spec scaling"; it is plain bit
+# replication, kept here for oracle parity. Consequence: centre values are NOT
+# preserved -- 7-bit velocity 64 -> 0x8102 (not 0x8000), CC 64 -> 0x81020408
+# (not 0x80000000), and pitch bend 8192 -> 0x80020008, which is NOT
+# DH_MIDITX_PITCH_BEND_CENTER (a consumer testing `== CENTER` for "no bend" on an
+# up-scaled MIDI 1.0 bend never matches). Up-then-down round-trips are exact.
+#
+# The struct conversions allocate (free-less bump allocator); each has a
+# zero-alloc `*_into(..., out)` twin that writes a caller-owned handle.
 # serde + Display tests dropped (none in this oracle).
 
 # Pitch bend center value in MIDI 2.0 (32-bit).
@@ -13,56 +28,57 @@ var DH_MIDITX_PITCH_BEND_CENTER = 0x80000000;
 
 # ---- scalar scaling (pure integer bit logic) ----
 
-# Scale 7-bit MIDI 1.0 velocity to 16-bit MIDI 2.0.
-# MIDI 2.0 spec scaling: v << 9 | v << 2 | v >> 5.
-#inline
+# Scale 7-bit MIDI 1.0 velocity (u8) to 16-bit MIDI 2.0: bit replication
+# v << 9 | v << 2 | v >> 5 (see header -- not min-center-max).
 #must_use
 fn dhvani_miditx_velocity_7_to_16(v) {
-    if (v == 0) { return 0; }
-    return ((v << 9) | (v << 2) | (v >> 5)) & 0xFFFF;
+    var x = v & 0xFF;
+    if (x == 0) { return 0; }
+    return ((x << 9) | (x << 2) | (x >> 5)) & 0xFFFF;
 }
 
-# Scale 16-bit MIDI 2.0 velocity to 7-bit MIDI 1.0 (lossy).
+# Scale 16-bit MIDI 2.0 velocity (u16) to 7-bit MIDI 1.0 (lossy). Pure scaler:
+# 1..511 -> 0. Note-on conversion applies the 0 -> 1 rule on top (below).
 #inline
 #must_use
 fn dhvani_miditx_velocity_16_to_7(v) {
-    return (v >> 9) & 0xFF;
+    return ((v & 0xFFFF) >> 9) & 0x7F;
 }
 
-# Scale 7-bit CC value to 32-bit MIDI 2.0.
-#inline
+# Scale 7-bit CC value (u8) to 32-bit MIDI 2.0 (bit replication).
 #must_use
 fn dhvani_miditx_cc_7_to_32(v) {
-    return ((v << 25) | (v << 18) | (v << 11) | (v << 4) | (v >> 3)) & 0xFFFFFFFF;
+    var x = v & 0xFF;
+    return ((x << 25) | (x << 18) | (x << 11) | (x << 4) | (x >> 3)) & 0xFFFFFFFF;
 }
 
-# Scale 32-bit CC value to 7-bit MIDI 1.0 (lossy).
+# Scale 32-bit CC value (u32) to 7-bit MIDI 1.0 (lossy).
 #inline
 #must_use
 fn dhvani_miditx_cc_32_to_7(v) {
-    return (v >> 25) & 0xFF;
+    return ((v & 0xFFFFFFFF) >> 25) & 0x7F;
 }
 
-# Convert 14-bit MIDI 1.0 pitch bend to 32-bit MIDI 2.0.
-#inline
+# Convert 14-bit MIDI 1.0 pitch bend (u16) to 32-bit MIDI 2.0 (bit replication).
 #must_use
 fn dhvani_miditx_pitch_bend_14_to_32(v) {
-    return ((v << 18) | (v << 4) | (v >> 10)) & 0xFFFFFFFF;
+    var x = v & 0xFFFF;
+    return ((x << 18) | (x << 4) | (x >> 10)) & 0xFFFFFFFF;
 }
 
-# Convert 32-bit MIDI 2.0 pitch bend to 14-bit MIDI 1.0 (lossy).
+# Convert 32-bit MIDI 2.0 pitch bend (u32) to 14-bit MIDI 1.0 (lossy).
 #inline
 #must_use
 fn dhvani_miditx_pitch_bend_32_to_14(v) {
-    return (v >> 18) & 0xFFFF;
+    return ((v & 0xFFFFFFFF) >> 18) & 0x3FFF;
 }
 
 # ---- struct conversions (V2 types from midi_v2.cyr) ----
 
-# Convert a MIDI 1.0 NoteEvent to a MIDI 2.0 NoteOnV2.
-#must_use
-fn dhvani_miditx_note_event_to_v2(event) {
-    return dhvani_midi2_note_on_new(
+# MIDI 1.0 NoteEvent -> caller-owned NoteOnV2 `out` (zero-alloc). Returns out.
+fn dhvani_miditx_note_event_to_v2_into(event, out) {
+    return dhvani_midi2_note_on_init(
+      out,
       dhvani_note_event_position(event),
       dhvani_note_event_note(event),
       dhvani_miditx_velocity_7_to_16(dhvani_note_event_velocity(event)),
@@ -71,34 +87,63 @@ fn dhvani_miditx_note_event_to_v2(event) {
       0);
 }
 
-# Convert a MIDI 2.0 NoteOnV2 back to a MIDI 1.0 NoteEvent (lossy).
-# Requires a duration since NoteOnV2 doesn't carry duration.
+# Convert a MIDI 1.0 NoteEvent to a MIDI 2.0 NoteOnV2 (allocates 48 B).
 #must_use
-fn dhvani_miditx_note_on_v2_to_event(event, duration) {
-    return dhvani_note_event_new(
+fn dhvani_miditx_note_event_to_v2(event) {
+    return dhvani_miditx_note_event_to_v2_into(event, alloc(sizeof(DhNoteOnV2)));
+}
+
+# MIDI 2.0 NoteOnV2 -> caller-owned NoteEvent `out` (lossy, zero-alloc).
+# Requires a duration since NoteOnV2 doesn't carry duration. Returns out.
+# DIVERGES from rust-old (translate.rs:83 uses velocity_16_to_7 as-is): a 16-bit
+# velocity that down-scales to 0 (0..511) becomes 1, per the MIDI 2.0 -> 1.0
+# translation rule -- a note-on must not turn into a MIDI 1.0 velocity-0 note-off.
+fn dhvani_miditx_note_on_v2_to_event_into(event, duration, out) {
+    var vel = dhvani_miditx_velocity_16_to_7(dhvani_midi2_note_on_velocity(event));
+    if (vel == 0) { vel = 1; }
+    return dhvani_note_event_init(
+      out,
       dhvani_midi2_note_on_position(event),
       duration,
       dhvani_midi2_note_on_note(event),
-      dhvani_miditx_velocity_16_to_7(dhvani_midi2_note_on_velocity(event)),
+      vel,
       dhvani_midi2_note_on_channel(event));
 }
 
-# Convert a MIDI 1.0 ControlChange to MIDI 2.0 ControlChangeV2.
+# Convert a MIDI 2.0 NoteOnV2 back to a MIDI 1.0 NoteEvent (lossy, allocates).
 #must_use
-fn dhvani_miditx_cc_to_v2(cc) {
-    return dhvani_midi2_cc_new(
+fn dhvani_miditx_note_on_v2_to_event(event, duration) {
+    return dhvani_miditx_note_on_v2_to_event_into(event, duration, alloc(sizeof(DhNoteEvent)));
+}
+
+# MIDI 1.0 ControlChange -> caller-owned ControlChangeV2 `out`. Returns out.
+fn dhvani_miditx_cc_to_v2_into(cc, out) {
+    return dhvani_midi2_cc_init(
+      out,
       dhvani_cc_position(cc),
       dhvani_cc_controller(cc),
       dhvani_miditx_cc_7_to_32(dhvani_cc_value(cc)),
       dhvani_cc_channel(cc));
 }
 
-# Convert a MIDI 2.0 ControlChangeV2 to MIDI 1.0 ControlChange (lossy).
+# Convert a MIDI 1.0 ControlChange to MIDI 2.0 ControlChangeV2 (allocates).
 #must_use
-fn dhvani_miditx_cc_v2_to_cc(cc) {
-    return dhvani_cc_new(
+fn dhvani_miditx_cc_to_v2(cc) {
+    return dhvani_miditx_cc_to_v2_into(cc, alloc(sizeof(DhControlChangeV2)));
+}
+
+# MIDI 2.0 ControlChangeV2 -> caller-owned ControlChange `out` (lossy). Returns out.
+fn dhvani_miditx_cc_v2_to_cc_into(cc, out) {
+    return dhvani_cc_init(
+      out,
       dhvani_midi2_cc_position(cc),
       dhvani_midi2_cc_controller(cc),
       dhvani_miditx_cc_32_to_7(dhvani_midi2_cc_value(cc)),
       dhvani_midi2_cc_channel(cc));
+}
+
+# Convert a MIDI 2.0 ControlChangeV2 to MIDI 1.0 ControlChange (lossy, allocates).
+#must_use
+fn dhvani_miditx_cc_v2_to_cc(cc) {
+    return dhvani_miditx_cc_v2_to_cc_into(cc, alloc(sizeof(DhControlChange)));
 }

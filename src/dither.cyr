@@ -1,5 +1,5 @@
 # dither.cyr -- dithering for bit-depth reduction. Ports rust-old/src/buffer/dither.rs.
-# L1, self-contained. TPDF (triangular PDF, flat noise) and noise-shaped (first-
+# L1, deps error + simd (dh_imin). TPDF (triangular PDF, flat noise) and noise-shaped (first-
 # order error feedback). Rust returned a fresh Vec<f32>; the Cyrius port writes
 # into a caller-provided output `vec` (alloc-free under the bump allocator).
 #
@@ -25,13 +25,15 @@ fn dh_rng_bipolar(state) {
     return f64_sub(f64_mul(f64_div(f64_from(state), f64_from(DH_U32_MAX)), 2.0), 1.0);
 }
 
-# tpdf_dither(samples, out, target_bits) -- fill `out` (same length as samples)
-# with TPDF-dithered samples. Returns 0.
+# tpdf_dither(samples, out, target_bits) -- fill `out` with TPDF-dithered samples, over
+# the shorter of the two lengths. Returns 0.
 fn dhvani_dither_tpdf(samples, out, target_bits) {
     var lsb = 1 << (target_bits - 1);
     var quant_step = f64_div(1.0, f64_from(lsb));
     var rng = 0x12345678;
-    var len = vec_len(samples);
+    # min of the two lengths: a shorter `out` aborted the process through 2.3.2 (the
+    # oracle returned a fresh Vec, so it could not mismatch)
+    var len = dh_imin(vec_len(samples), vec_len(out));
     var i = 0;
     while (i < len) {
         rng = dh_xorshift32_next(rng);
@@ -52,7 +54,9 @@ fn dhvani_dither_noise_shaped(samples, out, target_bits) {
     var quant_step = f64_div(1.0, f64_from(lsb));
     var rng = 0x12345678;
     var error = 0;             # +0.0
-    var len = vec_len(samples);
+    # min of the two lengths: a shorter `out` aborted the process through 2.3.2 (the
+    # oracle returned a fresh Vec, so it could not mismatch)
+    var len = dh_imin(vec_len(samples), vec_len(out));
     var i = 0;
     while (i < len) {
         var shaped = f64_sub(vec_get(samples, i), error);

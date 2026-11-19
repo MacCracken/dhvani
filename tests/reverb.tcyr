@@ -84,5 +84,211 @@ while (ridx < 4) {
 }
 assert_eq(rok, 1, "all sample rates produce finite output");
 
+# ---- helpers (regression groups) ----
+fn rv_const(val, frames, ch) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames * ch) { vec_push(v, val); i = i + 1; }
+    return dhvani_buffer_from_interleaved(v, ch, 44100);
+}
+fn rv_zeros(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var z = 0;
+    while (i < n) { if (vec_get(s, i) == 0) { z = z + 1; } i = i + 1; }
+    return z;
+}
+fn rv_sig(frames, ch, f0) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames * ch) {
+        var t = f64_div(f64_from(f0 + i / ch), 44100.0);
+        var x = f64_mul(0.5, f64_sin(f64_mul(f64_mul(f64_mul(2.0, F64_PI), f64_from(330 + 110 * (i % ch))), t)));
+        vec_push(v, x);
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, ch, 44100);
+}
+fn rv_ndiff(a, b) {
+    var sa = dhvani_buffer_samples(a);
+    var sb = dhvani_buffer_samples(b);
+    var n = vec_len(sa);
+    var i = 0;
+    var d = 0;
+    while (i < n) { if (vec_get(sa, i) != vec_get(sb, i)) { d = d + 1; } i = i + 1; }
+    return d;
+}
+# the per-sample reference: dhvani_reverb_run_chain + the oracle's mix, frame by frame
+fn rv_reference(rv, buf) {
+    var ch = dhvani_buffer_channels(buf);
+    var s = dhvani_buffer_samples(buf);
+    var frames = dhvani_buffer_frames(buf);
+    var mix = DhReverbParams_mix(DhReverb_params(rv));
+    var dry = f64_sub(1.0, mix);
+    var f = 0;
+    while (f < frames) {
+        if (ch == 1) {
+            var x = vec_get(s, f);
+            var r = dhvani_reverb_run_chain(DhReverb_combs_l(rv), DhReverb_allpasses_l(rv), x);
+            var o = f64_add(f64_mul(x, dry), f64_mul(r, mix));
+            if (dhvani_is_finite(o) == 0) { o = 0; }
+            vec_set(s, f, o);
+        } else {
+            var xl = vec_get(s, f * ch);
+            var xr = vec_get(s, f * ch + 1);
+            var rl = dhvani_reverb_run_chain(DhReverb_combs_l(rv), DhReverb_allpasses_l(rv), xl);
+            var rr = dhvani_reverb_run_chain(DhReverb_combs_r(rv), DhReverb_allpasses_r(rv), xr);
+            var ol = f64_add(f64_mul(xl, dry), f64_mul(rl, mix));
+            var orr = f64_add(f64_mul(xr, dry), f64_mul(rr, mix));
+            if (dhvani_is_finite(ol) == 0) { ol = 0; }
+            if (dhvani_is_finite(orr) == 0) { orr = 0; }
+            vec_set(s, f * ch, ol);
+            vec_set(s, f * ch + 1, orr);
+        }
+        f = f + 1;
+    }
+    return 0;
+}
+
+# ---- block_path_matches_per_sample_chain (2.3.2) ----
+# process() runs each comb/allpass over the whole block with hoisted ring state;
+# it must stay bit-identical to the oracle's per-sample chain.
+test_group("block_path_matches_per_sample_chain");
+var pa7 = dhvani_reverbparams_new(0.8, 0.3, 0.6);
+var ra7 = dhvani_reverb_new(pa7, 48000);
+var rb7 = dhvani_reverb_new(pa7, 48000);
+var xa7 = rv_sig(3000, 2, 0);
+var xb7 = rv_sig(3000, 2, 0);
+dhvani_reverb_process(ra7, xa7);
+rv_reference(rb7, xb7);
+assert_eq(rv_ndiff(xa7, xb7), 0, "stereo block 1: block path == per-sample chain");
+var ya7 = rv_sig(1700, 3, 3000);
+var yb7 = rv_sig(1700, 3, 3000);
+dhvani_reverb_process(ra7, ya7);
+rv_reference(rb7, yb7);
+assert_eq(rv_ndiff(ya7, yb7), 0, "3-channel block 2 (state carried): identical, ch 2 passes through");
+var ma7 = dhvani_reverb_new(dhvani_reverbparams_default(), 44100);
+var mb7 = dhvani_reverb_new(dhvani_reverbparams_default(), 44100);
+var za7 = rv_sig(5000, 1, 0);
+var zb7 = rv_sig(5000, 1, 0);
+dhvani_reverb_process(ma7, za7);
+rv_reference(mb7, zb7);
+assert_eq(rv_ndiff(za7, zb7), 0, "mono: block path == per-sample chain");
+var u7a = alloc_used();
+var wa7 = rv_sig(1024, 2, 0);
+var u7b = alloc_used();
+dhvani_reverb_process(ra7, wa7);
+var u7c = alloc_used();
+assert_eq(u7c - u7b, 0, "steady-state process allocates 0 bytes");
+assert(u7b - u7a > 0, "sanity: building the input did allocate");
+
+# ---- nan_params_rejected (regression, 2.3.2) ----
+# The oracle's validate is `(0.0..=1.0).contains(&x)`, which rejects NaN. Through
+# 2.3.1 the port tested `x < 0 || x > 1`, which a NaN passes: mix=NaN gave a live
+# reverb whose every output was 0.
+test_group("nan_params_rejected");
+var nan8 = f64_div(0, 0);
+assert_eq(dhvani_reverb_new(dhvani_reverbparams_new(nan8, 0.5, 0.3), 44100), 0, "room_size NaN rejected");
+assert_eq(dhvani_reverb_new(dhvani_reverbparams_new(0.5, nan8, 0.3), 44100), 0, "damping NaN rejected");
+assert_eq(dhvani_reverb_new(dhvani_reverbparams_new(0.5, 0.5, nan8), 44100), 0, "mix NaN rejected");
+var r8 = dhvani_reverb_new(dhvani_reverbparams_default(), 44100);
+var rc8 = dhvani_reverb_set_params(r8, dhvani_reverbparams_new(0.5, 0.5, nan8));
+assert_eq(rc8, DHVANI_ERR_INVALID_PARAMETER, "set_params(mix NaN) rejected");
+assert_eq(DhReverbParams_mix(DhReverb_params(r8)), 0.3, "rejected set_params keeps the old mix");
+assert_eq(dhvani_reverbparams_validate(dhvani_reverbparams_new(0, 1.0, 0)), DHVANI_ERR_NONE, "bounds inclusive");
+
+# ---- zero_channel_buffer (regression, 2.3.2) ----
+# A 0-channel buffer (dhvani_buffer_silence(0, n, sr) builds one) has frames > 0
+# and no samples; the stereo branch read samples[0] and aborted the process.
+test_group("zero_channel_buffer");
+var z9 = dhvani_buffer_silence(0, 16, 44100);
+dhvani_reverb_process(r8, z9);
+assert_eq(vec_len(dhvani_buffer_samples(z9)), 0, "0-channel buffer is a no-op");
+
+# ---- nan_input_does_not_latch (regression, 2.3.2) ----
+# Through 2.3.1 (and in the oracle) one NaN input sample was stored into the comb
+# rings, fed back forever, and every later output -- dry path included -- became
+# NaN, sanitised to 0: the reverb was mute until reset(). The ring store now
+# writes 0 for a non-finite value, so only the bad sample's own output is lost.
+test_group("nan_input_does_not_latch");
+var r10 = dhvani_reverb_new(dhvani_reverbparams_default(), 44100);
+var b10 = rv_const(0.5, 4096, 2);
+vec_set(dhvani_buffer_samples(b10), 0, nan8);
+vec_set(dhvani_buffer_samples(b10), 3, f64_div(1.0, 0));
+dhvani_reverb_process(r10, b10);
+assert_eq(vec_get(dhvani_buffer_samples(b10), 0), 0, "the NaN sample itself outputs 0");
+assert_eq(rv_zeros(b10), 2, "only the two bad samples output 0");
+var c10 = rv_const(0.5, 44100, 2);
+dhvani_reverb_process(r10, c10);
+assert_eq(rv_zeros(c10), 0, "the following clean second is not muted");
+assert_eq(all_finite(c10), 1, "and is finite");
+
+# ---- denormal_flush (regression, 2.3.2) ----
+# With room 1.0 (feedback 0.95) and damping 0.2 a silent comb tail never reaches 0:
+# x * 0.95 rounds back to x at a few ulp, a permanent subnormal limit cycle (27 ulp
+# after 20000 samples through 2.3.1). Values below 1e-30 are now flushed to zero.
+test_group("denormal_flush");
+var cm11 = dhvani_comb_new(1);
+DhCombFilter_set_feedback(cm11, 0.95);
+DhCombFilter_set_damp(cm11, 0.2);
+var o11 = dhvani_comb_process(cm11, 1.0);
+var k11 = 0;
+while (k11 < 40000) { o11 = dhvani_comb_process(cm11, 0); k11 = k11 + 1; }
+assert_eq(vec_get(DhCombFilter_buffer(cm11), 0), 0, "comb ring decays to exactly 0");
+assert_eq(DhCombFilter_damp_state(cm11), 0, "comb damping state decays to exactly 0");
+# the block path: seed every ring slot of a live reverb with a tiny (normal) value
+var r11 = dhvani_reverb_new(dhvani_reverbparams_new(1.0, 0.2, 1.0), 44100);
+var tiny11 = 1.0;
+var t11 = 0;
+while (t11 < 990) { tiny11 = f64_mul(tiny11, 0.5); t11 = t11 + 1; }
+fn rv_seed(bank, val) {
+    var i = 0;
+    while (i < vec_len(bank)) {
+        var ring = DhCombFilter_buffer(vec_get(bank, i));
+        var j = 0;
+        while (j < vec_len(ring)) { vec_set(ring, j, val); j = j + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+fn rv_nonzero_slots(bank) {
+    var nz = 0;
+    var i = 0;
+    while (i < vec_len(bank)) {
+        var ring = DhCombFilter_buffer(vec_get(bank, i));
+        var j = 0;
+        while (j < vec_len(ring)) { if (vec_get(ring, j) != 0) { nz = nz + 1; } j = j + 1; }
+        i = i + 1;
+    }
+    return nz;
+}
+rv_seed(DhReverb_combs_l(r11), tiny11);
+rv_seed(DhReverb_combs_r(r11), tiny11);
+var s11 = dhvani_buffer_silence(2, 4096, 44100);
+dhvani_reverb_process(r11, s11);
+assert_eq(rv_nonzero_slots(DhReverb_combs_l(r11)), 0, "every left comb slot flushed to 0");
+assert_eq(rv_nonzero_slots(DhReverb_combs_r(r11)), 0, "every right comb slot flushed to 0");
+
+# ---- params_are_copied (regression, 2.3.2) ----
+# The oracle moves ReverbParams into the processor. Through 2.3.1 the port kept
+# the caller's handle: mutating it later changed mix live while room/damping
+# stayed baked into the combs (and skipped validation).
+test_group("params_are_copied");
+var p12 = dhvani_reverbparams_new(0.5, 0.5, 0.3);
+var r12 = dhvani_reverb_new(p12, 44100);
+var ref12 = dhvani_reverb_new(dhvani_reverbparams_new(0.5, 0.5, 0.3), 44100);
+DhReverbParams_set_mix(p12, 5.0);
+var a12 = rv_sig(2048, 2, 0);
+var b12 = rv_sig(2048, 2, 0);
+dhvani_reverb_process(r12, a12);
+dhvani_reverb_process(ref12, b12);
+assert_eq(rv_ndiff(a12, b12), 0, "mutating the caller's handle after new() changes nothing");
+var q12 = dhvani_reverbparams_new(0.9, 0.1, 0.5);
+var rcq12 = dhvani_reverb_set_params(r12, q12);
+DhReverbParams_set_mix(q12, 0);
+assert_eq(rcq12, DHVANI_ERR_NONE, "set_params ok");
+assert_eq(DhReverbParams_mix(DhReverb_params(r12)), 0.5, "set_params copied, not aliased");
+
 var rc = assert_summary();
 syscall(60, rc);

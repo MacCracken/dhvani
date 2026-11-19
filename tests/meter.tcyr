@@ -2,11 +2,130 @@
 # Ported one-for-one from the 17 #[test] blocks in rust-old/src/meter/mod.rs.
 # No serde/Display tests to drop. The threaded shared_meter_bank test is ported
 # as a plain sequential store->load (the Cyrius port is single-threaded).
+# LevelMeter::new takes an INTEGER sample rate (rust-old: f32), like every other
+# dhvani constructor. After the parity groups: the 2.3.3 P(-1) regressions.
 
 include "src/error.cyr"
 include "src/simd.cyr"
 include "src/buffer.cyr"
 include "src/meter.cyr"
+
+# 1 iff a and b have identical f64 bits, element by element.
+fn same_bits(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    var i = 0;
+    while (i < vec_len(a)) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# a mono/multichannel buffer of `frames` frames, every sample = v.
+fn constbuf(ch, frames, v) {
+    var d = vec_new();
+    var i = 0;
+    while (i < ch * frames) { vec_push(d, v); i = i + 1; }
+    return dhvani_buffer_from_interleaved(d, ch, 48000);
+}
+
+# rust-old LevelMeter::process, verbatim as ported before 2.3.3: an explicit
+# lufs_buffer window (`win`, caller-owned) summed when full, vec_get/vec_set per
+# sample, no finiteness test. It drives a real DhLevelMeter's state, so the
+# (unchanged) compute_lufs is shared. The bit-identity group runs it beside the
+# storage-walking, running-sum dhvani_meter_level_process on finite input.
+fn ref_process(self, win, buf) {
+    var frames = DhAudioBuffer_frames(buf);
+    var buf_channels = DhAudioBuffer_channels(buf);
+    var channels = DhLevelMeter_channels(self);
+    var active_channels = buf_channels;
+    if (channels < active_channels) { active_channels = channels; }
+    var samples = DhAudioBuffer_samples(buf);
+    var peak = DhLevelMeter_peak(self);
+    var rms = DhLevelMeter_rms(self);
+    var rms_sum = DhLevelMeter_rms_sum(self);
+    var lufs_buffer = win;
+    var lufs_blocks = DhLevelMeter_lufs_blocks(self);
+    var lufs_len = vec_len(lufs_buffer);
+    var rp = 0;
+    while (rp < vec_len(peak)) { vec_set(peak, rp, 0); rp = rp + 1; }
+    var rms_count = DhLevelMeter_rms_count(self);
+    var lufs_pos = DhLevelMeter_lufs_buffer_pos(self);
+    var frame = 0;
+    while (frame < frames) {
+        var channel_sq_sum = 0;
+        var ch = 0;
+        while (ch < active_channels) {
+            var sample = vec_get(samples, frame * buf_channels + ch);
+            var absval = f64_abs(sample);
+            if (f64_gt(absval, vec_get(peak, ch)) == 1) { vec_set(peak, ch, absval); }
+            var sq = f64_mul(sample, sample);
+            vec_set(rms_sum, ch, f64_add(vec_get(rms_sum, ch), sq));
+            channel_sq_sum = f64_add(channel_sq_sum, sq);
+            ch = ch + 1;
+        }
+        rms_count = rms_count + 1;
+        var mean_sq = 0;
+        if (active_channels > 0) { mean_sq = f64_div(channel_sq_sum, f64_from(active_channels)); }
+        if (lufs_pos < lufs_len) {
+            vec_set(lufs_buffer, lufs_pos, mean_sq);
+            lufs_pos = lufs_pos + 1;
+        }
+        if (lufs_pos >= lufs_len) {
+            var block_sum = 0;
+            var bi = 0;
+            while (bi < lufs_len) { block_sum = f64_add(block_sum, vec_get(lufs_buffer, bi)); bi = bi + 1; }
+            vec_push(lufs_blocks, f64_div(block_sum, f64_from(lufs_len)));
+            lufs_pos = 0;
+            dhvani_meter_level_compute_lufs(self);
+        }
+        frame = frame + 1;
+    }
+    DhLevelMeter_set_rms_count(self, rms_count);
+    DhLevelMeter_set_lufs_buffer_pos(self, lufs_pos);
+    if (rms_count > 0) {
+        var uc = 0;
+        while (uc < channels) {
+            vec_set(rms, uc, f64_sqrt(f64_div(vec_get(rms_sum, uc), f64_from(rms_count))));
+            uc = uc + 1;
+        }
+    }
+    var peak_hold = DhLevelMeter_peak_hold(self);
+    var decay = f64_pow(DhLevelMeter_peak_decay(self), f64_from(frames));
+    var hc = 0;
+    while (hc < channels) {
+        if (f64_gt(vec_get(peak, hc), vec_get(peak_hold, hc)) == 1) {
+            vec_set(peak_hold, hc, vec_get(peak, hc));
+        } else {
+            vec_set(peak_hold, hc, f64_mul(vec_get(peak_hold, hc), decay));
+        }
+        hc = hc + 1;
+    }
+    return 0;
+}
+
+# deterministic finite pseudo-random samples in [-1, 1)
+var lcg_s = 12345;
+fn lcg_sample() {
+    lcg_s = lcg_s * 6364136223846793005 + 1442695040888963407;
+    var v = ((lcg_s >> 33) & 0xFFFFF) - 0x80000;
+    return f64_div(f64_from(v), 524288.0);
+}
+fn randbuf(ch, frames) {
+    var d = vec_new();
+    var i = 0;
+    while (i < ch * frames) { vec_push(d, lcg_sample()); i = i + 1; }
+    return dhvani_buffer_from_interleaved(d, ch, 4000);
+}
+
+# 1 iff two meters agree bit for bit on peak, rms, peak_hold, lufs.
+fn meters_same(a, b) {
+    if (same_bits(dhvani_meter_level_peak(a), dhvani_meter_level_peak(b)) == 0) { return 0; }
+    if (same_bits(dhvani_meter_level_rms(a), dhvani_meter_level_rms(b)) == 0) { return 0; }
+    if (same_bits(dhvani_meter_level_peak_hold(a), dhvani_meter_level_peak_hold(b)) == 0) { return 0; }
+    if (dhvani_meter_level_lufs(a) != dhvani_meter_level_lufs(b)) { return 0; }
+    return 1;
+}
 
 alloc_init();
 
@@ -83,7 +202,7 @@ assert_eq(vec_get(oob, 1), 0, "oob store right = 0.0");
 # ---- level_meter_silence ----
 test_group("level_meter_silence");
 var sbuf = dhvani_buffer_silence(2, 256, 48000);
-var smeter = dhvani_meter_level_new(2, 48000.0);
+var smeter = dhvani_meter_level_new(2, 48000);
 dhvani_meter_level_process(smeter, sbuf);
 var speak = dhvani_meter_level_peak(smeter);
 var srms = dhvani_meter_level_rms(smeter);
@@ -97,7 +216,7 @@ var pdata = dh_vec_zeros(256);
 vec_set(pdata, 100, 0.75);
 vec_set(pdata, 200, f64_neg(0.9));
 var pbuf = dhvani_buffer_from_interleaved(pdata, 1, 48000);
-var pmeter = dhvani_meter_level_new(1, 48000.0);
+var pmeter = dhvani_meter_level_new(1, 48000);
 dhvani_meter_level_process(pmeter, pbuf);
 var ppeak = dhvani_meter_level_peak(pmeter);
 assert(near(vec_get(ppeak, 0), 0.9, 0.001), "peak[0] ~ 0.9");
@@ -108,7 +227,7 @@ var cdata = vec_new();
 var ci = 0;
 while (ci < 1024) { vec_push(cdata, 0.5); ci = ci + 1; }
 var cbuf = dhvani_buffer_from_interleaved(cdata, 1, 48000);
-var cmeter = dhvani_meter_level_new(1, 48000.0);
+var cmeter = dhvani_meter_level_new(1, 48000);
 dhvani_meter_level_process(cmeter, cbuf);
 var crms = dhvani_meter_level_rms(cmeter);
 assert(near(vec_get(crms, 0), 0.5, 0.001), "rms[0] ~ 0.5");
@@ -125,7 +244,7 @@ while (si < sframes) {
     si = si + 1;
 }
 var ssbuf = dhvani_buffer_from_interleaved(sdata, 1, 48000);
-var ssmeter = dhvani_meter_level_new(1, 48000.0);
+var ssmeter = dhvani_meter_level_new(1, 48000);
 dhvani_meter_level_process(ssmeter, ssbuf);
 var ssrms = dhvani_meter_level_rms(ssmeter);
 assert(near(vec_get(ssrms, 0), F64_FRAC_1_SQRT2, 0.01), "sine rms ~ 0.707");
@@ -142,7 +261,7 @@ var rdata = vec_new();
 var rri = 0;
 while (rri < 512) { vec_push(rdata, 0.5); rri = rri + 1; }
 var rbuf = dhvani_buffer_from_interleaved(rdata, 2, 48000);
-var rmeter = dhvani_meter_level_new(2, 48000.0);
+var rmeter = dhvani_meter_level_new(2, 48000);
 dhvani_meter_level_process(rmeter, rbuf);
 dhvani_meter_level_reset(rmeter);
 var rpeak = dhvani_meter_level_peak(rmeter);
@@ -163,7 +282,7 @@ while (li < lframes) {
     li = li + 1;
 }
 var lbuf = dhvani_buffer_from_interleaved(ldata, 1, 48000);
-var lmeter = dhvani_meter_level_new(1, 48000.0);
+var lmeter = dhvani_meter_level_new(1, 48000);
 dhvani_meter_level_process(lmeter, lbuf);
 var llufs = dhvani_meter_level_lufs(lmeter);
 assert(f64_gt(llufs, f64_neg(200.0)), "lufs > -200");
@@ -171,7 +290,7 @@ assert(f64_lt(llufs, 0.0), "lufs < 0");
 
 # ---- level_meter_peak_hold_decay ----
 test_group("level_meter_peak_hold_decay");
-var hmeter = dhvani_meter_level_new(1, 48000.0);
+var hmeter = dhvani_meter_level_new(1, 48000);
 var hdata = dh_vec_zeros(256);
 vec_set(hdata, 50, 0.8);
 var hbuf = dhvani_buffer_from_interleaved(hdata, 1, 48000);
@@ -198,7 +317,7 @@ while (mi < mframes) {
     mi = mi + 1;
 }
 var mbuf = dhvani_buffer_from_interleaved(mdata, 2, 48000);
-var mmeter = dhvani_meter_level_new(2, 48000.0);
+var mmeter = dhvani_meter_level_new(2, 48000);
 dhvani_meter_level_process(mmeter, mbuf);
 var mpeak = dhvani_meter_level_peak(mmeter);
 assert(near(vec_get(mpeak, 0), 0.6, 0.001), "peak[0] ~ 0.6");
@@ -207,7 +326,7 @@ assert(f64_gt(dhvani_meter_level_peak_db(mmeter, 0), dhvani_meter_level_peak_db(
 
 # ---- level_meter_invalid_channel_db ----
 test_group("level_meter_invalid_channel_db");
-var imeter = dhvani_meter_level_new(1, 48000.0);
+var imeter = dhvani_meter_level_new(1, 48000);
 assert(f64_lt(dhvani_meter_level_peak_db(imeter, 5), f64_neg(100.0)), "peak_db(5) < -100");
 assert(f64_lt(dhvani_meter_level_rms_db(imeter, 5), f64_neg(100.0)), "rms_db(5) < -100");
 assert(f64_lt(dhvani_meter_level_peak_hold_db(imeter, 5), f64_neg(100.0)), "peak_hold_db(5) < -100");
@@ -218,7 +337,7 @@ var adata = vec_new();
 var ai = 0;
 while (ai < 512) { vec_push(adata, 0.5); ai = ai + 1; }
 var abuf = dhvani_buffer_from_interleaved(adata, 2, 48000);
-var ameter = dhvani_meter_level_new(2, 48000.0);
+var ameter = dhvani_meter_level_new(2, 48000);
 dhvani_meter_level_process(ameter, abuf);
 assert_eq(vec_len(dhvani_meter_level_peak(ameter)), 2, "peak().len() = 2");
 assert_eq(vec_len(dhvani_meter_level_rms(ameter)), 2, "rms().len() = 2");
@@ -227,6 +346,169 @@ assert(f64_gt(vec_get(dhvani_meter_level_rms(ameter), 0), 0), "rms()[0] > 0");
 assert_eq(dhvani_meter_level_channels(ameter), 2, "channels() = 2");
 var _alufs = dhvani_meter_level_lufs(ameter);
 assert_eq(vec_len(dhvani_meter_level_peak_hold(ameter)), 2, "peak_hold().len() = 2");
+
+# ================================================================
+# 2.3.3 regressions (P(-1) sweep). Non-aborting groups first.
+# ================================================================
+
+# ---- level_meter_int_sample_rate ----
+# The window is trunc(sample_rate * 0.4) frames of an INTEGER rate. Pre-2.3.3 the
+# f64-typed rate turned an integer 48000 into a 0-frame window: a NaN block per
+# frame and LUFS pinned at -200. A window < 1 frame is now refused (0).
+test_group("level_meter_int_sample_rate");
+var im = dhvani_meter_level_new(1, 48000);
+assert(im != 0, "48000 Hz meter");
+dhvani_meter_level_process(im, constbuf(1, 48000, 0.5));
+assert_eq(vec_len(DhLevelMeter_lufs_blocks(im)), 2, "1 s at 48 kHz = two 400 ms blocks");
+assert_eq(dhvani_meter_level_lufs(im), f64_add(DH_METER_LUFS_OFFSET, f64_mul(10.0, dhvani_meter_log10(0.25))),
+    "LUFS of a 0.5 constant = -0.691 + 10 log10(0.25)");
+assert(dhvani_meter_level_new(1, 3) != 0, "3 Hz -> 1-frame window");
+assert_eq(dhvani_meter_level_new(1, 2), 0, "2 Hz -> 0-frame window refused");
+assert_eq(dhvani_meter_level_new(1, 0), 0, "0 Hz refused");
+assert_eq(dhvani_meter_level_new(1, 0 - 48000), 0, "negative rate refused");
+assert_eq(dhvani_meter_level_new(1, 48000.0), 0, "an f64 bit pattern (old convention) refused");
+assert_eq(dhvani_meter_level_new(0 - 1, 48000), 0, "negative channels refused");
+assert_eq(dhvani_meter_level_process(0, constbuf(1, 4, 0.5)), DHVANI_ERR_INVALID_PARAMETER, "process(0) -> error");
+
+# ---- level_meter_non_finite_skipped ----
+# Deliberate divergence from rust-old: NaN/Inf samples are skipped (no peak,
+# silence in the RMS/LUFS sums). rust-old: one NaN = NaN RMS for the meter's
+# lifetime; one Inf = peak_hold Inf forever and LUFS gated to -200 for 1500 blocks.
+test_group("level_meter_non_finite_skipped");
+var nfd = vec_new();
+var nfi = 0;
+while (nfi < 256) { vec_push(nfd, 0.5); nfi = nfi + 1; }
+vec_set(nfd, 10, f64_div(0.0, 0.0));
+var nfm = dhvani_meter_level_new(1, 48000);
+dhvani_meter_level_process(nfm, dhvani_buffer_from_interleaved(nfd, 1, 48000));
+assert_eq(vec_get(dhvani_meter_level_peak(nfm), 0), 0.5, "NaN ignored by peak");
+assert_eq(vec_get(dhvani_meter_level_rms(nfm), 0), f64_sqrt(f64_div(f64_mul(255.0, 0.25), 256.0)),
+    "NaN = silence in the RMS sum");
+var nfk = 0;
+while (nfk < 100) { dhvani_meter_level_process(nfm, constbuf(1, 256, 0.5)); nfk = nfk + 1; }
+assert(dhvani_is_finite(vec_get(dhvani_meter_level_rms(nfm), 0)), "RMS finite after a NaN");
+var ifd = vec_new();
+var ifi = 0;
+while (ifi < 48000) { vec_push(ifd, 0.5); ifi = ifi + 1; }
+vec_set(ifd, 100, DH_POS_INF);
+vec_set(ifd, 200, DH_NEG_INF);
+var ifm = dhvani_meter_level_new(1, 48000);
+dhvani_meter_level_process(ifm, dhvani_buffer_from_interleaved(ifd, 1, 48000));
+assert_eq(vec_get(dhvani_meter_level_peak(ifm), 0), 0.5, "Inf ignored by peak");
+assert_eq(vec_get(dhvani_meter_level_peak_hold(ifm), 0), 0.5, "peak_hold stays finite");
+assert(dhvani_is_finite(vec_get(dhvani_meter_level_rms(ifm), 0)), "RMS finite after an Inf");
+assert(f64_gt(dhvani_meter_level_lufs(ifm), f64_neg(10.0)), "LUFS still measured (~-6.7), not gated to -200");
+
+# ---- level_meter_reset_no_leak ----
+test_group("level_meter_reset_no_leak");
+var rlm = dhvani_meter_level_new(2, 48000);
+var rlb = constbuf(2, 512, 0.25);
+var rlk = 0;
+while (rlk < 300) { dhvani_meter_level_process(rlm, rlb); rlk = rlk + 1; }
+var rl0 = alloc_used();
+dhvani_meter_level_reset(rlm);
+rlk = 0;
+while (rlk < 300) { dhvani_meter_level_process(rlm, rlb); rlk = rlk + 1; }
+assert_eq(alloc_used() - rl0, 0, "reset + refill to the same block count allocates 0 bytes");
+assert_eq(vec_len(DhLevelMeter_lufs_blocks(rlm)), 8, "8 LUFS blocks after 300 x 512 frames");
+
+# ---- level_meter_bit_identical_to_rust_algorithm ----
+# The storage walk + running LUFS sum must reproduce the pre-2.3.3 (rust-old)
+# computation bit for bit on finite input: meter wider than the buffer, buffer
+# wider than the meter, block sizes that straddle the 1600-frame (4 kHz) window.
+test_group("level_meter_bit_identical_to_rust_algorithm");
+var bsz = vec_new();
+vec_push(bsz, 1);
+vec_push(bsz, 37);
+vec_push(bsz, 512);
+vec_push(bsz, 1000);
+vec_push(bsz, 4096);
+var bnew = dhvani_meter_level_new(3, 4000);
+var bref = dhvani_meter_level_new(3, 4000);
+var bwin = dh_vec_zeros(1600);
+var bnew2 = dhvani_meter_level_new(1, 4000);
+var bref2 = dhvani_meter_level_new(1, 4000);
+var bwin2 = dh_vec_zeros(1600);
+var bok = 1;
+var bk = 0;
+while (bk < 60) {
+    var bb = randbuf(2, vec_get(bsz, bk % 5));
+    dhvani_meter_level_process(bnew, bb);
+    ref_process(bref, bwin, bb);
+    if (meters_same(bnew, bref) == 0) { bok = 0; }
+    dhvani_meter_level_process(bnew2, bb);
+    ref_process(bref2, bwin2, bb);
+    if (meters_same(bnew2, bref2) == 0) { bok = 0; }
+    bk = bk + 1;
+}
+assert_eq(bok, 1, "peak/rms/peak_hold/lufs bit-identical after every block");
+assert(vec_len(DhLevelMeter_lufs_blocks(bnew)) > 30, "many LUFS blocks exercised");
+assert(f64_gt(dhvani_meter_level_lufs(bnew), DH_METER_DB_FLOOR), "LUFS gated in");
+
+# ---- meter_alloc_free_reads ----
+# rust-old's load()/read_all() return by value; the port's vec-returning forms
+# allocate per call (152 B per load). Polling uses these instead: 0 bytes.
+test_group("meter_alloc_free_reads");
+var ap = dhvani_meter_peak_new();
+dhvani_meter_peak_store(ap, 0.8, 0.6);
+var ab = dhvani_meter_bank_new(16);
+dhvani_meter_bank_store(ab, 3, 0.9, 0.7);
+var apair = vec_new();
+var aflat = vec_new();
+dhvani_meter_bank_read_all_into(ab, aflat);
+var a0 = alloc_used();
+var ai2 = 0;
+var asum = 0;
+while (ai2 < 1000) {
+    asum = f64_add(asum, dhvani_meter_peak_left(ap));
+    asum = f64_add(asum, dhvani_meter_peak_right(ap));
+    asum = f64_add(asum, dhvani_meter_bank_left(ab, 3));
+    asum = f64_add(asum, dhvani_meter_bank_right(ab, 3));
+    dhvani_meter_peak_load_into(ap, apair);
+    dhvani_meter_bank_load_into(ab, 3, apair);
+    dhvani_meter_bank_read_all_into(ab, aflat);
+    ai2 = ai2 + 1;
+}
+assert_eq(alloc_used() - a0, 0, "1000 rounds of scalar/_into reads allocate 0 bytes");
+assert_eq(dhvani_meter_peak_left(ap), 0.8, "peak_left");
+assert_eq(dhvani_meter_peak_right(ap), 0.6, "peak_right");
+assert_eq(dhvani_meter_bank_left(ab, 3), 0.9, "bank_left");
+assert_eq(dhvani_meter_bank_right(ab, 3), 0.7, "bank_right");
+dhvani_meter_peak_load_into(ap, apair);
+assert_eq(vec_len(apair), 2, "load_into writes a pair");
+assert_eq(vec_get(apair, 0), 0.8, "load_into left");
+assert_eq(vec_get(apair, 1), 0.6, "load_into right");
+dhvani_meter_bank_load_into(ab, 99, apair);
+assert_eq(vec_get(apair, 0), 0, "bank_load_into out of bounds -> 0.0");
+assert_eq(dhvani_meter_bank_read_all_into(ab, aflat), 16, "read_all_into returns the active count");
+assert_eq(vec_len(aflat), 32, "flat [l0, r0, l1, r1, ...]");
+assert_eq(vec_get(aflat, 6), 0.9, "slot 3 left at 2*3");
+assert_eq(vec_get(aflat, 7), 0.7, "slot 3 right at 2*3+1");
+dhvani_meter_bank_set_active(ab, 2);
+assert_eq(dhvani_meter_bank_read_all_into(ab, aflat), 2, "read_all_into follows set_active");
+assert_eq(vec_len(aflat), 4, "2 active slots -> 4 entries");
+
+# ---- meter_negative_index_guards ----
+# rust-old indices are usize; a negative index is out of bounds (no-op / 0.0),
+# never "vec: index < 0" (the pre-2.3.3 abort).
+test_group("meter_negative_index_guards");
+var ng = dhvani_meter_bank_new(4);
+dhvani_meter_bank_store(ng, 0 - 1, 1.0, 1.0);
+var ngl = dhvani_meter_bank_load(ng, 0 - 1);
+assert_eq(vec_get(ngl, 0), 0, "bank_load(-1) left = 0.0");
+assert_eq(vec_get(ngl, 1), 0, "bank_load(-1) right = 0.0");
+assert_eq(dhvani_meter_bank_left(ng, 0 - 1), 0, "bank_left(-1) = 0.0");
+assert_eq(dhvani_meter_bank_right(ng, 0 - 1), 0, "bank_right(-1) = 0.0");
+assert_eq(dhvani_meter_bank_left(ng, 0), 0, "store(-1) touched no slot");
+var ngm = dhvani_meter_level_new(1, 48000);
+assert_eq(dhvani_meter_level_peak_db(ngm, 0 - 1), DH_METER_DB_FLOOR, "peak_db(-1) = floor");
+assert_eq(dhvani_meter_level_rms_db(ngm, 0 - 1), DH_METER_DB_FLOOR, "rms_db(-1) = floor");
+assert_eq(dhvani_meter_level_peak_hold_db(ngm, 0 - 1), DH_METER_DB_FLOOR, "peak_hold_db(-1) = floor");
+dhvani_meter_bank_set_active(ng, 0 - 3);
+assert_eq(dhvani_meter_bank_len(ng), 0, "set_active(-3) clamps to 0");
+assert_eq(dhvani_meter_bank_is_empty(ng), 1, "empty after set_active(-3)");
+var ngb = dhvani_meter_bank_new(0 - 2);
+assert_eq(dhvani_meter_bank_len(ngb), 0, "bank_new(-2) has 0 active");
 
 var rc = assert_summary();
 syscall(60, rc);

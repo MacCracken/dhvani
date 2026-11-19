@@ -2,6 +2,30 @@
 # Ports rust-old/src/dsp/reverb.rs. L1: deps error + buffer. Comb/allpass rings
 # as `vec`s; filter banks as vecs of filter handles. serde dropped.
 # Base delays @44100 scaled to the target rate. ALLPASS_FEEDBACK = 0.5.
+#
+# process() runs block-wise per channel lane: each comb walks the whole block over
+# its ring (data pointer, length and write position hoisted into locals,
+# compare-and-wrap instead of `%`), accumulating into a struct-owned grow-only
+# scratch row; then the two allpasses cascade over that row. Every sample sees
+# exactly the oracle's per-sample arithmetic in the oracle's order (combs summed
+# in index order from 0.0, x0.25, allpass cascade), so the output is bit-identical
+# to the per-sample chain (dhvani_reverb_run_chain) -- the reorder only removes
+# the per-sample handle/accessor/bounds-check traffic. Steady state: 0 bytes.
+#
+# Hardening (deliberate divergences from the oracle, docs/decisions/005):
+# - ReverbParams::validate rejects NaN, as the oracle's `(0.0..=1.0).contains`
+#   does (an `x < 0 || x > 1` test lets NaN through: mix=NaN made every output 0).
+# - Ring-store guard: a non-finite value is stored into a comb/allpass ring (and
+#   the comb's damping state) as 0, so one NaN/Inf input sample costs that one
+#   output sample instead of muting the channel -- dry path included -- until
+#   reset() (the oracle latches it into the feedback forever).
+# - Denormal flush: |x| < 1e-30 is stored as (signed) zero. Without it a silent
+#   tail with high feedback and low damping (room 1.0 / damping 0.2) settles into
+#   a permanent subnormal limit cycle (x * 0.95 rounds back to x at a few ulp),
+#   which costs subnormal-arithmetic CPU forever.
+# - A 0-channel buffer is a no-op (the oracle indexes samples[0] and panics).
+# - Params are copied into instance-owned storage on new()/set_params (the oracle
+#   moves them): mutating the caller's handle later cannot half-apply.
 
 #derive(accessors)
 struct DhReverbParams { room_size; damping; mix; }
@@ -13,7 +37,13 @@ struct DhCombFilter { buffer; write_pos; feedback; damp; damp_state; }
 struct DhAllpassFilter { buffer; write_pos; }
 
 #derive(accessors)
-struct DhReverb { combs_l; combs_r; allpasses_l; allpasses_r; params; bypassed; }
+struct DhReverb { combs_l; combs_r; allpasses_l; allpasses_r; params; bypassed; scratch; }
+
+# ring-store guard thresholds, on the f64 bit pattern with the sign cleared:
+# >= +inf bits -> non-finite (store 0); < 1e-30 bits -> flush to signed zero.
+var DH_RV_ABS_MASK   = 0x7FFFFFFFFFFFFFFF;
+var DH_RV_INF_BITS   = 0x7FF0000000000000;
+var DH_RV_FLUSH_BITS = 0x39B4484BFEEBC2A0;   # 1e-30
 
 # ---- ReverbParams ----
 #must_use
@@ -26,18 +56,20 @@ fn dhvani_reverbparams_new(room_size, damping, mix) {
 }
 #must_use
 fn dhvani_reverbparams_default() { return dhvani_reverbparams_new(0.5, 0.5, 0.3); }
+# validate -- each of room_size / damping / mix in [0, 1]; NaN is rejected.
 #must_use
 fn dhvani_reverbparams_validate(p) {
-    var rs = DhReverbParams_room_size(p);
-    if (f64_lt(rs, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_gt(rs, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
-    var dp = DhReverbParams_damping(p);
-    if (f64_lt(dp, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_gt(dp, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
-    var mx = DhReverbParams_mix(p);
-    if (f64_lt(mx, 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_gt(mx, 1.0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhReverbParams_room_size(p), 0, 1.0) == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhReverbParams_damping(p), 0, 1.0) == 0)   { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhReverbParams_mix(p), 0, 1.0) == 0)       { return DHVANI_ERR_INVALID_PARAMETER; }
     return DHVANI_ERR_NONE;
+}
+# copy every field of src into dst (no allocation).
+fn dh_reverbparams_copy_into(dst, src) {
+    DhReverbParams_set_room_size(dst, DhReverbParams_room_size(src));
+    DhReverbParams_set_damping(dst, DhReverbParams_damping(src));
+    DhReverbParams_set_mix(dst, DhReverbParams_mix(src));
+    return 0;
 }
 
 # scale a base delay (@44100) to the target rate; min 1.
@@ -46,6 +78,16 @@ fn dhvani_reverb_scale_delay(base, sample_rate) {
     var s = f64_to(f64_round_half_away(f64_div(f64_mul(f64_from(base), f64_from(sample_rate)), 44100.0)));
     if (s < 1) { s = 1; }
     return s;
+}
+
+# The ring-store guard (see header): non-finite -> 0, |x| < 1e-30 -> signed zero,
+# anything else unchanged. The block loops below inline the same two compares.
+#must_use
+fn dh_reverb_guard(x) {
+    var ab = x & DH_RV_ABS_MASK;
+    if (ab < DH_RV_FLUSH_BITS) { return f64_mul(x, 0); }
+    if (ab >= DH_RV_INF_BITS) { return 0; }
+    return x;
 }
 
 # ---- CombFilter ----
@@ -61,23 +103,64 @@ fn dhvani_comb_new(delay_samples) {
     DhCombFilter_set_damp_state(self, 0);
     return self;
 }
+# one sample through the comb (the per-sample form of dh_reverb_comb_block).
 fn dhvani_comb_process(self, input) {
     var ring = DhCombFilter_buffer(self);
     var wp = DhCombFilter_write_pos(self);
     var output = vec_get(ring, wp);
     var damp = DhCombFilter_damp(self);
-    var ds = f64_add(f64_mul(output, f64_sub(1.0, damp)), f64_mul(DhCombFilter_damp_state(self), damp));
+    var ds = DhCombFilter_damp_state(self);
+    ds = dh_reverb_guard(f64_add(f64_mul(output, f64_sub(1.0, damp)), f64_mul(ds, damp)));
     DhCombFilter_set_damp_state(self, ds);
-    vec_set(ring, wp, f64_add(input, f64_mul(ds, DhCombFilter_feedback(self))));
-    DhCombFilter_set_write_pos(self, (wp + 1) % vec_len(ring));
+    vec_set(ring, wp, dh_reverb_guard(f64_add(input, f64_mul(ds, DhCombFilter_feedback(self)))));
+    wp = wp + 1;
+    if (wp >= vec_len(ring)) { wp = 0; }
+    DhCombFilter_set_write_pos(self, wp);
     return output;
 }
 fn dhvani_comb_reset(self) {
     var ring = DhCombFilter_buffer(self);
-    var n = vec_len(ring); var i = 0;
-    while (i < n) { vec_set(ring, i, 0); i = i + 1; }
+    var p = dh_vec_data(ring);
+    var end = p + vec_len(ring) * 8;
+    while (p < end) { store64(p, 0); p = p + 8; }
     DhCombFilter_set_write_pos(self, 0);
     DhCombFilter_set_damp_state(self, 0);
+    return 0;
+}
+
+# run one comb over an n-sample block: acc[i] += comb(in[i]), where the input
+# walks `ip` with byte stride `stride` (one lane of an interleaved buffer).
+fn dh_reverb_comb_block(comb, ip, stride, acc, n) {
+    var ring = DhCombFilter_buffer(comb);
+    var rd = dh_vec_data(ring);
+    var rlen = vec_len(ring);
+    var wp = DhCombFilter_write_pos(comb);
+    var fb = DhCombFilter_feedback(comb);
+    var damp = DhCombFilter_damp(comb);
+    var omd = f64_sub(1.0, damp);
+    var ds = DhCombFilter_damp_state(comb);
+    var a = acc;
+    var aend = acc + n * 8;
+    var p = ip;
+    while (a < aend) {
+        var slot = rd + wp * 8;
+        var output = load64(slot);
+        # one-pole low-pass damping on the feedback, then the guarded ring store
+        ds = f64_add(f64_mul(output, omd), f64_mul(ds, damp));
+        var ab = ds & DH_RV_ABS_MASK;
+        if (ab < DH_RV_FLUSH_BITS) { ds = f64_mul(ds, 0); } elif (ab >= DH_RV_INF_BITS) { ds = 0; }
+        var v = f64_add(load64(p), f64_mul(ds, fb));
+        ab = v & DH_RV_ABS_MASK;
+        if (ab < DH_RV_FLUSH_BITS) { v = f64_mul(v, 0); } elif (ab >= DH_RV_INF_BITS) { v = 0; }
+        store64(slot, v);
+        wp = wp + 1;
+        if (wp >= rlen) { wp = 0; }
+        store64(a, f64_add(load64(a), output));
+        p = p + stride;
+        a = a + 8;
+    }
+    DhCombFilter_set_write_pos(comb, wp);
+    DhCombFilter_set_damp_state(comb, ds);
     return 0;
 }
 
@@ -91,24 +174,55 @@ fn dhvani_allpass_new(delay_samples) {
     DhAllpassFilter_set_write_pos(self, 0);
     return self;
 }
+# one sample through the allpass (the per-sample form of dh_reverb_allpass_block).
 fn dhvani_allpass_process(self, input) {
     var ring = DhAllpassFilter_buffer(self);
     var wp = DhAllpassFilter_write_pos(self);
     var buffered = vec_get(ring, wp);
-    vec_set(ring, wp, f64_add(input, f64_mul(buffered, 0.5)));
-    DhAllpassFilter_set_write_pos(self, (wp + 1) % vec_len(ring));
+    vec_set(ring, wp, dh_reverb_guard(f64_add(input, f64_mul(buffered, 0.5))));
+    wp = wp + 1;
+    if (wp >= vec_len(ring)) { wp = 0; }
+    DhAllpassFilter_set_write_pos(self, wp);
     return f64_add(f64_neg(input), buffered);
 }
 fn dhvani_allpass_reset(self) {
     var ring = DhAllpassFilter_buffer(self);
-    var n = vec_len(ring); var i = 0;
-    while (i < n) { vec_set(ring, i, 0); i = i + 1; }
+    var p = dh_vec_data(ring);
+    var end = p + vec_len(ring) * 8;
+    while (p < end) { store64(p, 0); p = p + 8; }
     DhAllpassFilter_set_write_pos(self, 0);
     return 0;
 }
 
+# run one allpass over an n-sample row in place: x[i] = allpass(x[i]).
+fn dh_reverb_allpass_block(ap, x, n) {
+    var ring = DhAllpassFilter_buffer(ap);
+    var rd = dh_vec_data(ring);
+    var rlen = vec_len(ring);
+    var wp = DhAllpassFilter_write_pos(ap);
+    var a = x;
+    var aend = x + n * 8;
+    while (a < aend) {
+        var input = load64(a);
+        var slot = rd + wp * 8;
+        var buffered = load64(slot);
+        var v = f64_add(input, f64_mul(buffered, 0.5));
+        var ab = v & DH_RV_ABS_MASK;
+        if (ab < DH_RV_FLUSH_BITS) { v = f64_mul(v, 0); } elif (ab >= DH_RV_INF_BITS) { v = 0; }
+        store64(slot, v);
+        wp = wp + 1;
+        if (wp >= rlen) { wp = 0; }
+        store64(a, f64_add(f64_neg(input), buffered));
+        a = a + 8;
+    }
+    DhAllpassFilter_set_write_pos(ap, wp);
+    return 0;
+}
+
 # ---- Reverb ----
-# run one channel's chain: sum 4 combs (x0.25) -> cascade allpasses.
+# run one channel's chain for ONE sample: sum 4 combs (x0.25) -> cascade allpasses.
+# The per-sample reference form of dh_reverb_lane (kept public; the block path is
+# bit-identical to it).
 #must_use
 fn dhvani_reverb_run_chain(combs, allpasses, input) {
     var comb_sum = 0;
@@ -119,6 +233,34 @@ fn dhvani_reverb_run_chain(combs, allpasses, input) {
     var na = vec_len(allpasses); var j = 0;
     while (j < na) { out = dhvani_allpass_process(vec_get(allpasses, j), out); j = j + 1; }
     return out;
+}
+
+# one lane of an n-frame block: in/out walk `ip` with byte stride `stride`; `acc`
+# is >= n f64 slots of scratch. Combs -> x0.25 -> allpass cascade -> dry/wet mix.
+fn dh_reverb_lane(combs, allpasses, ip, stride, acc, n, dry, mix) {
+    var aend = acc + n * 8;
+    var a = acc;
+    while (a < aend) { store64(a, 0); a = a + 8; }
+    var nc = vec_len(combs);
+    var cd = dh_vec_data(combs);
+    var i = 0;
+    while (i < nc) { dh_reverb_comb_block(load64(cd + i * 8), ip, stride, acc, n); i = i + 1; }
+    a = acc;
+    while (a < aend) { store64(a, f64_mul(load64(a), 0.25)); a = a + 8; }
+    var na = vec_len(allpasses);
+    var ad = dh_vec_data(allpasses);
+    var j = 0;
+    while (j < na) { dh_reverb_allpass_block(load64(ad + j * 8), acc, n); j = j + 1; }
+    a = acc;
+    var p = ip;
+    while (a < aend) {
+        var out = f64_add(f64_mul(load64(p), dry), f64_mul(load64(a), mix));
+        if (dhvani_is_finite(out) == 0) { out = 0; }
+        store64(p, out);
+        p = p + stride;
+        a = a + 8;
+    }
+    return 0;
 }
 
 fn dhvani_reverb_set_combs_fd(combs, feedback, damp) {
@@ -139,6 +281,8 @@ fn dhvani_reverb_update_params(self, params) {
     return 0;
 }
 
+# new(params, sample_rate) -- handle, or 0 if params invalid. The params are
+# copied; the caller keeps ownership of its handle.
 #must_use
 fn dhvani_reverb_new(params, sample_rate) {
     if (dhvani_is_err(dhvani_reverbparams_validate(params)) == 1) { return 0; }
@@ -161,51 +305,45 @@ fn dhvani_reverb_new(params, sample_rate) {
         vec_push(allpasses_r, dhvani_allpass_new(dhvani_reverb_scale_delay(vec_get(ad, j) + 23, sample_rate)));
         j = j + 1;
     }
+    var own = alloc(sizeof(DhReverbParams));
+    dh_reverbparams_copy_into(own, params);
     DhReverb_set_combs_l(self, combs_l);
     DhReverb_set_combs_r(self, combs_r);
     DhReverb_set_allpasses_l(self, allpasses_l);
     DhReverb_set_allpasses_r(self, allpasses_r);
-    DhReverb_set_params(self, params);
+    DhReverb_set_params(self, own);
     DhReverb_set_bypassed(self, 0);
-    dhvani_reverb_update_params(self, params);
+    DhReverb_set_scratch(self, vec_new());
+    dhvani_reverb_update_params(self, own);
     return self;
 }
 
+# process(buf) -- in place. Mono runs the left path; stereo and wider buffers run
+# L/R decorrelated paths on channels 0/1 and pass the rest through unchanged.
 fn dhvani_reverb_process(self, buf) {
     if (DhReverb_bypassed(self) == 1) { return 0; }
     var ch = DhAudioBuffer_channels(buf);
+    if (ch < 1) { return 0; }
     var samples = DhAudioBuffer_samples(buf);
-    var frames = DhAudioBuffer_frames(buf);
-    var p = DhReverb_params(self);
-    var mix = DhReverbParams_mix(p);
+    # never walk past the storage, whatever `frames` claims
+    var frames = dh_imin(DhAudioBuffer_frames(buf), vec_len(samples) / ch);
+    if (frames < 1) { return 0; }
+    var mix = DhReverbParams_mix(DhReverb_params(self));
     var dry = f64_sub(1.0, mix);
-    var combs_l = DhReverb_combs_l(self);
-    var combs_r = DhReverb_combs_r(self);
-    var allpasses_l = DhReverb_allpasses_l(self);
-    var allpasses_r = DhReverb_allpasses_r(self);
-    var frame = 0;
-    while (frame < frames) {
-        if (ch == 1) {
-            var input = vec_get(samples, frame);
-            var rev = dhvani_reverb_run_chain(combs_l, allpasses_l, input);
-            var out = f64_add(f64_mul(input, dry), f64_mul(rev, mix));
-            if (dhvani_is_finite(out) == 0) { out = 0; }
-            vec_set(samples, frame, out);
-        } else {
-            var l_idx = frame * ch;
-            var r_idx = frame * ch + 1;
-            var input_l = vec_get(samples, l_idx);
-            var input_r = vec_get(samples, r_idx);
-            var rev_l = dhvani_reverb_run_chain(combs_l, allpasses_l, input_l);
-            var rev_r = dhvani_reverb_run_chain(combs_r, allpasses_r, input_r);
-            var out_l = f64_add(f64_mul(input_l, dry), f64_mul(rev_l, mix));
-            var out_r = f64_add(f64_mul(input_r, dry), f64_mul(rev_r, mix));
-            if (dhvani_is_finite(out_l) == 0) { out_l = 0; }
-            if (dhvani_is_finite(out_r) == 0) { out_r = 0; }
-            vec_set(samples, l_idx, out_l);
-            vec_set(samples, r_idx, out_r);
-        }
-        frame = frame + 1;
+    # grow-only scratch row (allocates only past the largest block seen)
+    var scratch = DhReverb_scratch(self);
+    if (vec_cap(scratch) < frames) {
+        scratch = dh_vec_zeros(frames);
+        DhReverb_set_scratch(self, scratch);
+    }
+    var acc = dh_vec_data(scratch);
+    var d = dh_vec_data(samples);
+    if (ch == 1) {
+        dh_reverb_lane(DhReverb_combs_l(self), DhReverb_allpasses_l(self), d, 8, acc, frames, dry, mix);
+    } else {
+        var stride = ch * 8;
+        dh_reverb_lane(DhReverb_combs_l(self), DhReverb_allpasses_l(self), d, stride, acc, frames, dry, mix);
+        dh_reverb_lane(DhReverb_combs_r(self), DhReverb_allpasses_r(self), d + 8, stride, acc, frames, dry, mix);
     }
     return 0;
 }
@@ -214,14 +352,18 @@ fn dhvani_reverb_set_bypass(self, bypassed) { DhReverb_set_bypassed(self, bypass
 #must_use
 fn dhvani_reverb_is_bypassed(self) { if (DhReverb_bypassed(self) == 1) { return 1; } return 0; }
 
+# set_params(params) -- validate, then copy into the owned params; error code on
+# invalid (nothing changes then).
 fn dhvani_reverb_set_params(self, params) {
     var rc = dhvani_reverbparams_validate(params);
     if (dhvani_is_err(rc) == 1) { return rc; }
-    dhvani_reverb_update_params(self, params);
-    DhReverb_set_params(self, params);
+    dh_reverbparams_copy_into(DhReverb_params(self), params);
+    dhvani_reverb_update_params(self, DhReverb_params(self));
     return DHVANI_ERR_NONE;
 }
 
+# set_sample_rate(sample_rate) -- rebuild the delay lines for the new rate. This
+# reallocates the rings: call it on session changes, not per buffer.
 fn dhvani_reverb_set_sample_rate(self, sample_rate) {
     var was_bypassed = DhReverb_bypassed(self);
     var fresh = dhvani_reverb_new(DhReverb_params(self), sample_rate);

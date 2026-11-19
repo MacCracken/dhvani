@@ -8,23 +8,10 @@
 # KeyResult fields: key (name string), root (0..11 pitch class), is_major (0/1),
 # confidence (0..1), correlations (24-slot vec: [12 major..., 12 minor...]).
 
-# ---- PITCH_NAMES lookup (was [&str; 12]) ----
+# ---- PITCH_NAMES lookup (was [&str; 12]) -- the same table as chroma's
+# PITCH_CLASSES, so it delegates rather than keeping a second copy.
 #must_use
-fn dhvani_key_pitch_name(idx) {
-    if (idx == 0)  { return "C"; }
-    if (idx == 1)  { return "C#"; }
-    if (idx == 2)  { return "D"; }
-    if (idx == 3)  { return "D#"; }
-    if (idx == 4)  { return "E"; }
-    if (idx == 5)  { return "F"; }
-    if (idx == 6)  { return "F#"; }
-    if (idx == 7)  { return "G"; }
-    if (idx == 8)  { return "G#"; }
-    if (idx == 9)  { return "A"; }
-    if (idx == 10) { return "A#"; }
-    if (idx == 11) { return "B"; }
-    return "unknown";
-}
+fn dhvani_key_pitch_name(idx) { return dhvani_chroma_pitch_class_name(idx); }
 
 # ---- MAJOR_PROFILE (Krumhansl-Kessler) as a 12-slot vec ----
 # [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
@@ -90,7 +77,6 @@ fn dhvani_key_result_correlations(self) { return DhKeyResult_correlations(self);
 # (Replaces the Rust format!("{} {mode}", PITCH_NAMES[root]).)
 #must_use
 fn dhvani_key_name(root, is_major) {
-    var name = dhvani_key_pitch_name(root);
     if (is_major == 1) {
         if (root == 0)  { return "C major"; }
         if (root == 1)  { return "C# major"; }
@@ -179,9 +165,11 @@ fn dhvani_key_sort_desc(v) {
     return 0;
 }
 
-# detect_key_from_chroma(chroma) -- detect key from a pre-computed chromagram.
+# detect_key_from_chroma(chroma) -- detect key from a pre-computed chromagram;
+# 0 (null) for a null chromagram (e.g. a rejected dhvani_chromagram_from_array).
 #must_use
 fn dhvani_key_detect_from_chroma(chroma) {
+    if (chroma == 0) { return 0; }
     var chroma_vals = dhvani_chromagram_chroma(chroma);
     var major_profile = dhvani_key_major_profile();
     var minor_profile = dhvani_key_minor_profile();

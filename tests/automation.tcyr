@@ -108,5 +108,181 @@ dhvani_auto_remove_at(l10, 100);
 assert_eq(dhvani_auto_len(l10), 1, "one left");
 assert_eq(DhBreakpoint_frame(vec_get(dhvani_auto_breakpoints(l10), 0)), 200, "remaining frame 200");
 
+# ================================================================
+# 2.3.2 parity regressions: the oracle's binary search (expected values are rust-old's
+# AutomationLane on its pinned 1.89 toolchain, f32)
+# ================================================================
+
+fn ax_zeros(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, 0); i = i + 1; }
+    return v;
+}
+
+# ---- same_frame_order_matches_oracle ----
+# binary_search answers Ok(the LAST equal index); insert there puts each later
+# breakpoint just before the first one added at that frame. The port appended in
+# insertion order and found the FIRST breakpoint >= the query.
+test_group("same_frame_order_matches_oracle");
+var ax_ok = 1;
+var ax_n = 2;
+while (ax_n <= 6) {
+    var ax_l = dhvani_auto_new(0);
+    dhvani_auto_add(ax_l, dhvani_breakpoint_new(0, f64_neg(1.0), DH_CURVE_LINEAR, 0));
+    var ax_i = 0;
+    while (ax_i < ax_n) {
+        dhvani_auto_add(ax_l, dhvani_breakpoint_new(100, f64_from(ax_i), DH_CURVE_LINEAR, 0));
+        ax_i = ax_i + 1;
+    }
+    dhvani_auto_add(ax_l, dhvani_breakpoint_new(200, f64_neg(2.0), DH_CURVE_LINEAR, 0));
+    # rust-old order: [-1, 1, 2, .., n-1, 0, -2]
+    var ax_bps = dhvani_auto_breakpoints(ax_l);
+    var ax_j = 1;
+    while (ax_j < ax_n) {
+        if (DhBreakpoint_value(vec_get(ax_bps, ax_j)) != f64_from(ax_j)) { ax_ok = 0; }
+        ax_j = ax_j + 1;
+    }
+    if (DhBreakpoint_value(vec_get(ax_bps, ax_n)) != 0) { ax_ok = 0; }
+    # rust-old: v99 = 0.98, v100 = 0, v150 = -1
+    if (near(dhvani_auto_value_at(ax_l, 99), 0.98, 0.000001) == 0) { ax_ok = 0; }
+    if (dhvani_auto_value_at(ax_l, 100) != 0) { ax_ok = 0; }
+    if (near(dhvani_auto_value_at(ax_l, 150), f64_neg(1.0), 0.000001) == 0) { ax_ok = 0; }
+    ax_n = ax_n + 1;
+}
+assert_eq(ax_ok, 1, "2..6 breakpoints at one frame: order and value_at = rust-old");
+# a jump authored as two breakpoints at frame 100
+var ax_jl = dhvani_auto_new(0);
+dhvani_auto_add(ax_jl, dhvani_breakpoint_new(0, 0, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(ax_jl, dhvani_breakpoint_new(100, 0.25, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(ax_jl, dhvani_breakpoint_new(100, 0.75, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(ax_jl, dhvani_breakpoint_new(200, 1.0, DH_CURVE_LINEAR, 0));
+assert(near(dhvani_auto_value_at(ax_jl, 150), 0.625, 0.000001), "jump: value_at(150) = 0.625 (rust-old; was 0.875)");
+assert_eq(dhvani_auto_value_at(ax_jl, 100), 0.25, "jump: value_at(100) = 0.25 (rust-old)");
+
+# ---- exact_frame_queries_match_oracle ----
+# A same-frame group with a Step in it: value_at at, before and after the shared frame,
+# and render_fast across it.
+test_group("exact_frame_queries_match_oracle");
+var ax_q = dhvani_auto_new(0);
+dhvani_auto_add(ax_q, dhvani_breakpoint_new(0, 0, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(ax_q, dhvani_breakpoint_new(100, 0.25, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(ax_q, dhvani_breakpoint_new(100, 0.75, DH_CURVE_LINEAR, 0));
+dhvani_auto_add(ax_q, dhvani_breakpoint_new(100, F64_HALF, DH_CURVE_STEP, 0));
+dhvani_auto_add(ax_q, dhvani_breakpoint_new(200, 1.0, DH_CURVE_LINEAR, 0));
+var ax_qb = dhvani_auto_breakpoints(ax_q);
+var ax_order_ok = 1;
+if (DhBreakpoint_value(vec_get(ax_qb, 1)) != 0.75) { ax_order_ok = 0; }
+if (DhBreakpoint_value(vec_get(ax_qb, 2)) != F64_HALF) { ax_order_ok = 0; }
+if (DhBreakpoint_value(vec_get(ax_qb, 3)) != 0.25) { ax_order_ok = 0; }
+assert_eq(ax_order_ok, 1, "order [0, 0.75, 0.5, 0.25, 1] (rust-old)");
+var ax_fr = vec_new();
+var ax_ex = vec_new();
+fn ax_pair(fr, ex, f, v) { vec_push(fr, f); vec_push(ex, v); return 0; }
+ax_pair(ax_fr, ax_ex, 0, 0);
+ax_pair(ax_fr, ax_ex, 50, 0.375);
+ax_pair(ax_fr, ax_ex, 99, 0.7425);
+ax_pair(ax_fr, ax_ex, 100, 0.25);
+ax_pair(ax_fr, ax_ex, 101, 0.2575);
+ax_pair(ax_fr, ax_ex, 150, 0.625);
+ax_pair(ax_fr, ax_ex, 199, 0.9925);
+ax_pair(ax_fr, ax_ex, 200, 1.0);
+ax_pair(ax_fr, ax_ex, 250, 1.0);
+var ax_vok = 1;
+var ax_k = 0;
+while (ax_k < vec_len(ax_fr)) {
+    if (near(dhvani_auto_value_at(ax_q, vec_get(ax_fr, ax_k)), vec_get(ax_ex, ax_k), 0.000001) == 0) { ax_vok = 0; }
+    ax_k = ax_k + 1;
+}
+assert_eq(ax_vok, 1, "value_at at 9 frames = rust-old");
+var ax_rf = ax_zeros(8);
+dhvani_auto_render_fast(ax_q, ax_rf, 98);
+var ax_rx = vec_new();
+vec_push(ax_rx, 0.735); vec_push(ax_rx, 0.7425); vec_push(ax_rx, 0.25); vec_push(ax_rx, 0.2575);
+vec_push(ax_rx, 0.265); vec_push(ax_rx, 0.2725); vec_push(ax_rx, 0.28); vec_push(ax_rx, 0.2875);
+var ax_rok = 1;
+ax_k = 0;
+while (ax_k < 8) {
+    if (near(vec_get(ax_rf, ax_k), vec_get(ax_rx, ax_k), 0.000001) == 0) { ax_rok = 0; }
+    ax_k = ax_k + 1;
+}
+assert_eq(ax_rok, 1, "render_fast from 98 = rust-old");
+var ax_rf2 = ax_zeros(4);
+dhvani_auto_render_fast(ax_q, ax_rf2, 100);
+assert(near(vec_get(ax_rf2, 0), 0.25, 0.000001), "render_fast from 100: 0.25 (rust-old)");
+assert(near(vec_get(ax_rf2, 3), 0.2725, 0.000001), "render_fast from 100: 0.2725 at 103 (rust-old)");
+
+# ---- binary_search_matches_scan ----
+# Without same-frame breakpoints the oracle's search is the lower bound the 2.3.2 scan
+# found: value_at over a 64-breakpoint lane equals that scan at every frame.
+fn ax_scan_value(self, frame) {
+    var bps = DhAutomationLane_breakpoints(self);
+    var n = vec_len(bps);
+    var first = vec_get(bps, 0);
+    if (frame <= DhBreakpoint_frame(first)) { return DhBreakpoint_value(first); }
+    var last = vec_get(bps, n - 1);
+    if (frame >= DhBreakpoint_frame(last)) { return DhBreakpoint_value(last); }
+    var idx = 0;
+    while (DhBreakpoint_frame(vec_get(bps, idx)) < frame) { idx = idx + 1; }
+    var prev = vec_get(bps, idx - 1);
+    var next = vec_get(bps, idx);
+    return dhvani_auto_interpolate(DhBreakpoint_value(prev), DhBreakpoint_value(next),
+      DhBreakpoint_frame(prev), DhBreakpoint_frame(next), frame,
+      DhBreakpoint_curve(next), DhBreakpoint_exp(next));
+}
+test_group("binary_search_matches_scan");
+var ax_big = dhvani_auto_new(0);
+var ax_b = 0;
+while (ax_b < 64) {
+    var ax_cv = DH_CURVE_LINEAR;
+    if ((ax_b % 3) == 1) { ax_cv = DH_CURVE_SMOOTH; }
+    if ((ax_b % 3) == 2) { ax_cv = DH_CURVE_EXPONENTIAL; }
+    dhvani_auto_add(ax_big, dhvani_breakpoint_new((63 - ax_b) * 7 + (ax_b % 2), f64_from(ax_b % 5), ax_cv, 2.0));
+    ax_b = ax_b + 1;
+}
+var ax_sok = 1;
+var ax_f = 0 - 3;
+while (ax_f < 460) {
+    if (dhvani_auto_value_at(ax_big, ax_f) != ax_scan_value(ax_big, ax_f)) { ax_sok = 0; }
+    ax_f = ax_f + 1;
+}
+assert_eq(ax_sok, 1, "value_at = the linear scan at 463 frames");
+var ax_rb = ax_zeros(463);
+dhvani_auto_render(ax_big, ax_rb, 0 - 3);
+var ax_same = 1;
+ax_f = 0;
+while (ax_f < 463) {
+    if (vec_get(ax_rb, ax_f) != ax_scan_value(ax_big, ax_f - 3)) { ax_same = 0; }
+    ax_f = ax_f + 1;
+}
+assert_eq(ax_same, 1, "render = the scan");
+
+# ---- remove_and_clear_in_place ----
+# retain / clear in the oracle are in place; the port minted a new vec per call.
+test_group("remove_and_clear_in_place");
+var ax_rl = dhvani_auto_new(0);
+var ax_r = 0;
+while (ax_r < 10) {
+    dhvani_auto_add(ax_rl, dhvani_breakpoint_new((ax_r % 3) * 100, f64_from(ax_r), DH_CURVE_LINEAR, 0));
+    ax_r = ax_r + 1;
+}
+var ax_ru = alloc_used();
+dhvani_auto_remove_at(ax_rl, 100);
+assert_eq(alloc_used() - ax_ru, 0, "remove_at allocates nothing");
+assert_eq(dhvani_auto_len(ax_rl), 7, "3 breakpoints at frame 100 removed");
+var ax_rbs = dhvani_auto_breakpoints(ax_rl);
+var ax_sorted = 1;
+ax_r = 1;
+while (ax_r < 7) {
+    if (DhBreakpoint_frame(vec_get(ax_rbs, ax_r)) < DhBreakpoint_frame(vec_get(ax_rbs, ax_r - 1))) { ax_sorted = 0; }
+    if (DhBreakpoint_frame(vec_get(ax_rbs, ax_r)) == 100) { ax_sorted = 0; }
+    ax_r = ax_r + 1;
+}
+assert_eq(ax_sorted, 1, "the rest stay sorted");
+ax_ru = alloc_used();
+dhvani_auto_clear(ax_rl);
+assert_eq(alloc_used() - ax_ru, 0, "clear allocates nothing");
+assert_eq(dhvani_auto_is_empty(ax_rl), 1, "cleared");
+
 var rc = assert_summary();
 syscall(60, rc);

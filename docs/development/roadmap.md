@@ -151,6 +151,16 @@ Parity first; these resume once the port is green. Demand-gated.
     `clamp` and `noise_gate` vectorize too (today they are walked), and an f32 lane
     path (`f32v8_*`, 8 lanes) only if a consumer wants f32 throughput over f64 precision.
 
+- **Open from the 2.3.3 P(-1) sweep** (each needs a decision; `state.md`, ADR 005):
+  - convolution `process` streams with the oracle's timing, so a host block that is not
+    a multiple of 512 returns some frames dry. A correct stream needs one block of
+    latency, which callers would see.
+  - MIDI 2.0 upscaling is bit replication, not min-center-max, so the pitch-bend centre
+    8192 does not map to `0x80000000`.
+  - upstream (cyrius stdlib): `simd_has_avx2` should also check OSXSAVE/XCR0 and the
+    maximum CPUID leaf.
+  - streaming onset/beat flux (memory proportional to bins, not to the track length).
+
 ## Out of scope (unchanged from Rust)
 
 - Audio file I/O (shravan / tarang), plugin hosting (shruti), composition /

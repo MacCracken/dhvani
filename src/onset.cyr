@@ -38,6 +38,54 @@ fn dhvani_onset_position(self, i) { return vec_get(DhOnsetResult_positions(self)
 #must_use
 fn dhvani_onset_strength(self, i) { return vec_get(DhOnsetResult_strengths(self), i); }
 
+# spectral_flux(sg) -- the onset strength envelope shared by detect_onsets and
+# beat's onset_strength_envelope (identical in rust-old: onset.rs's flux before
+# peak-picking == beat.rs's envelope). flux[0] = 0 (no predecessor), flux[i] =
+# sum over bins of the positive increases frame[i] - frame[i-1], then normalized
+# by its peak (folded from 0.0, NaN-ignoring like the oracle's f32::max).
+# Returns a `vec` of num_frames f64 values, or an empty vec when < 2 frames.
+#must_use
+fn dhvani_spectral_flux(sg) {
+    var flux = vec_new();
+    var num_frames = dhvani_spectrogram_num_frames(sg);
+    if (num_frames < 2) { return flux; }
+    var num_bins = dhvani_spectrogram_num_bins(sg);
+
+    vec_push(flux, 0); # First frame has no predecessor.
+    var prevv = dhvani_spectrogram_frame(sg, 0);
+    var i = 1;
+    while (i < num_frames) {
+        var diff_sum = 0;
+        var curv = dhvani_spectrogram_frame(sg, i);
+        # raw reads: never past either frame (stft frames are num_bins long)
+        var nb = dh_imin(num_bins, dh_imin(vec_len(curv), vec_len(prevv)));
+        var cur = dh_vec_data(curv);
+        var prev = dh_vec_data(prevv);
+        var bin = 0;
+        while (bin < nb) {
+            var diff = f64_sub(load64(cur + bin * 8), load64(prev + bin * 8));
+            if (f64_gt(diff, 0) == 1) { diff_sum = f64_add(diff_sum, diff); }
+            bin = bin + 1;
+        }
+        vec_push(flux, diff_sum);
+        prevv = curv;
+        i = i + 1;
+    }
+
+    # Normalize flux by its peak (fold over 0.0, so >= 0). Storage taken after
+    # the last push (a push may move it).
+    var flux_len = vec_len(flux);
+    var fd = dh_vec_data(flux);
+    var max_flux = 0;
+    var m = 0;
+    while (m < flux_len) { max_flux = dh_max_ignore_nan(max_flux, load64(fd + m * 8)); m = m + 1; }
+    if (f64_gt(max_flux, 0) == 1) {
+        var n = 0;
+        while (n < flux_len) { store64(fd + n * 8, f64_div(load64(fd + n * 8), max_flux)); n = n + 1; }
+    }
+    return flux;
+}
+
 # build an OnsetResult from positions + strengths vecs.
 #must_use
 fn dhvani_onset_make_result(positions, strengths) {
@@ -48,47 +96,20 @@ fn dhvani_onset_make_result(positions, strengths) {
 }
 
 # detect_onsets(buf, window_size, hop_size, threshold) -- spectral-flux onsets.
-# Returns a result handle, or 0 on STFT error. With < 2 STFT frames returns an
-# empty result. threshold is an f64 sensitivity (lower = more sensitive).
+# Returns a result handle, or 0 on STFT error (incl. hop_size <= 0). With < 2
+# STFT frames returns an empty result. threshold is an f64 sensitivity (lower =
+# more sensitive).
 #must_use
 fn dhvani_detect_onsets(buf, window_size, hop_size, threshold) {
     var sg = dhvani_stft(buf, window_size, hop_size);
     if (sg == 0) { return 0; }
 
-    var num_frames = dhvani_spectrogram_num_frames(sg);
-    if (num_frames < 2) {
-        return dhvani_onset_make_result(vec_new(), vec_new());
-    }
-
-    var num_bins = dhvani_spectrogram_num_bins(sg);
-
-    # Compute spectral flux: sum of positive differences between consecutive frames.
-    var flux = vec_new();
-    vec_push(flux, 0); # First frame has no predecessor.
-
-    var i = 1;
-    while (i < num_frames) {
-        var diff_sum = 0;
-        var cur = dhvani_spectrogram_frame(sg, i);
-        var prev = dhvani_spectrogram_frame(sg, i - 1);
-        var bin = 0;
-        while (bin < num_bins) {
-            var diff = f64_sub(vec_get(cur, bin), vec_get(prev, bin));
-            if (f64_gt(diff, 0) == 1) { diff_sum = f64_add(diff_sum, diff); }
-            bin = bin + 1;
-        }
-        vec_push(flux, diff_sum);
-        i = i + 1;
-    }
-
-    # Normalize flux by its peak (fold over 0.0, so >= 0).
+    # Spectral flux: sum of positive differences between consecutive frames,
+    # normalized by its peak (dhvani_spectral_flux, shared with beat).
+    var flux = dhvani_spectral_flux(sg);
     var flux_len = vec_len(flux);
-    var max_flux = 0;
-    var m = 0;
-    while (m < flux_len) { max_flux = f64_max(max_flux, vec_get(flux, m)); m = m + 1; }
-    if (f64_gt(max_flux, 0) == 1) {
-        var n = 0;
-        while (n < flux_len) { vec_set(flux, n, f64_div(vec_get(flux, n), max_flux)); n = n + 1; }
+    if (flux_len < 2) {
+        return dhvani_onset_make_result(vec_new(), vec_new());
     }
 
     # Peak-pick: flux values above threshold that are local maxima.

@@ -17,27 +17,49 @@ var DH_MIDIROUTE_CURVE_SOFT   = 1;
 var DH_MIDIROUTE_CURVE_HARD   = 2;
 var DH_MIDIROUTE_CURVE_FIXED  = 3;
 
+# Rust float `as u8`: truncate toward zero, SATURATING to 0..255 (NaN -> 0).
+# f64_to alone truncates without saturating, so Hard(200) gave 314 not 255.
+#must_use
+fn dh_midiroute_f64_as_u8(x) {
+    if (f64_ge(x, 1.0) == 0) { return 0; }      # NaN, negative, [0,1) -> 0
+    if (f64_ge(x, 255.0) == 1) { return 255; }
+    return f64_to(x);
+}
+
+# Normalise a curve code: anything outside the four known codes -> LINEAR, so a
+# bad code can no longer silently act as Fixed(payload) (Fixed(0) = all
+# note-offs).
+#must_use
+fn dh_midiroute_curve_code(kind) {
+    if (kind == DH_MIDIROUTE_CURVE_SOFT) { return kind; }
+    if (kind == DH_MIDIROUTE_CURVE_HARD) { return kind; }
+    if (kind == DH_MIDIROUTE_CURVE_FIXED) { return kind; }
+    return DH_MIDIROUTE_CURVE_LINEAR;
+}
+
 # Apply a velocity curve to a raw 0..127 velocity. `kind` is one of the curve
-# codes; `fixed_value` is only read when kind == FIXED. Rust `as u8` truncates
-# toward zero -> f64_to. Non-Fixed curves ignore `fixed_value`.
+# codes; `fixed_value` is only read when kind == FIXED. Soft/Hard emulate Rust
+# `as u8` (truncate + saturate to 0..255). Unknown codes behave as LINEAR.
+# The f32 oracle and this f64 port agree exactly on every velocity 0..255.
 #must_use
 fn dhvani_midiroute_curve_apply(kind, fixed_value, velocity) {
-    if (kind == DH_MIDIROUTE_CURVE_LINEAR) { return velocity; }
     if (kind == DH_MIDIROUTE_CURVE_SOFT) {
         var ns = f64_div(f64_from(velocity), 127.0);
-        return f64_to(f64_mul(f64_sqrt(ns), 127.0));
+        return dh_midiroute_f64_as_u8(f64_mul(f64_sqrt(ns), 127.0));
     }
     if (kind == DH_MIDIROUTE_CURVE_HARD) {
         var nh = f64_div(f64_from(velocity), 127.0);
-        return f64_to(f64_mul(f64_mul(nh, nh), 127.0));
+        return dh_midiroute_f64_as_u8(f64_mul(f64_mul(nh, nh), 127.0));
     }
-    return fixed_value;
+    if (kind == DH_MIDIROUTE_CURVE_FIXED) { return fixed_value; }
+    return velocity;
 }
 
 # ================================================================
 # MidiRoute -- filter + transform rule.
 # channel_filter: -1 = None (all channels), else 0..15.
-# velocity_curve: a curve kind code; velocity_fixed holds the Fixed payload.
+# velocity_curve: a curve kind code (unknown codes stored as LINEAR);
+# velocity_fixed holds the Fixed payload.
 # note_min/note_max: inclusive note range (0..127, min <= max).
 # ================================================================
 #derive(accessors)
@@ -57,7 +79,7 @@ fn dh_midiroute_clamp_channel(ch) {
 fn dhvani_midiroute_new(channel_filter, velocity_curve, velocity_fixed, note_min, note_max) {
     var self = alloc(sizeof(DhMidiRoute));
     DhMidiRoute_set_channel_filter(self, dh_midiroute_clamp_channel(channel_filter));
-    DhMidiRoute_set_velocity_curve(self, velocity_curve);
+    DhMidiRoute_set_velocity_curve(self, dh_midiroute_curve_code(velocity_curve));
     DhMidiRoute_set_velocity_fixed(self, velocity_fixed);
     var lo = note_min;
     if (lo > 127) { lo = 127; }
@@ -101,9 +123,10 @@ fn dhvani_midiroute_set_channel_filter(self, channel) {
     return 0;
 }
 
-# set_velocity_curve -- kind + Fixed payload (ignored for non-Fixed).
+# set_velocity_curve -- kind + Fixed payload (ignored for non-Fixed). Unknown
+# kind codes are stored as LINEAR.
 fn dhvani_midiroute_set_velocity_curve(self, velocity_curve, velocity_fixed) {
-    DhMidiRoute_set_velocity_curve(self, velocity_curve);
+    DhMidiRoute_set_velocity_curve(self, dh_midiroute_curve_code(velocity_curve));
     DhMidiRoute_set_velocity_fixed(self, velocity_fixed);
     return 0;
 }
@@ -120,11 +143,9 @@ fn dhvani_midiroute_set_note_range(self, min, max) {
     return 0;
 }
 
-# filter_event -- filter + transform a DhNoteEvent. Returns a NEW DhNoteEvent
-# handle (velocity-transformed clone) if the event passes, or 0 (None) if the
-# channel filter or note range rejects it.
+# 1 iff `event` passes the channel filter and the note range.
 #must_use
-fn dhvani_midiroute_filter_event(self, event) {
+fn dh_midiroute_accepts(self, event) {
     var cf = DhMidiRoute_channel_filter(self);
     if (cf >= 0) {
         if (dhvani_note_event_channel(event) != cf) { return 0; }
@@ -132,16 +153,39 @@ fn dhvani_midiroute_filter_event(self, event) {
     var note = dhvani_note_event_note(event);
     if (note < DhMidiRoute_note_min(self)) { return 0; }
     if (note > DhMidiRoute_note_max(self)) { return 0; }
+    return 1;
+}
+
+# filter_event_into -- zero-alloc filter + transform. If `event` passes, writes
+# the velocity-transformed copy into the caller-owned DhNoteEvent `out` and
+# returns 1; if rejected, returns 0 and leaves `out` untouched. `out` may be
+# `event` itself (in-place transform).
+fn dhvani_midiroute_filter_event_into(self, event, out) {
+    if (dh_midiroute_accepts(self, event) == 0) { return 0; }
     var vel = dhvani_midiroute_curve_apply(
       DhMidiRoute_velocity_curve(self),
       DhMidiRoute_velocity_fixed(self),
       dhvani_note_event_velocity(event));
-    return dhvani_note_event_new(
+    dhvani_note_event_init(
+      out,
       dhvani_note_event_position(event),
       dhvani_note_event_duration(event),
-      note,
+      dhvani_note_event_note(event),
       vel,
       dhvani_note_event_channel(event));
+    return 1;
+}
+
+# filter_event -- filter + transform a DhNoteEvent. Returns a NEW DhNoteEvent
+# handle (velocity-transformed clone) if the event passes, or 0 (None) if the
+# channel filter or note range rejects it. Allocates 40 B per passing event --
+# per-event RT paths use filter_event_into.
+#must_use
+fn dhvani_midiroute_filter_event(self, event) {
+    if (dh_midiroute_accepts(self, event) == 0) { return 0; }
+    var out = alloc(sizeof(DhNoteEvent));
+    dhvani_midiroute_filter_event_into(self, event, out);
+    return out;
 }
 
 # ================================================================

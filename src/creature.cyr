@@ -8,7 +8,9 @@
 # externalizes svara + sakshi, so those precede it -- see port-audit.md Wave F).
 # crvoice_vocalize / crvoice_vocalize_with_intent return a vec ptr of mono
 # samples on success or a NEGATIVE PRANI_ERR_* sentinel on failure; on failure
-# we return 0 (the Rust `?` propagated a NadaError::Dsp).
+# we return 0 (the Rust `?` propagated a NadaError::Dsp). prani itself refuses a
+# voice handle <= 0 (crvoice_vocalize_with_intent, 2.2.1), so an error code from
+# crvoice_new comes back as a negative result and maps to 0 here too.
 
 # render_vocalization: vocalize the voice (mono samples), wrap in a 1-channel
 # AudioBuffer. sample_rate is an integer (u32 in Rust); prani wants it as f64.

@@ -43,7 +43,8 @@ assert_eq(all_finite(ebuf), 1, "engine all finite");
 # Motor::new(Brushless, 6, 44100); render_mechanical_at_rpm(&mut, 5000, 22050, 44100)
 test_group("motor_renders");
 var motor = ghurni_motor_new(GH_MOTOR_BRUSHLESS, 6, f64_from(44100));
-var mbuf = dhvani_mech_render_at_rpm(&ghurni_motor_process_block, &ghurni_motor_set_rpm, motor, f64_from(5000), 22050, 44100);
+var mbuf = dhvani_mech_render_at_rpm(&ghurni_motor_process_block, &ghurni_motor_set_rpm, motor, f64_from(5000), 22050,
+  44100);
 assert_eq(dhvani_buffer_frames(mbuf), 22050, "motor frames 22050");
 assert_eq(all_finite(mbuf), 1, "motor all finite");
 
@@ -51,7 +52,8 @@ assert_eq(all_finite(mbuf), 1, "motor all finite");
 # Gear::new(20, Steel, 44100); render_mechanical_at_rpm(&mut, 1200, 4410, 44100)
 test_group("gear_renders");
 var gear = ghurni_gear_new(20, GH_GEAR_STEEL, f64_from(44100));
-var gbuf = dhvani_mech_render_at_rpm(&ghurni_gear_process_block, &ghurni_gear_set_rpm, gear, f64_from(1200), 4410, 44100);
+var gbuf = dhvani_mech_render_at_rpm(&ghurni_gear_process_block, &ghurni_gear_set_rpm, gear, f64_from(1200), 4410,
+  44100);
 assert(dhvani_buffer_frames(gbuf) > 0, "gear frames > 0");
 assert_eq(all_finite(gbuf), 1, "gear all finite");
 
@@ -59,7 +61,8 @@ assert_eq(all_finite(gbuf), 1, "gear all finite");
 # Turbine::new(12, 800, 44100); render_mechanical_at_rpm(&mut, 10000, 4410, 44100)
 test_group("turbine_renders");
 var turbine = ghurni_turbine_new(12, f64_from(800), f64_from(44100));
-var tbuf = dhvani_mech_render_at_rpm(&ghurni_turbine_process_block, &ghurni_turbine_set_rpm, turbine, f64_from(10000), 4410, 44100);
+var tbuf = dhvani_mech_render_at_rpm(&ghurni_turbine_process_block, &ghurni_turbine_set_rpm, turbine, f64_from(10000),
+  4410, 44100);
 assert(dhvani_buffer_frames(tbuf) > 0, "turbine frames > 0");
 
 # ---- synthesizer_trait_rpm ----
@@ -68,6 +71,45 @@ test_group("synthesizer_trait_rpm");
 var motor2 = ghurni_motor_new(GH_MOTOR_BRUSHLESS, 6, f64_from(44100));
 ghurni_motor_set_rpm(motor2, f64_from(2500));
 assert(f64_lt(f64_abs(f64_sub(ghurni_motor_rpm(motor2), f64_from(2500))), 0.0001), "motor rpm 2500");
+
+# ---- error_handles (2.3.2) ----
+# ghurni constructors return NEGATIVE GH_ERR_* codes and its synthesize /
+# process_block read the handle unchecked: through 2.3.1 these SIGSEGV'd.
+test_group("error_handles");
+var bad_engine = ghurni_engine_new(GH_ENGINE_GASOLINE, 4, 0);
+assert(bad_engine < 0, "ghurni_engine_new(sr=0) is an error code");
+var bad_motor = ghurni_motor_new(GH_MOTOR_BRUSHLESS, 6, 0);
+assert(bad_motor < 0, "ghurni_motor_new(sr=0) is an error code");
+assert_eq(dhvani_mech_render_engine(bad_engine, f64_from(3000), 0.5, 44100, 0.1), 0,
+  "render_engine(error handle) -> 0");
+var bad_rpm_buf = dhvani_mech_render_at_rpm(&ghurni_motor_process_block, &ghurni_motor_set_rpm, bad_motor,
+  f64_from(5000), 256, 44100);
+assert_eq(bad_rpm_buf, 0, "render_at_rpm(error handle) -> 0");
+assert_eq(dhvani_mech_render(&ghurni_motor_process_block, bad_motor, 256, 44100), 0, "render(error handle) -> 0");
+assert_eq(dhvani_mech_render(&ghurni_motor_process_block, 0, 256, 44100), 0, "render(null handle) -> 0");
+
+# ---- error_returns (2.3.2) ----
+# render_engine answers 0 on failure (it returned DHVANI_ERR_DSP = -5 through 2.3.1).
+test_group("error_returns");
+assert_eq(dhvani_mech_render_engine(engine, f64_from(3000), 0.5, 44100, 0), 0, "invalid duration -> 0 (was -5)");
+assert_eq(dhvani_mech_render_engine(engine, f64_from(3000), 0.5, 0, 0.1), 0, "sample_rate 0 -> 0 (was -5)");
+
+# ---- render_alloc (2.3.2) ----
+test_group("render_alloc");
+var motor3 = ghurni_motor_new(GH_MOTOR_BRUSHLESS, 6, f64_from(44100));
+var mw0 = dhvani_mech_render(&ghurni_motor_process_block, motor3, 1024, 44100);
+var ma0 = alloc_used();
+var mw1 = dhvani_mech_render(&ghurni_motor_process_block, motor3, 1024, 44100);
+var ma1 = alloc_used();
+assert(ma1 - ma0 <= 1024 * 8 + 128, "render: one exact sample allocation");
+var mbuf2 = dhvani_buffer_from_interleaved(dh_vec_zeros(1024), 1, 44100);
+var mb0 = alloc_used();
+assert_eq(dhvani_mech_render_into(&ghurni_motor_process_block, motor3, mbuf2), DHVANI_ERR_NONE, "render_into ok");
+var mb1 = alloc_used();
+assert_eq(mb1 - mb0, 0, "render_into allocates nothing");
+assert_eq(all_finite(mbuf2), 1, "render_into all finite");
+assert_eq(dhvani_mech_render_into(&ghurni_motor_process_block, bad_motor, mbuf2), DHVANI_ERR_INVALID_PARAMETER,
+  "render_into(error handle) -> invalid");
 
 var rc = assert_summary();
 syscall(60, rc);

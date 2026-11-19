@@ -69,5 +69,64 @@ var bbuf = dhvani_env_render_block(&rain_process_block, rain2, 4410, 44100);
 assert_eq(dhvani_buffer_frames(bbuf), 4410, "block frames 4410");
 assert_eq(all_finite(bbuf), 1, "block all finite");
 
+# ---- error_handles (2.3.2) ----
+# garjan constructors return NEGATIVE codes and garjan's synthesize/process_block
+# read the handle with no check: through 2.3.1 every bridge below SIGSEGV'd on one.
+test_group("error_handles");
+var bad_rain = rain_new(RAIN_INTENSITY_HEAVY, 0);
+assert(bad_rain < 0, "rain_new(sr=0) is an error code");
+var bad_impact = impact_new(MATERIAL_WOOD, 0);
+assert(bad_impact < 0, "impact_new(sr=0) is an error code");
+assert_eq(dhvani_env_render_environment(&rain_synthesize, bad_rain, 44100, 0.5), 0,
+  "render_environment(error handle) -> 0");
+assert_eq(dhvani_env_render_impact(bad_impact, IMPACT_STRIKE, 44100), 0, "render_impact(error handle) -> 0");
+assert_eq(dhvani_env_render_block(&rain_process_block, bad_rain, 256, 44100), 0, "render_block(error handle) -> 0");
+assert_eq(dhvani_env_render_block(&rain_process_block, 0, 256, 44100), 0, "render_block(null handle) -> 0");
+assert_eq(dhvani_env_render_environment(0, rain, 44100, 0.5), 0, "render_environment(null fn) -> 0");
+
+# ---- error_returns (2.3.2) ----
+# Failures answer 0, the null-handle sentinel, not garjan's negative code; and a
+# buffer-construction failure is a failure (rust-old map_err -> Err), not a 1 Hz
+# silence buffer.
+test_group("error_returns");
+assert_eq(dhvani_env_render_environment(&rain_synthesize, rain, 44100, 0), 0,
+  "invalid duration -> 0 (was a negative garjan code)");
+assert_eq(dhvani_env_render_environment(&rain_synthesize, rain, 0, 0.1), 0,
+  "sample_rate 0 -> 0 (was a silence buffer)");
+assert_eq(dhvani_env_render_impact(impact, IMPACT_STRIKE, 0), 0, "render_impact(sample_rate 0) -> 0");
+assert_eq(dhvani_env_render_impact(impact, 99, 44100), 0, "render_impact(bad type) -> 0");
+
+# ---- render_block_alloc (2.3.2) ----
+# one exact allocation per call (the push-grown vec was ~2x the payload: 16,312 B
+# for 1024 frames), and the _into form allocates nothing.
+test_group("render_block_alloc");
+var rain3 = rain_new(RAIN_INTENSITY_LIGHT, f64_from(44100));
+var bw0 = dhvani_env_render_block(&rain_process_block, rain3, 1024, 44100);
+var ba0 = alloc_used();
+var bw1 = dhvani_env_render_block(&rain_process_block, rain3, 1024, 44100);
+var ba1 = alloc_used();
+assert(ba1 - ba0 <= 1024 * 8 + 128, "render_block: one exact sample allocation");
+var ibuf2 = dhvani_buffer_from_interleaved(dh_vec_zeros(1024), 1, 44100);
+var bb0 = alloc_used();
+assert_eq(dhvani_env_render_block_into(&rain_process_block, rain3, ibuf2), DHVANI_ERR_NONE, "render_block_into ok");
+var bb1 = alloc_used();
+assert_eq(bb1 - bb0, 0, "render_block_into allocates nothing");
+assert_eq(all_finite(ibuf2), 1, "render_block_into all finite");
+var rainA = rain_new(RAIN_INTENSITY_LIGHT, f64_from(44100));
+var rainB = rain_new(RAIN_INTENSITY_LIGHT, f64_from(44100));
+var ra = dhvani_env_render_block(&rain_process_block, rainA, 512, 44100);
+var rbuf3 = dhvani_buffer_from_interleaved(dh_vec_zeros(512), 1, 44100);
+var rbr = dhvani_env_render_block_into(&rain_process_block, rainB, rbuf3);
+var same = 1;
+var si = 0;
+while (si < 512) {
+    if (vec_get(dhvani_buffer_samples(ra), si) != vec_get(dhvani_buffer_samples(rbuf3), si)) { same = 0; }
+    si = si + 1;
+}
+assert_eq(same, 1, "render_block_into == render_block for identical state");
+var st2 = dhvani_buffer_from_interleaved(dh_vec_zeros(4), 2, 44100);
+assert_eq(dhvani_env_render_block_into(&rain_process_block, rain3, st2), DHVANI_ERR_INVALID_PARAMETER,
+  "render_block_into on stereo -> invalid");
+
 var rc = assert_summary();
 syscall(60, rc);

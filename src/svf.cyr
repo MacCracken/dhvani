@@ -2,6 +2,18 @@
 # Ports rust-old/src/dsp/svf.rs. L1: deps error + buffer. SvfMode enum -> codes.
 # Per-channel state (ic1eq/ic2eq) as a vec of DhSvfState. serde dropped;
 # f32 params widen to f64. Stable under real-time cutoff modulation.
+#
+# Hardening beyond the oracle (as biquad.cyr):
+#   - Buffer channels beyond the filter's state count pass through untouched, and
+#     process_sample passes a negative channel through (the oracle panics on its
+#     out-of-range state index).
+#   - A sample rate whose Nyquist clamp `sample_rate * 0.499` falls below the 1 Hz floor
+#     (any rate under 3) makes the filter a pass-through: the oracle's
+#     `f64::clamp(1.0, sr * 0.499)` panics there, and tan(pi * 0 / 0) would make every
+#     later output NaN.
+#   - A state that went non-finite (a NaN or Inf input reached it) is cleared at the end
+#     of the block it arrived in. The oracle keeps it, so one bad sample made every later
+#     output NaN until reset().
 
 var DH_SVF_LOWPASS   = 0;
 var DH_SVF_HIGHPASS  = 1;
@@ -15,8 +27,9 @@ var DH_SVF_HIGHSHELF = 7;
 #derive(accessors)
 struct DhSvfState { ic1eq; ic2eq; }
 
+# thru = 1 while the sample rate is too low for the coefficients (see the header).
 #derive(accessors)
-struct DhSvfFilter { mode; freq_hz; q; gain_db; sample_rate; states; bypassed; mix; g; k; a1; a2; a3; a; }
+struct DhSvfFilter { mode; freq_hz; q; gain_db; sample_rate; states; bypassed; mix; g; k; a1; a2; a3; a; thru; }
 
 # new(mode, freq_hz, q, gain_db, sample_rate, channels).
 #must_use
@@ -45,6 +58,7 @@ fn dhvani_svf_new(mode, freq_hz, q, gain_db, sample_rate, channels) {
     DhSvfFilter_set_a2(self, 0);
     DhSvfFilter_set_a3(self, 0);
     DhSvfFilter_set_a(self, 1.0);
+    DhSvfFilter_set_thru(self, 0);
     dhvani_svf_update_coeffs(self);
     return self;
 }
@@ -52,6 +66,17 @@ fn dhvani_svf_new(mode, freq_hz, q, gain_db, sample_rate, channels) {
 # recompute g/k/a1/a2/a3/a from current params.
 fn dhvani_svf_update_coeffs(self) {
     var sr = f64_from(DhSvfFilter_sample_rate(self));
+    if (f64_lt(f64_mul(sr, 0.499), 1.0) == 1) {
+        DhSvfFilter_set_thru(self, 1);
+        DhSvfFilter_set_g(self, 0);
+        DhSvfFilter_set_k(self, 0);
+        DhSvfFilter_set_a1(self, 0);
+        DhSvfFilter_set_a2(self, 0);
+        DhSvfFilter_set_a3(self, 0);
+        DhSvfFilter_set_a(self, 1.0);
+        return 0;
+    }
+    DhSvfFilter_set_thru(self, 0);
     var freq = f64_clamp(DhSvfFilter_freq_hz(self), 1.0, f64_mul(sr, 0.499));
     var g = dhvani_tan(f64_div(f64_mul(F64_PI, freq), sr));
     var q = f64_max(DhSvfFilter_q(self), 0.01);
@@ -107,32 +132,97 @@ fn dhvani_svf_process_sample_internal(self, input, channel) {
       f64_mul(f64_mul(f64_sub(a, 1.0), k), v1));
 }
 
-# process(buf) -- filter in place with dry/wet mix.
-fn dhvani_svf_process(self, buf) {
-    if (DhSvfFilter_bypassed(self) == 1) { return 0; }
-    var ch = DhAudioBuffer_channels(buf);
-    var samples = DhAudioBuffer_samples(buf);
-    var frames = DhAudioBuffer_frames(buf);
-    var mix = DhSvfFilter_mix(self);
-    var dry = f64_sub(1.0, mix);
-    var frame = 0;
-    while (frame < frames) {
-        var c = 0;
-        while (c < ch) {
-            var idx = frame * ch + c;
-            var input = vec_get(samples, idx);
-            var output = dhvani_svf_process_sample_internal(self, input, c);
-            vec_set(samples, idx, f64_add(f64_mul(input, dry), f64_mul(output, mix)));
-            c = c + 1;
-        }
-        frame = frame + 1;
+# Clear a state that went non-finite (see the header). Returns 1 if it was cleared.
+fn dh_svf_state_sanitize(st) {
+    var ic1 = DhSvfState_ic1eq(st);
+    var ic2 = DhSvfState_ic2eq(st);
+    if (dhvani_is_finite(ic1) == 0 || dhvani_is_finite(ic2) == 0) {
+        DhSvfState_set_ic1eq(st, 0);
+        DhSvfState_set_ic2eq(st, 0);
+        return 1;
     }
     return 0;
 }
 
-# process_sample(sample, channel) -- passthrough if channel out of range.
+# process(buf) -- filter in place with dry/wet mix. The per-sample step of
+# dhvani_svf_process_sample_internal, with the coefficients read once per block, the
+# channel state in locals and the samples walked in place: the same operations in the
+# same order, so the same bits. Channels beyond the state count pass through.
+fn dhvani_svf_process(self, buf) {
+    if (DhSvfFilter_bypassed(self) == 1) { return 0; }
+    if (DhSvfFilter_thru(self) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = DhAudioBuffer_frames(buf);
+    if (ch < 1) { return 0; }
+    frames = dh_imin(frames, vec_len(samples) / ch);
+    if (frames < 1) { return 0; }
+    var states = DhSvfFilter_states(self);
+    var nst = dh_imin(ch, vec_len(states));
+    var mix = DhSvfFilter_mix(self);
+    var dry = f64_sub(1.0, mix);
+    var k = DhSvfFilter_k(self);
+    var a = DhSvfFilter_a(self);
+    var a1 = DhSvfFilter_a1(self);
+    var a2 = DhSvfFilter_a2(self);
+    var a3 = DhSvfFilter_a3(self);
+    var mode = DhSvfFilter_mode(self);
+    # the mode outputs' coefficient products, as process_sample_internal forms them
+    var k2 = f64_mul(2.0, k);
+    var aa1 = f64_sub(f64_mul(a, a), 1.0);
+    var am1k = f64_mul(f64_sub(a, 1.0), k);
+    var d = dh_vec_data(samples);
+    var stride = ch * 8;
+    var c = 0;
+    while (c < nst) {
+        var st = vec_get(states, c);
+        var ic1 = DhSvfState_ic1eq(st);
+        var ic2 = DhSvfState_ic2eq(st);
+        var p = d + c * 8;
+        var end = p + frames * stride;
+        while (p < end) {
+            var input = load64(p);
+            var v3 = f64_sub(input, ic2);
+            var v1 = f64_add(f64_mul(a1, ic1), f64_mul(a2, v3));
+            var v2 = f64_add(f64_add(ic2, f64_mul(a2, ic1)), f64_mul(a3, v3));
+            ic1 = f64_sub(f64_mul(2.0, v1), ic1);
+            ic2 = f64_sub(f64_mul(2.0, v2), ic2);
+            var out = v2;
+            if (mode == DH_SVF_LOWPASS) {
+                out = v2;
+            } elif (mode == DH_SVF_HIGHPASS) {
+                out = f64_sub(f64_sub(input, f64_mul(k, v1)), v2);
+            } elif (mode == DH_SVF_BANDPASS) {
+                out = v1;
+            } elif (mode == DH_SVF_NOTCH) {
+                out = f64_sub(input, f64_mul(k, v1));
+            } elif (mode == DH_SVF_ALLPASS) {
+                out = f64_sub(input, f64_mul(k2, v1));
+            } elif (mode == DH_SVF_PEAK) {
+                out = f64_add(input, f64_mul(aa1, v1));
+            } elif (mode == DH_SVF_LOWSHELF) {
+                out = f64_add(f64_add(input, f64_mul(aa1, v2)), f64_mul(am1k, v1));
+            } else {
+                var hp = f64_sub(f64_sub(input, f64_mul(k, v1)), v2);
+                out = f64_add(f64_add(input, f64_mul(aa1, hp)), f64_mul(am1k, v1));
+            }
+            store64(p, f64_add(f64_mul(input, dry), f64_mul(out, mix)));
+            p = p + stride;
+        }
+        DhSvfState_set_ic1eq(st, ic1);
+        DhSvfState_set_ic2eq(st, ic2);
+        dh_svf_state_sanitize(st);
+        c = c + 1;
+    }
+    return 0;
+}
+
+# process_sample(sample, channel) -- passthrough if channel out of range (negative
+# too), or while the sample rate is too low for the coefficients.
 #must_use
 fn dhvani_svf_process_sample(self, sample, channel) {
+    if (channel < 0) { return sample; }
+    if (DhSvfFilter_thru(self) == 1) { return sample; }
     if (channel < vec_len(DhSvfFilter_states(self))) {
         return dhvani_svf_process_sample_internal(self, sample, channel);
     }

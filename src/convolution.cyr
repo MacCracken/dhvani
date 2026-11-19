@@ -7,6 +7,19 @@
 # handles. Vec<Vec<(...)>> (per-channel FDL) -> a `vec` of vec-of-DhComplexBuf.
 # f32 samples stored as f64 slots (lossless for the tested values). serde +
 # Display + Clone dropped. IFFT via the conjugate trick, exactly as the oracle.
+#
+# Memory (free-less bump allocator): every buffer is struct-owned and only grows.
+# - Partition accumulators: struct-owned, zeroed in place per block.
+# - Per-channel buffers (input block, overlap, frequency delay line): allocated
+#   for the LARGEST channel count seen; a channel-count change zeroes the active
+#   channels in place (the oracle reallocates fresh zeros -- same values). Through
+#   2.3.2 every change reallocated everything (~428 KB per switch for an
+#   8-partition IR), so a graph alternating mono/stereo buffers leaked per call.
+# - IR partitions: set_ir() refills the existing partition storage when the new IR
+#   needs no more partitions than any IR before it, and grows the pool + FDL slots
+#   only when it needs more (through 2.3.2 every set_ir reallocated the whole FDL).
+# The hot loops walk the vec storage (dh_vec_data) with the oracle's exact
+# arithmetic order, so the output is bit-identical to the per-element form.
 
 # ---- ComplexBuf: one frequency-domain block (parallel real/imag vecs) ----
 #derive(accessors)
@@ -20,16 +33,26 @@ fn dhvani_cbuf_new(fft_size) {
     return self;
 }
 
+# zero the first n f64 slots of a vec's storage.
+fn dh_conv_zero(v, n) {
+    var p = dh_vec_data(v);
+    var end = p + n * 8;
+    while (p < end) { store64(p, 0); p = p + 8; }
+    return 0;
+}
+
 # fill both real/imag with zeros.
 fn dhvani_cbuf_clear(self, fft_size) {
-    var r = DhComplexBuf_real(self);
-    var im = DhComplexBuf_imag(self);
-    var i = 0;
-    while (i < fft_size) { vec_set(r, i, 0); vec_set(im, i, 0); i = i + 1; }
+    dh_conv_zero(DhComplexBuf_real(self), fft_size);
+    dh_conv_zero(DhComplexBuf_imag(self), fft_size);
     return 0;
 }
 
 # ---- ConvolutionReverb ----
+# channels = the ACTIVE channel count (0 until the first process); the per-channel
+# vecs may hold more (grow-only). fdl_slots = FDL slots per allocated channel
+# (>= the partition count). ir_pool = every partition buffer ever allocated;
+# ir_partitions = the active prefix of it, one per partition of the current IR.
 #derive(accessors)
 struct DhConvolutionReverb {
     fft_size;
@@ -46,45 +69,124 @@ struct DhConvolutionReverb {
     acc_imag;
     fdl;
     fdl_pos;
+    fdl_slots;
+    ir_pool;
 }
 
-# partition_ir(ir, block_size, fft_size) -> a `vec` of DhComplexBuf handles.
+# number of block_size partitions an ir_len-sample IR needs (integer div_ceil).
+#must_use
+fn dh_conv_num_partitions(ir_len, block_size) {
+    if (ir_len <= 0) { return 0; }
+    return (ir_len + block_size - 1) / block_size;
+}
+
+# FFT one zero-padded IR segment ir[start..end) into the partition buffer cb.
+fn dh_conv_fill_partition(cb, ir, start, end, fft_size) {
+    var real = DhComplexBuf_real(cb);
+    dh_conv_zero(real, fft_size);
+    dh_conv_zero(DhComplexBuf_imag(cb), fft_size);
+    var src = dh_vec_data(ir) + start * 8;
+    var dst = dh_vec_data(real);
+    var send = dh_vec_data(ir) + end * 8;
+    while (src < send) { store64(dst, load64(src)); src = src + 8; dst = dst + 8; }
+    dhvani_fft_in_place(real, DhComplexBuf_imag(cb));
+    return 0;
+}
+
+# partition_ir(ir, block_size, fft_size) -> a NEW `vec` of DhComplexBuf handles.
 # Empty IR -> an empty vec. Each partition is a zero-padded, FFT'd block.
 #must_use
 fn dhvani_conv_partition_ir(ir, block_size, fft_size) {
     var parts = vec_new();
     var ir_len = vec_len(ir);
-    if (ir_len == 0) { return parts; }
-    # num_partitions = ir.len().div_ceil(block_size)
-    var num_partitions = f64_to(f64_ceil(f64_div(f64_from(ir_len), f64_from(block_size))));
+    var num_partitions = dh_conv_num_partitions(ir_len, block_size);
     var p = 0;
     while (p < num_partitions) {
         var start = p * block_size;
-        var end = start + block_size;
-        if (end > ir_len) { end = ir_len; }
+        var end = dh_imin(start + block_size, ir_len);
         var cb = dhvani_cbuf_new(fft_size);
-        var real = DhComplexBuf_real(cb);
-        var i = start;
-        while (i < end) { vec_set(real, i - start, vec_get(ir, i)); i = i + 1; }
-        dhvani_fft_in_place(real, DhComplexBuf_imag(cb));
+        dh_conv_fill_partition(cb, ir, start, end, fft_size);
         vec_push(parts, cb);
         p = p + 1;
     }
     return parts;
 }
 
-# with_block_size(ir, block_size, mix, sample_rate) -> handle.
+# Partition `ir` into the reverb's own storage: reuse the pooled partition buffers
+# (allocating only past the largest partition count seen) and rebuild the active
+# ir_partitions list in place.
+fn dh_conv_partition_into(self, ir) {
+    var block_size = DhConvolutionReverb_block_size(self);
+    var fft_size = DhConvolutionReverb_fft_size(self);
+    var pool = DhConvolutionReverb_ir_pool(self);
+    var parts = DhConvolutionReverb_ir_partitions(self);
+    var ir_len = vec_len(ir);
+    var np = dh_conv_num_partitions(ir_len, block_size);
+    while (vec_len(pool) < np) { vec_push(pool, dhvani_cbuf_new(fft_size)); }
+    vec_truncate(parts, 0);
+    var p = 0;
+    while (p < np) {
+        var start = p * block_size;
+        var cb = vec_get(pool, p);
+        dh_conv_fill_partition(cb, ir, start, dh_imin(start + block_size, ir_len), fft_size);
+        vec_push(parts, cb);
+        p = p + 1;
+    }
+    return np;
+}
+
+# Grow-only per-channel storage: at least `ch` allocated channels, each with at
+# least `slots` FDL slots. New storage is zeroed; existing contents are kept.
+fn dh_conv_grow(self, ch, slots) {
+    var block_size = DhConvolutionReverb_block_size(self);
+    var fft_size = DhConvolutionReverb_fft_size(self);
+    var input_buffers = DhConvolutionReverb_input_buffers(self);
+    var overlap = DhConvolutionReverb_overlap(self);
+    var fdl = DhConvolutionReverb_fdl(self);
+    var need = DhConvolutionReverb_fdl_slots(self);
+    if (slots > need) { need = slots; }
+    var have = vec_len(input_buffers);
+    var c = 0;
+    while (c < have) {
+        var ch_fdl = vec_get(fdl, c);
+        while (vec_len(ch_fdl) < need) { vec_push(ch_fdl, dhvani_cbuf_new(fft_size)); }
+        c = c + 1;
+    }
+    while (have < ch) {
+        vec_push(input_buffers, dh_vec_zeros(block_size));
+        vec_push(overlap, dh_vec_zeros(fft_size));
+        var nf = vec_new();
+        var p = 0;
+        while (p < need) { vec_push(nf, dhvani_cbuf_new(fft_size)); p = p + 1; }
+        vec_push(fdl, nf);
+        have = have + 1;
+    }
+    DhConvolutionReverb_set_fdl_slots(self, need);
+    return 0;
+}
+
+# with_block_size(ir, block_size, mix, sample_rate) -> handle, or 0 (null) for an
+# unusable block size: block_size <= 0, or one whose next power of two is 0
+# (block_size > 2^62) or above DH_MAX_FFT / 2 (the fft_size = 2 * block would
+# exceed the FFT limit). The oracle clamps 0 up to 1 (`block_size.max(1)`); here
+# 0 and negatives are rejected like the other out-of-range sizes, so a bad size
+# can never reach partition_ir. sample_rate is for the caller's bookkeeping only
+# (the IR is assumed to match), as in the oracle.
 #must_use
 fn dhvani_conv_with_block_size(ir_samples, block_size, mix, sample_rate) {
-    var bs = block_size;
-    if (bs < 1) { bs = 1; }
-    bs = dh_next_pow2(bs);
+    # rust-old: `block_size.max(1).next_power_of_two()` -- 0 (and so anything below 1)
+    # becomes 1; only sizes whose power of two would pass the FFT limit are refused
+    var bsz = block_size;
+    if (bsz < 1) { bsz = 1; }
+    var bs = dh_next_pow2(bsz);
+    if (bs < 1) { return 0; }
+    if (bs > DH_MAX_FFT / 2) { return 0; }
     var fft_size = bs * 2;
-    var ir_partitions = dhvani_conv_partition_ir(ir_samples, bs, fft_size);
     var self = alloc(sizeof(DhConvolutionReverb));
     DhConvolutionReverb_set_fft_size(self, fft_size);
     DhConvolutionReverb_set_block_size(self, bs);
-    DhConvolutionReverb_set_ir_partitions(self, ir_partitions);
+    DhConvolutionReverb_set_ir_partitions(self, vec_new());
+    DhConvolutionReverb_set_ir_pool(self, vec_new());
     DhConvolutionReverb_set_input_buffers(self, vec_new());
     DhConvolutionReverb_set_overlap(self, vec_new());
     DhConvolutionReverb_set_write_pos(self, 0);
@@ -100,10 +202,12 @@ fn dhvani_conv_with_block_size(ir_samples, block_size, mix, sample_rate) {
     DhConvolutionReverb_set_acc_imag(self, dh_vec_zeros(fft_size));
     DhConvolutionReverb_set_fdl(self, vec_new());
     DhConvolutionReverb_set_fdl_pos(self, 0);
+    DhConvolutionReverb_set_fdl_slots(self, 0);
+    dh_conv_partition_into(self, ir_samples);
     return self;
 }
 
-# new(ir, mix, sample_rate) -- default block size 512.
+# new(ir, mix, sample_rate) -- default block size 512 (always valid: never null).
 #must_use
 fn dhvani_conv_new(ir_samples, mix, sample_rate) {
     return dhvani_conv_with_block_size(ir_samples, 512, mix, sample_rate);
@@ -119,92 +223,58 @@ fn dhvani_conv_set_mix(self, mix) {
 #must_use
 fn dhvani_conv_mix(self) { return DhConvolutionReverb_mix(self); }
 
-# set_ir(ir) -- rebuild partitions from a new IR, then reset state.
+# set_ir(ir) -- load a new IR into the partition storage, then reset all state.
+# The per-channel frequency delay line must hold at least one slot per partition:
+# process_block indexes ch_fdl[0..num_partitions), and through 2.2.2 a longer IR
+# ran off its end (vec_get -> _vec_die -> exit 1). Every allocated channel's FDL is
+# grown here when the new IR needs more slots; a same-size or shorter IR reuses
+# all storage (0 bytes). set_ir is a configuration call, not a hot path.
 fn dhvani_conv_set_ir(self, ir_samples) {
-    var parts = dhvani_conv_partition_ir(ir_samples,
-      DhConvolutionReverb_block_size(self), DhConvolutionReverb_fft_size(self));
-    DhConvolutionReverb_set_ir_partitions(self, parts);
-    # The per-channel frequency delay line is sized to the PARTITION COUNT, and
-    # dhvani_conv_ensure_channels -- the only place that sizes it -- early-returns
-    # when the channel count is unchanged. A longer IR therefore left the FDL
-    # short, and process_block indexed ch_fdl[0..num_partitions) straight off the
-    # end (vec_get -> _vec_die -> exit 1). Invalidate the channel cache so the
-    # next process rebuilds the FDL at the new partition count. set_ir is a
-    # configuration call, not a hot path, so the rebuild costs nothing that matters.
-    DhConvolutionReverb_set_channels(self, 0);
+    var np = dh_conv_partition_into(self, ir_samples);
+    dh_conv_grow(self, 0, np);
     dhvani_conv_reset(self);
+    return 0;
+}
+
+# zero channel c's input block, overlap and every FDL slot.
+fn dh_conv_zero_channel(self, c) {
+    var fft_size = DhConvolutionReverb_fft_size(self);
+    var ib = vec_get(DhConvolutionReverb_input_buffers(self), c);
+    dh_conv_zero(ib, vec_len(ib));
+    var ov = vec_get(DhConvolutionReverb_overlap(self), c);
+    dh_conv_zero(ov, vec_len(ov));
+    var ch_fdl = vec_get(DhConvolutionReverb_fdl(self), c);
+    var np = vec_len(ch_fdl);
+    var fi = 0;
+    while (fi < np) {
+        dhvani_cbuf_clear(vec_get(ch_fdl, fi), fft_size);
+        fi = fi + 1;
+    }
     return 0;
 }
 
 # reset() -- zero input buffers, overlap, FDL; reset write/fdl positions.
 fn dhvani_conv_reset(self) {
-    var fft_size = DhConvolutionReverb_fft_size(self);
-    var block_size = DhConvolutionReverb_block_size(self);
-    var input_buffers = DhConvolutionReverb_input_buffers(self);
-    var nib = vec_len(input_buffers);
-    var a = 0;
-    while (a < nib) {
-        var ib = vec_get(input_buffers, a);
-        var ni = vec_len(ib);
-        var bi = 0;
-        while (bi < ni) { vec_set(ib, bi, 0); bi = bi + 1; }
-        a = a + 1;
-    }
-    var overlap = DhConvolutionReverb_overlap(self);
-    var nov = vec_len(overlap);
-    var ci = 0;
-    while (ci < nov) {
-        var ov = vec_get(overlap, ci);
-        var no = vec_len(ov);
-        var di = 0;
-        while (di < no) { vec_set(ov, di, 0); di = di + 1; }
-        ci = ci + 1;
-    }
-    var fdl = DhConvolutionReverb_fdl(self);
-    var nfd = vec_len(fdl);
-    var ei = 0;
-    while (ei < nfd) {
-        var ch_fdl = vec_get(fdl, ei);
-        var np = vec_len(ch_fdl);
-        var fi = 0;
-        while (fi < np) {
-            dhvani_cbuf_clear(vec_get(ch_fdl, fi), fft_size);
-            fi = fi + 1;
-        }
-        ei = ei + 1;
-    }
+    var n = vec_len(DhConvolutionReverb_input_buffers(self));
+    var c = 0;
+    while (c < n) { dh_conv_zero_channel(self, c); c = c + 1; }
     DhConvolutionReverb_set_write_pos(self, 0);
     DhConvolutionReverb_set_fdl_pos(self, 0);
     return 0;
 }
 
-# ensure_channels(ch) -- (re)allocate per-channel buffers when count changes.
+# ensure_channels(ch) -- on a channel-count change, give the first ch channels
+# fresh (zeroed) buffers and restart the block/FDL positions, as the oracle's
+# reallocation does. Storage is grow-only: only a count above the largest seen,
+# or a partition count above the FDL slots, allocates.
 fn dhvani_conv_ensure_channels(self, ch) {
     if (DhConvolutionReverb_channels(self) == ch) { return 0; }
     DhConvolutionReverb_set_channels(self, ch);
-    var block_size = DhConvolutionReverb_block_size(self);
-    var fft_size = DhConvolutionReverb_fft_size(self);
     var num_partitions = vec_len(DhConvolutionReverb_ir_partitions(self));
     if (num_partitions < 1) { num_partitions = 1; }
-    var input_buffers = vec_new();
-    var overlap = vec_new();
-    var fdl = vec_new();
+    dh_conv_grow(self, ch, num_partitions);
     var c = 0;
-    while (c < ch) {
-        vec_push(input_buffers, dh_vec_zeros(block_size));
-        vec_push(overlap, dh_vec_zeros(fft_size));
-        var ch_fdl = vec_new();
-        var p = 0;
-        while (p < num_partitions) {
-            vec_push(ch_fdl, dhvani_cbuf_new(fft_size));
-            p = p + 1;
-        }
-        vec_push(fdl, ch_fdl);
-        c = c + 1;
-    }
-    DhConvolutionReverb_set_input_buffers(self, input_buffers);
-    DhConvolutionReverb_set_overlap(self, overlap);
-    DhConvolutionReverb_set_fdl(self, fdl);
+    while (c < ch) { dh_conv_zero_channel(self, c); c = c + 1; }
     DhConvolutionReverb_set_write_pos(self, 0);
     DhConvolutionReverb_set_fdl_pos(self, 0);
     return 0;
@@ -217,28 +287,32 @@ fn dhvani_conv_process_block(self, channel) {
     var ir_partitions = DhConvolutionReverb_ir_partitions(self);
     var num_partitions = vec_len(ir_partitions);
     var fdl_pos = DhConvolutionReverb_fdl_pos(self);
-    var fdl = DhConvolutionReverb_fdl(self);
-    var ch_fdl = vec_get(fdl, channel);
+    var ch_fdl = vec_get(DhConvolutionReverb_fdl(self), channel);
     var input_ch = vec_get(DhConvolutionReverb_input_buffers(self), channel);
+    var span = fft_size * 8;
 
     var scratch_real = DhConvolutionReverb_scratch_real(self);
     var scratch_imag = DhConvolutionReverb_scratch_imag(self);
     # FFT the input block (zero-padded)
-    var z = 0;
-    while (z < fft_size) { vec_set(scratch_real, z, 0); vec_set(scratch_imag, z, 0); z = z + 1; }
+    var sr = dh_vec_data(scratch_real);
+    var si = dh_vec_data(scratch_imag);
+    dh_conv_zero(scratch_real, fft_size);
+    dh_conv_zero(scratch_imag, fft_size);
+    var ip = dh_vec_data(input_ch);
     var i = 0;
-    while (i < block_size) { vec_set(scratch_real, i, vec_get(input_ch, i)); i = i + 1; }
+    var bspan = block_size * 8;
+    while (i < bspan) { store64(sr + i, load64(ip + i)); i = i + 8; }
     if (dhvani_fft_in_place(scratch_real, scratch_imag) == 0) { return 0; }
 
     # Store in the frequency delay line (copy scratch into fdl[fdl_pos]).
     var slot = vec_get(ch_fdl, fdl_pos);
-    var slot_r = DhComplexBuf_real(slot);
-    var slot_i = DhComplexBuf_imag(slot);
+    var slot_r = dh_vec_data(DhComplexBuf_real(slot));
+    var slot_i = dh_vec_data(DhComplexBuf_imag(slot));
     var cp = 0;
-    while (cp < fft_size) {
-        vec_set(slot_r, cp, vec_get(scratch_real, cp));
-        vec_set(slot_i, cp, vec_get(scratch_imag, cp));
-        cp = cp + 1;
+    while (cp < span) {
+        store64(slot_r + cp, load64(sr + cp));
+        store64(slot_i + cp, load64(si + cp));
+        cp = cp + 8;
     }
 
     # Accumulate: sum over all partitions (FDL[pos-k] * IR[k]).
@@ -246,84 +320,105 @@ fn dhvani_conv_process_block(self, channel) {
     # previous value via f64_add, so the zero-fill is mandatory, not cosmetic).
     var acc_real = DhConvolutionReverb_acc_real(self);
     var acc_imag = DhConvolutionReverb_acc_imag(self);
-    var az = 0;
-    while (az < fft_size) { vec_set(acc_real, az, 0); vec_set(acc_imag, az, 0); az = az + 1; }
+    var ar = dh_vec_data(acc_real);
+    var ai = dh_vec_data(acc_imag);
+    dh_conv_zero(acc_real, fft_size);
+    dh_conv_zero(acc_imag, fft_size);
     var k = 0;
     while (k < num_partitions) {
         var fdl_idx = (fdl_pos + num_partitions - k) % num_partitions;
         var fslot = vec_get(ch_fdl, fdl_idx);
-        var fdl_r = DhComplexBuf_real(fslot);
-        var fdl_i = DhComplexBuf_imag(fslot);
+        var fdl_r = dh_vec_data(DhComplexBuf_real(fslot));
+        var fdl_i = dh_vec_data(DhComplexBuf_imag(fslot));
         var iref = vec_get(ir_partitions, k);
-        var ir_r = DhComplexBuf_real(iref);
-        var ir_i = DhComplexBuf_imag(iref);
-        var bin = 0;
-        while (bin < fft_size) {
-            var fr = vec_get(fdl_r, bin);
-            var fi = vec_get(fdl_i, bin);
-            var cr = vec_get(ir_r, bin);
-            var di = vec_get(ir_i, bin);
+        var ir_r = dh_vec_data(DhComplexBuf_real(iref));
+        var ir_i = dh_vec_data(DhComplexBuf_imag(iref));
+        var b = 0;
+        while (b < span) {
+            var fr = load64(fdl_r + b);
+            var fi = load64(fdl_i + b);
+            var cr = load64(ir_r + b);
+            var di = load64(ir_i + b);
             # (a+bi)(c+di) = (ac-bd) + (ad+bc)i
-            vec_set(acc_real, bin, f64_add(vec_get(acc_real, bin), f64_sub(f64_mul(fr, cr), f64_mul(fi, di))));
-            vec_set(acc_imag, bin, f64_add(vec_get(acc_imag, bin), f64_add(f64_mul(fr, di), f64_mul(fi, cr))));
-            bin = bin + 1;
+            store64(ar + b, f64_add(load64(ar + b), f64_sub(f64_mul(fr, cr), f64_mul(fi, di))));
+            store64(ai + b, f64_add(load64(ai + b), f64_add(f64_mul(fr, di), f64_mul(fi, cr))));
+            b = b + 8;
         }
         k = k + 1;
     }
 
     # IFFT via conjugate: IFFT(X) = conj(FFT(conj(X))) / N
     var n2 = 0;
-    while (n2 < fft_size) { vec_set(acc_imag, n2, f64_neg(vec_get(acc_imag, n2))); n2 = n2 + 1; }
+    while (n2 < span) { store64(ai + n2, f64_neg(load64(ai + n2))); n2 = n2 + 8; }
     if (dhvani_fft_in_place(acc_real, acc_imag) == 0) { return 0; }
     var scale = f64_div(1.0, f64_from(fft_size));
 
     # Overlap-add into output.
-    var ov = vec_get(DhConvolutionReverb_overlap(self), channel);
+    var ov = dh_vec_data(vec_get(DhConvolutionReverb_overlap(self), channel));
     var o = 0;
-    while (o < fft_size) {
-        vec_set(ov, o, f64_add(vec_get(ov, o), f64_mul(vec_get(acc_real, o), scale)));
-        o = o + 1;
+    while (o < span) {
+        store64(ov + o, f64_add(load64(ov + o), f64_mul(load64(ar + o), scale)));
+        o = o + 8;
     }
     return 0;
 }
 
-# process(buf) -- convolution reverb in place. No-op if IR is empty.
-#inline
+# process(buf) -- convolution reverb in place. No-op if the IR is empty or the
+# buffer has no channels.
+#
+# OUTPUT TIMING (the oracle's, kept as-is -- zero added latency, block-granular):
+# input frames are collected into block_size blocks (write_pos carries across
+# calls). Only when a block COMPLETES inside this call is its output written, and
+# it is written back over that block's own frames: frame f gets
+# f*(1-mix) + wet*mix. So, with B = block_size:
+# - A buffer whose frame count is a multiple of B, called while write_pos == 0
+#   (every call, if every call is such a buffer), is fully processed.
+# - Frames of a block that completes in a LATER call are returned UNPROCESSED --
+#   raw input, not even scaled by 1-mix -- and when that later call completes the
+#   block, only the frames inside it are written; the wet output for the earlier
+#   call's frames is discarded. E.g. B = 512 with 256-frame host buffers: odd
+#   calls come back raw, even calls fully processed.
+# - A one-shot call leaves its last (frames % B) frames raw, and the IR tail past
+#   the end of the buffer is never emitted.
+# Nothing here aborts: the write-back skips frames that belong to an earlier call
+# (negative block_start), and `frames` is clamped to the sample storage.
 fn dhvani_conv_process(self, buf) {
     var ir_partitions = DhConvolutionReverb_ir_partitions(self);
     if (vec_len(ir_partitions) == 0) { return 0; }
 
     var ch = DhAudioBuffer_channels(buf);
     dhvani_conv_ensure_channels(self, ch);
+    if (ch < 1) { return 0; }
 
     var mix = DhConvolutionReverb_mix(self);
     var dry = f64_sub(1.0, mix);
-    var frames = DhAudioBuffer_frames(buf);
     var samples = DhAudioBuffer_samples(buf);
     var samples_len = vec_len(samples);
+    # never walk past the storage, whatever `frames` claims
+    var frames = dh_imin(DhAudioBuffer_frames(buf), samples_len / ch);
     var block_size = DhConvolutionReverb_block_size(self);
     var fft_size = DhConvolutionReverb_fft_size(self);
     var input_buffers = DhConvolutionReverb_input_buffers(self);
+    var overlap = DhConvolutionReverb_overlap(self);
     var num_partitions = vec_len(ir_partitions);
-    if (num_partitions < 1) { num_partitions = 1; }
+    var d = dh_vec_data(samples);
+    var stride = ch * 8;
+    var tail = (fft_size - block_size) * 8;
+    var bspan = block_size * 8;
+    var fspan = fft_size * 8;
 
     var frame = 0;
     while (frame < frames) {
         # Fill input block.
         var write_pos = DhConvolutionReverb_write_pos(self);
-        var remaining_in_block = block_size - write_pos;
-        var to_copy = remaining_in_block;
-        var avail = frames - frame;
-        if (avail < to_copy) { to_copy = avail; }
+        var to_copy = dh_imin(block_size - write_pos, frames - frame);
 
         var c0 = 0;
         while (c0 < ch) {
-            var ibuf = vec_get(input_buffers, c0);
-            var ii = 0;
-            while (ii < to_copy) {
-                vec_set(ibuf, write_pos + ii, vec_get(samples, (frame + ii) * ch + c0));
-                ii = ii + 1;
-            }
+            var dst = dh_vec_data(vec_get(input_buffers, c0)) + write_pos * 8;
+            var src = d + (frame * ch + c0) * 8;
+            var dend = dst + to_copy * 8;
+            while (dst < dend) { store64(dst, load64(src)); dst = dst + 8; src = src + stride; }
             c0 = c0 + 1;
         }
         write_pos = write_pos + to_copy;
@@ -339,38 +434,32 @@ fn dhvani_conv_process(self, buf) {
             DhConvolutionReverb_set_fdl_pos(self, (DhConvolutionReverb_fdl_pos(self) + 1) % num_partitions);
             DhConvolutionReverb_set_write_pos(self, 0);
 
-            # Write output: overlap[0..block_size] is the current block output.
+            # Write output: overlap[0..block_size] is the just-completed block's
+            # output, aligned to that block's frames. block_start goes NEGATIVE
+            # when the block began in an earlier process() call (write_pos carries
+            # across calls); those frames are gone with that call's buffer, so the
+            # write starts at oi = -block_start (overlap[0..-block_start) is
+            # dropped). rust-old computes block_start in usize: release builds wrap,
+            # and its `src_idx < len` check then skips exactly the same frames.
             var block_start = frame + to_copy - block_size;
             var cw = 0;
             while (cw < ch) {
-                var ov = vec_get(DhConvolutionReverb_overlap(self), cw);
+                var ov = dh_vec_data(vec_get(overlap, cw));
                 var oi = 0;
-                # `block_start` goes NEGATIVE when a block spans two process()
-                # calls (write_pos carries across calls), and those output frames
-                # belong to the previous call's buffer, which is already gone.
-                # Skip them: a negative index would abort the process in vec_get
-                # (lib/vec.cyr `_vec_die`). rust-old computes the same expression
-                # in usize, where a release build wraps to a huge value that then
-                # fails its `src_idx < len` check — i.e. the same no-op.
                 if (block_start < 0) { oi = 0 - block_start; }
                 while (oi < block_size) {
                     var src_idx = (block_start + oi) * ch + cw;
                     if (src_idx < samples_len) {
-                        var wet = vec_get(ov, oi);
-                        var cur = vec_get(samples, src_idx);
-                        vec_set(samples, src_idx, f64_add(f64_mul(cur, dry), f64_mul(wet, mix)));
+                        var sp = d + src_idx * 8;
+                        store64(sp, f64_add(f64_mul(load64(sp), dry), f64_mul(load64(ov + oi * 8), mix)));
                     }
                     oi = oi + 1;
                 }
-                # Shift overlap: move tail forward.
-                var tail_len = fft_size - block_size;
+                # Shift overlap: move tail forward, zero the vacated end.
                 var ti = 0;
-                while (ti < tail_len) {
-                    vec_set(ov, ti, vec_get(ov, block_size + ti));
-                    ti = ti + 1;
-                }
-                var tj = tail_len;
-                while (tj < fft_size) { vec_set(ov, tj, 0); tj = tj + 1; }
+                while (ti < tail) { store64(ov + ti, load64(ov + bspan + ti)); ti = ti + 8; }
+                var tj = tail;
+                while (tj < fspan) { store64(ov + tj, 0); tj = tj + 8; }
                 cw = cw + 1;
             }
         }

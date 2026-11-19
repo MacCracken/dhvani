@@ -76,7 +76,8 @@ assert(f64_lt(f64_abs(f64_sub(dhvani_buffer_rms(back), orig_rms)), f64_mul(orig_
 test_group("quality_levels_all_work");
 var qsine = make_sine(1024, 440.0, 44100);
 var qbuf = dhvani_buffer_from_interleaved(qsine, 1, 44100);
-var quals = vec_new(); vec_push(quals, DH_RESAMPLE_DRAFT); vec_push(quals, DH_RESAMPLE_GOOD); vec_push(quals, DH_RESAMPLE_BEST);
+var quals = vec_new();
+vec_push(quals, DH_RESAMPLE_DRAFT); vec_push(quals, DH_RESAMPLE_GOOD); vec_push(quals, DH_RESAMPLE_BEST);
 var qi = 0;
 var qok = 1;
 while (qi < 3) {
@@ -144,6 +145,24 @@ assert_eq(paths_agree(pst, 22050, DH_RESAMPLE_BEST), 1, "stereo 44.1k -> 22.05k,
 assert_eq(paths_agree(pst, 96000, DH_RESAMPLE_DRAFT), 1, "stereo 44.1k -> 96k, draft");
 assert_eq(paths_agree(pmo, 44100, DH_RESAMPLE_GOOD), 1, "mono 48k -> 44.1k, good");
 assert_eq(paths_agree(pmo, 8000, DH_RESAMPLE_BEST), 1, "mono 48k -> 8k, best (6x scaled kernel)");
+
+# ---- shapes that would walk past memory (2.3.3) ----
+# Through 2.3.2 the default path sized its raw stores from new_frames * ch: a 0 Hz
+# source made the ratio infinite, f64_to saturated new_frames, the product wrapped and
+# the stores ran off the heap (SIGSEGV). Both paths now refuse these shapes with 0.
+test_group("refuses_unsafe_shapes");
+var us_z = dhvani_buffer_silence(2, 10, 0);
+assert_eq(dhvani_resample_sinc(us_z, 48000, DH_RESAMPLE_GOOD), 0, "0 Hz source, default path");
+assert_eq(dhvani_resample_sinc_scalar(us_z, 48000, DH_RESAMPLE_GOOD), 0, "0 Hz source, scalar path");
+var us_v = vec_new(); vec_push(us_v, 0.5); vec_push(us_v, 0.5); vec_push(us_v, 0.5); vec_push(us_v, 0.5);
+var us_b = dhvani_buffer_from_interleaved(us_v, 2, 44100);
+assert_eq(dhvani_resample_sinc(us_b, 0x7FFFFFFFFFFFFFFF, DH_RESAMPLE_GOOD), 0, "huge target rate");
+assert_eq(dhvani_resample_sinc(us_b, 0 - 48000, DH_RESAMPLE_GOOD), 0, "negative target rate");
+var us_lie = dhvani_buffer_from_interleaved(us_v, 2, 44100);
+DhAudioBuffer_set_frames(us_lie, 1000);           # header claims more than the vec holds
+assert_eq(dhvani_resample_sinc(us_lie, 48000, DH_RESAMPLE_GOOD), 0, "frames past the vec");
+assert_eq(dhvani_resample_sinc_scalar(us_lie, 48000, DH_RESAMPLE_GOOD), 0, "frames past the vec, scalar");
+assert(dhvani_resample_sinc(us_b, 48000, DH_RESAMPLE_GOOD) != 0, "a valid shape still resamples");
 
 var rc = assert_summary();
 syscall(60, rc);

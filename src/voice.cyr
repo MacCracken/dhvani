@@ -1,11 +1,14 @@
 # voice.cyr -- polyphonic voice pool: allocation + stealing. Ports
-# rust-old/src/midi/voice.rs. L0: dep error only (dhvani_is_finite unused here;
-# all logic is integer note/velocity/channel/age + one float for frequency).
+# rust-old/src/midi/voice.rs. L0: dep error only (all logic is integer
+# note/velocity/channel/age + one float for frequency). Zero allocation after
+# dhvani_voice_manager_new: note_on/note_off/tick_age/free_voice reuse the pool.
 #
 # The oracle re-exports abaco::dsp::{A4_FREQUENCY, A4_MIDI_NOTE,
-# SEMITONES_PER_OCTAVE} (NOT public in abaco) -- redefined locally below as f64
-# bit patterns so this module needs no abaco include. frequency() =
-# 440 * 2^((note - 69) / 12) via f64_pow.
+# SEMITONES_PER_OCTAVE} and computes frequency() with abaco::dsp::midi_to_freq.
+# abaco.cyr does carry a `midi_to_freq` (f64_exp2-based), but its constants are
+# internal `var DSP_*` and this L0 module takes no abaco include, so the three
+# constants are redefined locally as f64 bit patterns and frequency() =
+# 440 * 2^((note - 69) / 12) via ganita's f64_pow (both forms are ~1 ulp).
 #
 # Enums -> int codes: VoiceState {Idle=0, Active=1, Releasing=2};
 # VoiceStealMode {Oldest=0, Quietest=1, Lowest=2, None=3}. note_on returns a
@@ -84,7 +87,6 @@ fn dhvani_voice_pressure(v) { return DhVoice_pressure(v); }
 fn dhvani_voice_brightness(v) { return DhVoice_brightness(v); }
 
 # is_idle -- 1 iff state == Idle.
-#inline
 #must_use
 fn dhvani_voice_is_idle(v) {
     if (DhVoice_state(v) == DH_VOICE_STATE_IDLE) { return 1; }
@@ -92,7 +94,6 @@ fn dhvani_voice_is_idle(v) {
 }
 
 # is_active -- 1 iff producing sound (Active or Releasing).
-#inline
 #must_use
 fn dhvani_voice_is_active(v) {
     var st = DhVoice_state(v);
@@ -103,7 +104,6 @@ fn dhvani_voice_is_active(v) {
 
 # frequency -- Hz for this voice's note (12-TET, A4=440):
 # 440 * 2^((note - 69) / 12).
-#inline
 #must_use
 fn dhvani_voice_frequency(v) {
     var note_f = f64_from(DhVoice_note(v));
@@ -120,9 +120,16 @@ fn dhvani_voice_apply_per_note_cc(v, controller, value_normalized) {
     return 0;
 }
 
-# ---- test-only field setters (Rust tests poke pub(crate) fields directly) ----
-fn dhvani_voice_set_note(v, note) { DhVoice_set_note(v, note); return 0; }
+# ---- consumer field setters (public API) ----
+# set_envelope_level -- the consumer owns the amplitude envelope; it writes the
+# current level (f64, 0.0..1.0) back here every block so DH_STEAL_QUIETEST has
+# real levels to compare (without it every voice reads 0.0 and Quietest always
+# steals slot 0). rust-old keeps the field pub(crate), so only its own tests
+# could set it; this setter is the Cyrius consumer hook.
 fn dhvani_voice_set_envelope_level(v, level) { DhVoice_set_envelope_level(v, level); return 0; }
+# set_note -- overwrite a voice's note (retune / tests; the Rust tests poke the
+# pub(crate) field directly).
+fn dhvani_voice_set_note(v, note) { DhVoice_set_note(v, note); return 0; }
 
 # ================================================================
 # VoiceManager -- polyphonic pool with configurable stealing.
@@ -168,18 +175,15 @@ fn dhvani_voice_manager_note_on(self, note, velocity, channel) {
     var voices = DhVoiceManager_voices(self);
     var n = vec_len(voices);
 
-    # First: find an idle voice (lowest index).
-    var idle_idx = DH_VOICE_NONE;
+    # First: the lowest-index idle voice (Rust iter().position -- stops at the
+    # first match).
     var i = 0;
     while (i < n) {
-        if (idle_idx == DH_VOICE_NONE) {
-            if (dhvani_voice_is_idle(vec_get(voices, i)) == 1) { idle_idx = i; }
+        if (DhVoice_state(vec_get(voices, i)) == DH_VOICE_STATE_IDLE) {
+            dh_voice_activate(self, i, note, velocity, channel);
+            return i;
         }
         i = i + 1;
-    }
-    if (idle_idx != DH_VOICE_NONE) {
-        dh_voice_activate(self, idle_idx, note, velocity, channel);
-        return idle_idx;
     }
 
     # No idle voice -- try stealing per the configured policy.
@@ -240,16 +244,13 @@ fn dhvani_voice_manager_note_off(self, note, channel) {
     var voices = DhVoiceManager_voices(self);
     var n = vec_len(voices);
     var i = 0;
-    var done = 0;
     while (i < n) {
-        if (done == 0) {
-            var voice = vec_get(voices, i);
-            if (DhVoice_state(voice) == DH_VOICE_STATE_ACTIVE) {
-                if (DhVoice_note(voice) == note) {
-                    if (DhVoice_channel(voice) == channel) {
-                        DhVoice_set_state(voice, DH_VOICE_STATE_RELEASING);
-                        done = 1;
-                    }
+        var voice = vec_get(voices, i);
+        if (DhVoice_state(voice) == DH_VOICE_STATE_ACTIVE) {
+            if (DhVoice_note(voice) == note) {
+                if (DhVoice_channel(voice) == channel) {
+                    DhVoice_set_state(voice, DH_VOICE_STATE_RELEASING);
+                    return 0;
                 }
             }
         }

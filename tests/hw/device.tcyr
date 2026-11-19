@@ -28,7 +28,7 @@
 # compile-time `#ifdef`/CI flag: the premise being tested is "this machine has
 # PCM endpoints", not "this machine is CI". A compile-time switch would also
 # hide the path from every other device-less environment (a container without
-# /dev/snd, a sandbox denying the udevadm probe) and would compile the code out
+# /dev/snd, a sandbox denying access to it) and would compile the code out
 # so it never got exercised. To exercise the no-hardware path on a box that has
 # a sound card, hide /dev/snd in a throwaway user+mount namespace:
 #     unshare -r -m sh -c 'mount -t tmpfs none /dev/snd && cyrius test tests/hw/device.tcyr'
@@ -87,6 +87,34 @@ var dc = mk_dev(0, 1, YUKTI_AUDIO_CAPTURE);
 assert_eq(dhvani_device_is_playback(dc), 0, "capture descriptor is not playback");
 assert_eq(dhvani_device_is_capture(dc), 1, "capture descriptor is capture");
 
+# ---- every host: default-open candidates are ordered by (card, device) ----
+# /dev/snd readdir order is no order (devtmpfs lists newest first), so through
+# 2.3.1 the "default" was whichever node came back first, and a busy one ended the
+# search. Candidates are now filtered by direction, sorted by (card, device), and
+# tried in turn.
+test_group("device_candidates_order");
+var raw = vec_new();
+vec_push(raw, mk_dev(1, 0, YUKTI_AUDIO_PLAYBACK));
+vec_push(raw, mk_dev(0, 9, YUKTI_AUDIO_PLAYBACK));
+vec_push(raw, mk_dev(0, 3, YUKTI_AUDIO_PLAYBACK));
+vec_push(raw, mk_dev(0, 0, YUKTI_AUDIO_CAPTURE));
+vec_push(raw, mk_dev(0, 7, YUKTI_AUDIO_PLAYBACK));
+vec_push(raw, mk_dev(2, 0, YUKTI_AUDIO_CAPTURE));
+var cp = dhvani_device_candidates(raw, YUKTI_AUDIO_PLAYBACK);
+assert_eq(vec_len(cp), 4, "4 playback candidates");
+assert_eq(dhvani_device_card(vec_get(cp, 0)) * 100 + dhvani_device_index(vec_get(cp, 0)), 3, "1st: card 0 dev 3");
+assert_eq(dhvani_device_card(vec_get(cp, 1)) * 100 + dhvani_device_index(vec_get(cp, 1)), 7, "2nd: card 0 dev 7");
+assert_eq(dhvani_device_card(vec_get(cp, 2)) * 100 + dhvani_device_index(vec_get(cp, 2)), 9, "3rd: card 0 dev 9");
+assert_eq(dhvani_device_card(vec_get(cp, 3)) * 100 + dhvani_device_index(vec_get(cp, 3)), 100, "4th: card 1 dev 0");
+var cc = dhvani_device_candidates(raw, YUKTI_AUDIO_CAPTURE);
+assert_eq(vec_len(cc), 2, "2 capture candidates");
+assert_eq(dhvani_device_card(vec_get(cc, 0)), 0, "capture 1st: card 0");
+assert_eq(dhvani_device_card(vec_get(cc, 1)), 2, "capture 2nd: card 2");
+assert_eq(dhvani_device_card(vec_get(raw, 0)), 1, "the input list is left as enumerated");
+assert_eq(vec_len(dhvani_device_candidates(0, YUKTI_AUDIO_PLAYBACK)), 0, "null list -> empty candidates");
+assert_eq(dhvani_playback_open_default_fmt(48000, 2, 8), 0,
+  "default open refuses an unsupported depth before enumerating");
+
 # ---- this machine's real endpoints (capability-gated) ----
 test_group("device_list");
 if (n == 0) {
@@ -95,7 +123,7 @@ if (n == 0) {
     # checkable here and only here: with nothing to open, the default-open
     # helpers answer the null handle without touching a device.
     var skip1 = "SKIP device_list: no PCM endpoints enumerated -- this machine has no audio hardware,";
-    var skip2 = " no /dev/snd access, or no udevadm probe (src/device.cyr itself compiled and ran)\n";
+    var skip2 = " or no /dev/snd access (src/device.cyr itself compiled and ran)\n";
     syscall(1, 1, skip1, strlen(skip1));
     syscall(1, 1, skip2, strlen(skip2));
     assert_eq(dhvani_playback_open_default(48000, 2), 0, "no endpoints: playback_open_default -> 0");

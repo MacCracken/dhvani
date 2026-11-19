@@ -51,5 +51,50 @@ assert_streq(dhvani_chroma_pitch_class_name(0), "C", "PITCH_CLASSES[0] = C");
 assert_streq(dhvani_chroma_pitch_class_name(9), "A", "PITCH_CLASSES[9] = A");
 assert_streq(dhvani_chroma_pitch_class_name(11), "B", "PITCH_CLASSES[11] = B");
 
+# ================================================================
+# 2.3.2 audit regressions (not in rust-old)
+# ================================================================
+
+fn chroma_vec(n, val) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, val); i = i + 1; }
+    return v;
+}
+
+# ---- dominant_class_ties_last ----
+# rust-old's dominant_class is max_by(partial_cmp().unwrap_or(Equal)): the LAST of
+# equal maxima wins. Pre-fix kept the first (silence -> "C" instead of "B").
+test_group("dominant_class_ties_last");
+var csil = dhvani_chroma_chromagram(dhvani_buffer_silence(1, 4096, 44100), 4096);
+assert_eq(dhvani_chromagram_dominant_class(csil), 11, "silence -> class 11");
+assert_streq(dhvani_chromagram_dominant_name(csil), "B", "silence -> B");
+var ctie = chroma_vec(12, 0.1);
+vec_set(ctie, 2, 1.0); vec_set(ctie, 7, 1.0);
+assert_eq(dhvani_chromagram_dominant_class(dhvani_chromagram_from_array(ctie)), 7, "tie at 2/7 -> 7");
+var cnan = chroma_vec(12, 0.1);
+vec_set(cnan, 4, 1.0); vec_set(cnan, 5, DH_NAN);
+var cnan_c = dhvani_chromagram_from_array(cnan);
+assert_eq(dhvani_chromagram_dominant_class(cnan_c), 11, "NaN compares Equal -> later classes take over (as max_by)");
+var cone = chroma_vec(12, 0.1);
+vec_set(cone, 3, 1.0);
+assert_eq(dhvani_chromagram_dominant_class(dhvani_chromagram_from_array(cone)), 3, "unique max unchanged");
+
+# ---- from_array_requires_12 ----
+# rust-old took [f32; 12]; pre-fix any length was wrapped and a short one aborted
+# the process at the first dominant_class / detect_key_from_chroma read.
+test_group("from_array_requires_12");
+assert_eq(dhvani_chromagram_from_array(chroma_vec(11, 0.5)), 0, "len 11 -> 0");
+assert_eq(dhvani_chromagram_from_array(chroma_vec(13, 0.5)), 0, "len 13 -> 0");
+assert_eq(dhvani_chromagram_from_array(vec_new()), 0, "len 0 -> 0");
+assert_eq(dhvani_chromagram_from_array(0), 0, "null -> 0");
+assert(dhvani_chromagram_from_array(chroma_vec(12, 0.5)) != 0, "len 12 -> handle");
+
+# ---- chromagram_window_cap ----
+test_group("chromagram_window_cap");
+var cwbuf = dhvani_buffer_from_interleaved(chroma_vec(64, 0.25), 1, 44100);
+assert_eq(dhvani_chroma_chromagram(cwbuf, 0x20000000), 0, "window 2^29 -> 0, no abort");
+assert(dhvani_chroma_chromagram(cwbuf, 64) != 0, "window 64 ok");
+
 var rc = assert_summary();
 syscall(60, rc);

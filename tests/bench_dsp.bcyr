@@ -1,0 +1,93 @@
+# bench_dsp.bcyr -- per-block DSP paths: the filters, delays, reverb, EQ, convolution,
+# noise reduction, pan, waveform and resampler. Run:
+#   cyrius bench tests/bench_dsp.bcyr
+# Added in 2.3.3 for the P(-1) sweep's rewrites (storage walks, hoisted coefficients,
+# compare-and-wrap rings), which hotpath.bcyr and bench_compare.bcyr did not cover. Every
+# call here has the same signature in 2.3.2, so the file A/Bs across the two. Inputs
+# are in-band sines so the in-place, repeated processing stays bounded. Links abaco +
+# the assembled bundle, as a consumer does.
+
+include "lib/abaco.cyr"
+include "dist/dhvani.cyr"
+
+fn bench_block(name, fp, n) {
+    var b = bench_new(name);
+    bench_run(b, fp, n);
+    bench_report(b);
+    return 0;
+}
+
+var _st512 = 0;     # 512-frame stereo sine block
+var _st4096 = 0;    # 4096-frame stereo block (noise reduction)
+var _st1s = 0;      # 1 s stereo at 44.1 kHz (waveform, resample)
+var _svf = 0;
+var _dly = 0;
+var _mdly = 0;
+var _rev = 0;
+var _eq = 0;
+var _conv = 0;
+var _nr = 0;
+var _pan = 0;
+
+fn b_svf()  { return dhvani_svf_process(_svf, _st512); }
+fn b_dly()  { return dhvani_delay_process(_dly, _st512); }
+fn b_mdly() { return dhvani_moddelay_process(_mdly, _st512); }
+fn b_rev()  { return dhvani_reverb_process(_rev, _st512); }
+fn b_eq()   { return dhvani_eq_process(_eq, _st512); }
+fn b_conv() { return dhvani_conv_process(_conv, _st512); }
+fn b_nr()   { return dhvani_noise_reducer_process(_nr, _st4096, F64_HALF); }
+fn b_pan()  { return dhvani_pan_process(_pan, _st512); }
+fn b_wave() { return dhvani_waveform_compute(_st1s, 100); }
+fn b_rsmp() { return dhvani_resample_sinc(_st1s, 48000, DH_RESAMPLE_GOOD); }
+
+fn stereo_sine(frames, sr) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var t = f64_div(f64_from(i), f64_from(sr));
+        vec_push(v, f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, 440.0), t)), 0.5));
+        vec_push(v, f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, 660.0), t)), 0.5));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, sr);
+}
+
+fn main() {
+    alloc_init();
+    _st512 = stereo_sine(512, 44100);
+    _st4096 = stereo_sine(4096, 44100);
+    _st1s = stereo_sine(44100, 44100);
+    _svf = dhvani_svf_new(DH_SVF_LOWPASS, f64_from(2000), 0.707106781, 0, 44100, 2);
+    _dly = dhvani_delay_new(f64_from(5), f64_from(50), 0.3, F64_HALF, 44100, 2);
+    _mdly = dhvani_moddelay_new(dhvani_moddelayparams_default(), 44100, 2);
+    _rev = dhvani_reverb_new(dhvani_reverbparams_new(F64_HALF, F64_HALF, 0.3), 44100);
+    var bands = vec_new();
+    vec_push(bands, dhvani_eq_band_config_new(DH_BQ_LOWSHELF, f64_from(200), 3.0, 0.707106781, 1));
+    vec_push(bands, dhvani_eq_band_config_new(DH_BQ_PEAKING, f64_from(1000), f64_neg(2.0), 1.0, 1));
+    vec_push(bands, dhvani_eq_band_config_new(DH_BQ_HIGHSHELF, f64_from(8000), 2.0, 0.707106781, 1));
+    _eq = dhvani_eq_new(bands, 44100, 2);
+    var ir = vec_new();
+    var k = 0;
+    while (k < 4096) {
+        vec_push(ir, f64_mul(f64_exp(f64_neg(f64_div(f64_from(k), 600.0))), 0.1));
+        k = k + 1;
+    }
+    _conv = dhvani_conv_new(ir, F64_HALF, 44100);
+    _nr = dhvani_noise_reducer_new();
+    _pan = dhvani_pan_new(0.3);
+
+    bench_block("svf lp stereo 512   ", &b_svf, 5000);
+    bench_block("delay stereo 512    ", &b_dly, 5000);
+    bench_block("moddelay stereo 512 ", &b_mdly, 5000);
+    bench_block("reverb stereo 512   ", &b_rev, 2000);
+    bench_block("eq 3-band stereo 512", &b_eq, 5000);
+    bench_block("conv 4k-ir st 512   ", &b_conv, 500);
+    bench_block("noise_red st 4096   ", &b_nr, 100);
+    bench_block("pan stereo 512      ", &b_pan, 20000);
+    bench_block("waveform 1s stereo  ", &b_wave, 100);
+    bench_block("resample 1s st 48k  ", &b_rsmp, 10);
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

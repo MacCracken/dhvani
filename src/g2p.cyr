@@ -22,10 +22,14 @@
 # handles. Returns the events vec on success, or 0 (null == DSP error) on
 # empty/whitespace/invalid input (shabda_convert -> shabda_err_invalid_input).
 # A successful English convert always yields a non-empty vec, so 0 is an
-# unambiguous failure sentinel.
+# unambiguous failure sentinel. An engine handle <= 0 or a null text is refused
+# (0) before shabda reads either.
 #must_use
 fn dhvani_g2p_text_to_phonemes(engine, text) {
+    if (engine <= 0) { return 0; }
+    if (text == 0) { return 0; }
     var slot = alloc(8);
+    if (slot == 0) { return 0; }
     var err = shabda_convert(engine, text, slot);
     if (shabda_is_err(err) == 1) { return 0; }
     return load64(slot);
@@ -39,10 +43,15 @@ fn dhvani_g2p_text_to_phonemes(engine, text) {
 # emits a raw f64 sample vec (shabda_speak_with); the only seam this bridge adds
 # is wrapping those samples in a mono AudioBuffer -- svara/shabda deliberately
 # don't depend on dhvani. Returns the AudioBuffer handle, or 0 (null == DSP
-# error) on convert/render/buffer-construction failure.
+# error) on convert/render/buffer-construction failure, and for an engine / voice
+# handle <= 0 or a null text.
 #must_use
 fn dhvani_g2p_speak(engine, text, voice, sample_rate) {
+    if (engine <= 0) { return 0; }
+    if (text == 0) { return 0; }
+    if (voice <= 0) { return 0; }
     var slot = alloc(8);
+    if (slot == 0) { return 0; }
     var err = shabda_speak(engine, text, voice, f64_from(sample_rate), slot);
     if (shabda_is_err(err) == 1) { return 0; }
     var samples = load64(slot);                 # vec of f64 samples

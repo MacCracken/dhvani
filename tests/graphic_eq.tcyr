@@ -179,5 +179,120 @@ dhvani_geq_process(eqj, bufj);
 var rcj = dhvani_geq_reset(eqj);
 assert_eq(rcj, 0, "reset completes");
 
+# ---- helpers (regression groups) ----
+fn geq_ndiff(a, b) {
+    var sa = dhvani_buffer_samples(a);
+    var sb = dhvani_buffer_samples(b);
+    var n = vec_len(sa);
+    var i = 0;
+    var d = 0;
+    while (i < n) { if (vec_get(sa, i) != vec_get(sb, i)) { d = d + 1; } i = i + 1; }
+    return d;
+}
+fn geq_nonzero(buf) {
+    var s = dhvani_buffer_samples(buf);
+    var n = vec_len(s);
+    var i = 0;
+    var nz = 0;
+    while (i < n) { if (vec_get(s, i) != 0) { nz = nz + 1; } i = i + 1; }
+    return nz;
+}
+
+# ---- negative_index_guards (regression, 2.3.2) ----
+# The oracle's band index is a usize; through 2.3.1 the port guarded only
+# `band < 10`, so -1 reached vec_set / vec_get and aborted the process.
+test_group("negative_index_guards");
+var setk = dhvani_geq_settings_default();
+dhvani_geq_settings_set_band(setk, 0 - 1, 6.0);
+assert_eq(dhvani_geq_settings_is_flat(setk), 1, "settings_set_band(-1) is a no-op");
+assert_eq(dhvani_geq_settings_band(setk, 0 - 1), 0, "settings_band(-1) -> 0");
+var eqk = dhvani_geq_new(44100, 1);
+dhvani_geq_set_band(eqk, 0 - 1, 6.0);
+assert_eq(dhvani_geq_settings_band(dhvani_geq_settings(eqk), 0), 0, "geq_set_band(-1) is a no-op");
+
+# ---- param_changes_are_alloc_free (regression, 2.3.2) ----
+# Through 2.3.1 the "ALLOC-FREE" rebuild still allocated 10 band configs + 10
+# coefficient structs per call (800 bytes per set_band), and load_preset a whole
+# settings struct.
+test_group("param_changes_are_alloc_free");
+var eql = dhvani_geq_new(44100, 2);
+dhvani_geq_load_preset(eql, "rock");
+var bufl = geq_sine(1000.0, 44100, 512, 0.5);
+dhvani_geq_process(eql, bufl);
+var setl = dhvani_geq_settings_preset("jazz");
+var ul0 = alloc_used();
+var kl = 0;
+while (kl < 10) {
+    dhvani_geq_set_band(eql, 3, f64_from(kl));
+    dhvani_geq_load_preset(eql, "vocal");
+    dhvani_geq_set_settings(eql, setl);
+    kl = kl + 1;
+}
+var ul1 = alloc_used();
+assert_eq(ul1 - ul0, 0, "10x set_band + load_preset + set_settings allocate 0 bytes");
+assert_eq(dhvani_geq_settings_band(dhvani_geq_settings(eql), 9), 3.0, "last set_settings (jazz) applied");
+
+# ---- rebuild_zeroes_state (parity, 2.3.2) ----
+# The oracle's rebuild() builds a fresh ParametricEq, so every parameter change
+# starts the filters from zero state: silence in after a change is exact silence
+# out. Through 2.3.1 the in-place rebuild kept the old state (a different ringing
+# tail than the oracle).
+test_group("rebuild_zeroes_state");
+var eqm = dhvani_geq_new(44100, 1);
+dhvani_geq_set_enabled(eqm, 1);
+dhvani_geq_set_band(eqm, 5, 9.0);
+var bufm = geq_sine(1000.0, 44100, 1024, 0.8);
+var rmsm = dhvani_buffer_rms(bufm);
+dhvani_geq_process(eqm, bufm);
+assert(f64_gt(dhvani_buffer_rms(bufm), f64_mul(rmsm, 1.5)), "sanity: the boost ran (state built up)");
+dhvani_geq_set_band(eqm, 4, 3.0);
+var silm = dhvani_buffer_silence(1, 256, 44100);
+dhvani_geq_process(eqm, silm);
+assert_eq(geq_nonzero(silm), 0, "silence after set_band is exact silence (state zeroed)");
+var bufm2 = geq_sine(1000.0, 44100, 1024, 0.8);
+dhvani_geq_process(eqm, bufm2);
+dhvani_geq_load_preset(eqm, "bass");
+var silm2 = dhvani_buffer_silence(1, 256, 44100);
+dhvani_geq_process(eqm, silm2);
+assert_eq(geq_nonzero(silm2), 0, "silence after load_preset is exact silence");
+
+# ---- settings_are_copied (regression, 2.3.2) ----
+# set_settings copies (the oracle moves): mutating the caller's handle afterwards
+# must not reach the eq. Through 2.3.1 the eq kept the caller's handle.
+test_group("settings_are_copied");
+var eqn = dhvani_geq_new(44100, 1);
+var setn = dhvani_geq_settings_preset("rock");
+dhvani_geq_set_settings(eqn, setn);
+dhvani_geq_settings_set_band(setn, 0, f64_neg(12.0));
+DhGraphicEqSettings_set_enabled(setn, 0);
+assert_eq(dhvani_geq_settings_band(dhvani_geq_settings(eqn), 0), 4.0, "eq keeps rock band 0 = +4 dB");
+assert_eq(dhvani_geq_settings_enabled(dhvani_geq_settings(eqn)), 1, "eq stays enabled");
+
+# ---- live_settings_handle_applies (regression, 2.3.2) ----
+# dhvani_geq_settings() hands out the live owned settings. Through 2.3.1 editing a
+# gain through it changed is_flat but never rebuilt, so the band stayed disabled
+# and the edit was silently ignored. process() now rebuilds when the gains differ.
+test_group("live_settings_handle_applies");
+var eqo = dhvani_geq_new(44100, 1);
+dhvani_geq_set_enabled(eqo, 1);
+dhvani_geq_settings_set_band(dhvani_geq_settings(eqo), 5, 12.0);
+var eqo2 = dhvani_geq_new(44100, 1);
+dhvani_geq_set_enabled(eqo2, 1);
+dhvani_geq_set_band(eqo2, 5, 12.0);
+var bufo = geq_sine(1000.0, 44100, 2048, 0.25);
+var bufo2 = geq_sine(1000.0, 44100, 2048, 0.25);
+var rmso = dhvani_buffer_rms(bufo);
+dhvani_geq_process(eqo, bufo);
+dhvani_geq_process(eqo2, bufo2);
+assert(f64_gt(dhvani_buffer_rms(bufo), f64_mul(rmso, 2.0)), "edit through the live handle boosts 1 kHz");
+assert_eq(geq_ndiff(bufo, bufo2), 0, "== the same edit through set_band, bit for bit");
+var uo0 = alloc_used();
+var bufo3 = geq_sine(1000.0, 44100, 2048, 0.25);
+var uo1 = alloc_used();
+dhvani_geq_process(eqo, bufo3);
+var uo2 = alloc_used();
+assert_eq(uo2 - uo1, 0, "steady-state process allocates 0 bytes");
+assert(uo1 - uo0 > 0, "sanity: building the input did allocate");
+
 var rc = assert_summary();
 syscall(60, rc);

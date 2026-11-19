@@ -14,7 +14,8 @@ var vf = dhvani_voice_new();
 dhvani_voice_set_note(vf, 69);   # A4
 assert(f64_lt(f64_abs(f64_sub(dhvani_voice_frequency(vf), 440.0)), 0x3F847AE147AE147B), "A4 ~= 440");   # tol 0.01
 dhvani_voice_set_note(vf, 60);   # C4
-assert(f64_lt(f64_abs(f64_sub(dhvani_voice_frequency(vf), 0x40705A147AE147AE)), 0x3FB999999999999A), "C4 ~= 261.63");   # 261.63, tol 0.1
+# 261.63 = 0x40705A147AE147AE, tol 0.1 = 0x3FB999999999999A
+assert(f64_lt(f64_abs(f64_sub(dhvani_voice_frequency(vf), 0x40705A147AE147AE)), 0x3FB999999999999A), "C4 ~= 261.63");
 dhvani_voice_set_note(vf, 0);
 assert(f64_gt(dhvani_voice_frequency(vf), 0), "freq(0) > 0");
 assert(f64_lt(dhvani_voice_frequency(vf), 10.0), "freq(0) < 10 (~8.18 Hz)");
@@ -114,6 +115,52 @@ dhvani_voice_manager_tick_age(mgr8);
 dhvani_voice_manager_tick_age(mgr8);
 assert_eq(dhvani_voice_age(dhvani_voice_manager_voice(mgr8, 0)), 2, "active slot age 2");
 assert_eq(dhvani_voice_age(dhvani_voice_manager_voice(mgr8, 1)), 0, "idle slot not ticked");
+
+# ---- note_on_lowest_idle_note_off_first_match (port regression) ----
+# The idle search / note_off now return at the first match (Rust iter().position
+# / early `return`); pin the first-match semantics the early exits must keep.
+test_group("note_on_lowest_idle_note_off_first_match");
+var mgr9 = dhvani_voice_manager_new(4, DH_STEAL_NONE);
+assert_eq(dhvani_voice_manager_note_on(mgr9, 60, 100, 0), 0, "slot 0");
+assert_eq(dhvani_voice_manager_note_on(mgr9, 60, 100, 0), 1, "dup note -> slot 1");
+assert_eq(dhvani_voice_manager_note_on(mgr9, 64, 100, 0), 2, "slot 2");
+dhvani_voice_manager_note_off(mgr9, 60, 0);
+assert_eq(dhvani_voice_state(dhvani_voice_manager_voice(mgr9, 0)), DH_VOICE_STATE_RELEASING, "first dup released");
+assert_eq(dhvani_voice_state(dhvani_voice_manager_voice(mgr9, 1)), DH_VOICE_STATE_ACTIVE, "second dup untouched");
+dhvani_voice_manager_free_voice(mgr9, 1);
+dhvani_voice_manager_free_voice(mgr9, 0);
+assert_eq(dhvani_voice_manager_note_on(mgr9, 67, 100, 0), 0, "lowest idle (0, not 1/3)");
+assert_eq(dhvani_voice_manager_note_on(mgr9, 60, 100, 1), 1, "next lowest idle 1 (ch1)");
+assert_eq(dhvani_voice_manager_note_on(mgr9, 60, 100, 0), 3, "last idle 3 (ch0)");
+dhvani_voice_manager_note_off(mgr9, 60, 0);
+assert_eq(dhvani_voice_state(dhvani_voice_manager_voice(mgr9, 3)), DH_VOICE_STATE_RELEASING, "ch0 note 60 released");
+assert_eq(dhvani_voice_state(dhvani_voice_manager_voice(mgr9, 1)), DH_VOICE_STATE_ACTIVE, "ch1 note 60 untouched");
+dhvani_voice_manager_note_off(mgr9, 60, 1);
+dhvani_voice_manager_note_off(mgr9, 60, 0);
+assert_eq(dhvani_voice_manager_active_count(mgr9), 4, "pool full, none idle");
+var released = 0;
+var vi9 = 0;
+while (vi9 < 4) {
+    var st9 = dhvani_voice_state(dhvani_voice_manager_voice(mgr9, vi9));
+    if (st9 == DH_VOICE_STATE_RELEASING) { released = released + 1; }
+    vi9 = vi9 + 1;
+}
+assert_eq(released, 2, "exactly two releasing (ch1 + ch0 note 60)");
+assert_eq(dhvani_voice_manager_note_off(mgr9, 99, 0), 0, "no match is a no-op");
+
+# ---- voice_manager_zero_alloc ----
+test_group("voice_manager_zero_alloc");
+var mgr10 = dhvani_voice_manager_new(8, DH_STEAL_OLDEST);
+var va0 = alloc_used();
+var vj = 0;
+while (vj < 1000) {
+    dhvani_voice_manager_note_on(mgr10, 60 + vj % 12, 100, 0);
+    dhvani_voice_manager_note_off(mgr10, 60 + vj % 12, 0);
+    dhvani_voice_manager_tick_age(mgr10);
+    if (vj % 3 == 0) { dhvani_voice_manager_free_voice(mgr10, vj % 8); }
+    vj = vj + 1;
+}
+assert_eq(alloc_used() - va0, 0, "1000 note_on/off/tick/free: 0 B");
 
 var rc = assert_summary();
 syscall(60, rc);

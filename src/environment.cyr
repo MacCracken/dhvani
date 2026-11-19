@@ -10,53 +10,70 @@
 # passes a `synthesize(state, duration)` fn (e.g. &rain_synthesize) that returns
 # an interleaved-mono samples vec (or a negative garjan error code). render_impact
 # and render_block are concrete (impact_synthesize / process_block).
+#
+# ERRORS: every bridge here returns an AudioBuffer handle or 0, the null-handle
+# sentinel the other Wave F bridges use. garjan's constructors (rain_new,
+# impact_new, ...) return NEGATIVE codes on failure and its synthesize /
+# process_block fns read the handle's fields without a check, so a handle <= 0 is
+# refused (0) before garjan is called. Through 2.3.1 render_environment /
+# render_impact forwarded garjan's negative code instead of 0.
 
 # render_environment: call synth_fp(state, duration) to get a mono samples vec,
-# then wrap it in an AudioBuffer. Returns a negative garjan error code if the
-# synthesizer failed (matches the Rust map_err), or a silence fallback if buffer
-# construction fails.
+# then wrap it in an AudioBuffer. 0 when the synthesizer fails, when the buffer
+# cannot be built (bad sample rate: rust-old's map_err returns Err there -- it is
+# not a silence fallback), or for a null fn-ptr / state handle <= 0.
+#must_use
 fn dhvani_env_render_environment(synth_fp, state, sample_rate, duration) {
+    if (synth_fp == 0) { return 0; }
+    if (state <= 0) { return 0; }
     var samples = fncall2(synth_fp, state, duration);
-    if (garjan_is_err(samples) == 1) { return samples; }
-    var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
-    if (buf == 0) {
-        var sr = sample_rate;
-        if (sr < 1) { sr = 1; }
-        return dhvani_buffer_silence(1, vec_len(samples), sr);
-    }
-    return buf;
+    if (samples <= 0) { return 0; }
+    return dhvani_buffer_from_interleaved(samples, 1, sample_rate);
 }
 
 # render_impact: synthesize a one-shot impact of the given type, wrap in an
-# AudioBuffer (silence fallback on construction failure, per the Rust map_err).
+# AudioBuffer. 0 when garjan fails (bad impact type, ...), when the buffer cannot be
+# built (rust-old's map_err -> Err), or for an impact handle <= 0.
+#must_use
 fn dhvani_env_render_impact(impact, impact_type, sample_rate) {
+    if (impact <= 0) { return 0; }
     var samples = impact_synthesize(impact, impact_type);
-    if (garjan_is_err(samples) == 1) { return samples; }
-    var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
-    if (buf == 0) {
-        var sr = sample_rate;
-        if (sr < 1) { sr = 1; }
-        return dhvani_buffer_silence(1, vec_len(samples), sr);
-    }
-    return buf;
+    if (samples <= 0) { return 0; }
+    return dhvani_buffer_from_interleaved(samples, 1, sample_rate);
 }
 
 # render_block: fill a `frames`-length mono buffer via block_fp(state, output),
-# then assemble an interleaved AudioBuffer (silence fallback on failure, matching
-# the Rust unwrap_or_else). block_fp is a process_block fn (e.g. &rain_process_block).
+# then assemble an interleaved AudioBuffer (silence fallback on construction
+# failure, matching the Rust unwrap_or_else). block_fp is a process_block fn (e.g.
+# &rain_process_block). One exact allocation for the samples; 0 for a null fn-ptr,
+# a state handle <= 0, or a refused allocation. Per block: dhvani_env_render_block_into.
+#must_use
 fn dhvani_env_render_block(block_fp, state, frames, sample_rate) {
-    var samples = vec_new();
-    var i = 0;
-    while (i < frames) {
-        vec_push(samples, 0);
-        i = i + 1;
-    }
+    if (block_fp == 0) { return 0; }
+    if (state <= 0) { return 0; }
+    var nf = frames;
+    if (nf < 0) { nf = 0; }
+    var samples = dh_vec_zeros(nf);
+    if (vec_len(samples) != nf) { return 0; }
     fncall2(block_fp, state, samples);
     var buf = dhvani_buffer_from_interleaved(samples, 1, sample_rate);
     if (buf == 0) {
         var sr = sample_rate;
         if (sr < 1) { sr = 1; }
-        return dhvani_buffer_silence(1, frames, sr);
+        return dhvani_buffer_silence(1, nf, sr);
     }
     return buf;
+}
+
+# render_block_into: alloc-free per-block form. block_fp(state, samples) fills the
+# caller-owned MONO buffer's sample vec in place (garjan's process_block fns are
+# sized by the vec). DHVANI_ERR_NONE, or DHVANI_ERR_INVALID_PARAMETER for a null
+# fn-ptr / buffer, a state handle <= 0, or a buffer that is not 1-channel.
+fn dhvani_env_render_block_into(block_fp, state, buf) {
+    if (block_fp == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (state <= 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (buf == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dhvani_buffer_channels(buf) != 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    fncall2(block_fp, state, dhvani_buffer_samples(buf));
+    return DHVANI_ERR_NONE;
 }

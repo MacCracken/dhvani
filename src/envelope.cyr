@@ -2,6 +2,10 @@
 # Ports rust-old/src/dsp/envelope.rs. L0, deps error only.
 # AdsrParams + EnvelopeState enum -> codes. validate()/set_params() Result ->
 # error codes. stage_pos is an integer sample counter. serde dropped.
+# The params are COPIED into storage the envelope owns (the oracle takes them by
+# value), so a later change to the caller's handle cannot skip validate(), and
+# validate() rejects NaN in every bound (the oracle's `contains` does for sustain; its
+# `< 0.0` tests let a NaN attack, decay or release through).
 
 # ---- EnvelopeState ----
 var DH_ENV_IDLE    = 0;
@@ -29,15 +33,22 @@ fn dhvani_adsr_new(attack, decay, sustain, release) {
 #must_use
 fn dhvani_adsr_default() { return dhvani_adsr_new(0.01, 0.1, 0.7, 0.3); }
 
-# validate -- attack/decay/release >= 0, sustain in [0,1].
+# copy src's fields into dst (an envelope's own params); returns dst.
+fn dh_adsr_copy(dst, src) {
+    DhAdsrParams_set_attack(dst, DhAdsrParams_attack(src));
+    DhAdsrParams_set_decay(dst, DhAdsrParams_decay(src));
+    DhAdsrParams_set_sustain(dst, DhAdsrParams_sustain(src));
+    DhAdsrParams_set_release(dst, DhAdsrParams_release(src));
+    return dst;
+}
+
+# validate -- attack/decay/release >= 0, sustain in [0,1] (NaN rejected).
 #must_use
 fn dhvani_adsr_validate(p) {
-    if (f64_lt(DhAdsrParams_attack(p), 0) == 1)  { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_lt(DhAdsrParams_decay(p), 0) == 1)   { return DHVANI_ERR_INVALID_PARAMETER; }
-    var s = DhAdsrParams_sustain(p);
-    if (f64_lt(s, 0) == 1)                        { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_gt(s, 1.0) == 1)                      { return DHVANI_ERR_INVALID_PARAMETER; }
-    if (f64_lt(DhAdsrParams_release(p), 0) == 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhAdsrParams_attack(p), 0, DH_POS_INF) == 0)  { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhAdsrParams_decay(p), 0, DH_POS_INF) == 0)   { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhAdsrParams_sustain(p), 0, 1.0) == 0)        { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (dh_in_range(DhAdsrParams_release(p), 0, DH_POS_INF) == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
     return DHVANI_ERR_NONE;
 }
 
@@ -45,7 +56,7 @@ fn dhvani_adsr_validate(p) {
 #must_use
 fn dhvani_env_new(params, sample_rate) {
     var self = alloc(sizeof(DhEnvelope));
-    DhEnvelope_set_params(self, params);
+    DhEnvelope_set_params(self, dh_adsr_copy(alloc(sizeof(DhAdsrParams)), params));
     DhEnvelope_set_state(self, DH_ENV_IDLE);
     DhEnvelope_set_level(self, 0);
     DhEnvelope_set_sample_rate(self, f64_from(sample_rate));
@@ -142,10 +153,11 @@ fn dhvani_env_reset(self) {
     return 0;
 }
 
-# set_params -- validate then store; returns error code on invalid params.
+# set_params -- validate, then copy into the envelope's own params (no allocation);
+# returns error code on invalid params.
 fn dhvani_env_set_params(self, params) {
     var rc = dhvani_adsr_validate(params);
     if (dhvani_is_err(rc) == 1) { return rc; }
-    DhEnvelope_set_params(self, params);
+    dh_adsr_copy(DhEnvelope_params(self), params);
     return DHVANI_ERR_NONE;
 }

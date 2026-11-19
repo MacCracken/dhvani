@@ -23,10 +23,24 @@ struct DhBiquadState { z1; z2; }
 #derive(accessors)
 struct DhBiquadFilter { coeffs; states; filter_type; gain_db; freq_hz; q; sample_rate; bypassed; mix; }
 
-# design(filter_type, gain_db, freq_hz, q, sample_rate) -> coeffs handle.
-#must_use
-fn dhvani_biquad_design(filter_type, gain_db, freq_hz, q, sample_rate) {
+# design_into(c, filter_type, gain_db, freq_hz, q, sample_rate) -- write the RBJ
+# coefficients into the existing DhBiquadCoeffs `c`. Allocation-free, so a parameter
+# change on a live filter (set_params, set_sample_rate, EQ band automation) costs no
+# memory under the free-less allocator. (Through 2.3.2 every change allocated a fresh
+# 40-byte coeffs struct, which leaked at the automation rate.)
+# A rate whose Nyquist clamp `sample_rate * 0.499` falls below the 1 Hz floor (any rate
+# under 3) gives unity coefficients: the oracle's `f32::clamp(1.0, sr * 0.499)` panics
+# there, and w0 = 0/0 would otherwise make every later output NaN.
+fn dhvani_biquad_design_into(c, filter_type, gain_db, freq_hz, q, sample_rate) {
     var sr = f64_from(sample_rate);
+    if (f64_lt(f64_mul(sr, 0.499), 1.0) == 1) {
+        DhBiquadCoeffs_set_b0(c, 1.0);
+        DhBiquadCoeffs_set_b1(c, 0);
+        DhBiquadCoeffs_set_b2(c, 0);
+        DhBiquadCoeffs_set_a1(c, 0);
+        DhBiquadCoeffs_set_a2(c, 0);
+        return 0;
+    }
     var f0 = f64_clamp(freq_hz, 1.0, f64_mul(sr, 0.499));
     var qq = f64_max(q, 0.01);
     var w0 = angular_frequency(f0, sr);
@@ -84,12 +98,19 @@ fn dhvani_biquad_design(filter_type, gain_db, freq_hz, q, sample_rate) {
         a1 = f64_mul(2.0, f64_sub(f64_sub(a, 1.0), f64_mul(f64_add(a, 1.0), cos_w0)));
         a2 = f64_sub(f64_sub(f64_add(a, 1.0), f64_mul(f64_sub(a, 1.0), cos_w0)), tsa);
     }
-    var c = alloc(sizeof(DhBiquadCoeffs));
     DhBiquadCoeffs_set_b0(c, f64_div(b0, a0));
     DhBiquadCoeffs_set_b1(c, f64_div(b1, a0));
     DhBiquadCoeffs_set_b2(c, f64_div(b2, a0));
     DhBiquadCoeffs_set_a1(c, f64_div(a1, a0));
     DhBiquadCoeffs_set_a2(c, f64_div(a2, a0));
+    return 0;
+}
+
+# design(filter_type, gain_db, freq_hz, q, sample_rate) -> a new coeffs handle.
+#must_use
+fn dhvani_biquad_design(filter_type, gain_db, freq_hz, q, sample_rate) {
+    var c = alloc(sizeof(DhBiquadCoeffs));
+    dhvani_biquad_design_into(c, filter_type, gain_db, freq_hz, q, sample_rate);
     return c;
 }
 
@@ -139,47 +160,87 @@ fn dhvani_biquad_new(filter_type, gain_db, freq_hz, q, sample_rate, channels) {
     return self;
 }
 
-# process(buf) -- filter in place with dry/wet mix.
+# A state that went non-finite (a NaN or Inf input reached it) is cleared at the end
+# of the block it arrived in. The oracle keeps it, so one bad sample made every later
+# output NaN until reset(); here the bad sample's own outputs stay NaN and the filter
+# recovers on the next block (docs/decisions/005-hardening-divergences.md).
+fn dh_biquad_state_sanitize(st) {
+    var z1 = load64(st);
+    var z2 = load64(st + 8);
+    if (f64_eq(f64_sub(z1, z1), 0) == 0) { store64(st, 0); store64(st + 8, 0); return 1; }
+    if (f64_eq(f64_sub(z2, z2), 0) == 0) { store64(st, 0); store64(st + 8, 0); return 1; }
+    return 0;
+}
+
+# process(buf) -- filter in place with dry/wet mix. Channels beyond the filter's state
+# count pass through untouched (the oracle panics on its out-of-range state index).
 fn dhvani_biquad_process(self, buf) {
     if (DhBiquadFilter_bypassed(self) == 1) { return 0; }
     var ch = DhAudioBuffer_channels(buf);
     var samples = DhAudioBuffer_samples(buf);
     var frames = DhAudioBuffer_frames(buf);
+    if (ch < 1) { return 0; }
+    # never walk past the storage, whatever `frames` claims
+    frames = dh_imin(frames, vec_len(samples) / ch);
+    if (frames < 1) { return 0; }
     var coeffs = DhBiquadFilter_coeffs(self);
     var states = DhBiquadFilter_states(self);
+    var nst = dh_imin(ch, vec_len(states));
+    var stp = dh_vec_data(states);
     var mix = DhBiquadFilter_mix(self);
+    var d = dh_vec_data(samples);
     # Fast path, as in the oracle: stereo at full wet (|mix - 1| < f32::EPSILON) runs
     # both channels through the cross-channel kernel, which reads the coeffs and the two
     # states in place (DhBiquadCoeffs / DhBiquadState are its layouts) -- no vec built.
-    # The output is pure wet, where the loop below would add input * (1 - mix).
+    # The output is pure wet, where the loop below would add input * (1 - mix). It runs
+    # `frames` frames, never vec_len / 2: a caller may reuse a longer vec for a shorter
+    # block (the de-esser's sidechain does), and the tail past `frames` is not this block.
     if (ch == 2) {
-        if (vec_len(states) >= 2) {
+        if (nst == 2) {
             if (f64_lt(f64_abs(f64_sub(mix, 1.0)), DH_EPSILON) == 1) {
-                dh_simd_biquad_stereo_raw(dh_vec_data(samples), vec_len(samples) / 2, coeffs,
-                  vec_get(states, 0), vec_get(states, 1));
+                dh_simd_biquad_stereo_raw(d, frames, coeffs, load64(stp), load64(stp + 8));
+                dh_biquad_state_sanitize(load64(stp));
+                dh_biquad_state_sanitize(load64(stp + 8));
                 return 0;
             }
         }
     }
+    # The generic loop: the state update of dhvani_biquad_state_process, with the
+    # coefficients read once per block and the samples walked in place (same bits).
+    var b0 = DhBiquadCoeffs_b0(coeffs);
+    var b1 = DhBiquadCoeffs_b1(coeffs);
+    var b2 = DhBiquadCoeffs_b2(coeffs);
+    var a1 = DhBiquadCoeffs_a1(coeffs);
+    var a2 = DhBiquadCoeffs_a2(coeffs);
     var dry = f64_sub(1.0, mix);
-    var frame = 0;
-    while (frame < frames) {
-        var c = 0;
-        while (c < ch) {
-            var idx = frame * ch + c;
-            var input = vec_get(samples, idx);
-            var wet = dhvani_biquad_state_process(vec_get(states, c), input, coeffs);
-            vec_set(samples, idx, f64_add(f64_mul(input, dry), f64_mul(wet, mix)));
-            c = c + 1;
+    var c = 0;
+    while (c < nst) {
+        var st = load64(stp + c * 8);
+        var z1 = load64(st);
+        var z2 = load64(st + 8);
+        var p = d + c * 8;
+        var end = p + frames * ch * 8;
+        var stride = ch * 8;
+        while (p < end) {
+            var input = load64(p);
+            var out = f64_add(f64_mul(b0, input), z1);
+            z1 = f64_add(f64_sub(f64_mul(b1, input), f64_mul(a1, out)), z2);
+            z2 = f64_sub(f64_mul(b2, input), f64_mul(a2, out));
+            store64(p, f64_add(f64_mul(input, dry), f64_mul(out, mix)));
+            p = p + stride;
         }
-        frame = frame + 1;
+        store64(st, z1);
+        store64(st + 8, z2);
+        dh_biquad_state_sanitize(st);
+        c = c + 1;
     }
     return 0;
 }
 
-# process_sample(sample, channel) -- passthrough if channel out of range.
+# process_sample(sample, channel) -- passthrough if channel out of range (negative too).
 #must_use
 fn dhvani_biquad_process_sample(self, sample, channel) {
+    if (channel < 0) { return sample; }
     if (channel < vec_len(DhBiquadFilter_states(self))) {
         return dhvani_biquad_state_process(
           vec_get(DhBiquadFilter_states(self), channel),
@@ -202,26 +263,25 @@ fn dhvani_biquad_reset(self) {
     return 0;
 }
 
-# set_params(filter_type, gain_db, freq_hz, q) -- recompute coeffs, keep state.
+# set_params(filter_type, gain_db, freq_hz, q) -- recompute coeffs in place, keep state.
 fn dhvani_biquad_set_params(self, filter_type, gain_db, freq_hz, q) {
     DhBiquadFilter_set_filter_type(self, filter_type);
     DhBiquadFilter_set_gain_db(self, gain_db);
     DhBiquadFilter_set_freq_hz(self, freq_hz);
     DhBiquadFilter_set_q(self, q);
-    DhBiquadFilter_set_coeffs(
-      self,
-      dhvani_biquad_design(filter_type, gain_db, freq_hz, q, DhBiquadFilter_sample_rate(self)));
+    dhvani_biquad_design_into(DhBiquadFilter_coeffs(self), filter_type, gain_db, freq_hz, q,
+      DhBiquadFilter_sample_rate(self));
     return 0;
 }
 fn dhvani_biquad_set_sample_rate(self, sample_rate) {
     DhBiquadFilter_set_sample_rate(self, sample_rate);
-    var rc = dhvani_biquad_design(
+    dhvani_biquad_design_into(
+      DhBiquadFilter_coeffs(self),
       DhBiquadFilter_filter_type(self),
       DhBiquadFilter_gain_db(self),
       DhBiquadFilter_freq_hz(self),
       DhBiquadFilter_q(self),
       sample_rate);
-    DhBiquadFilter_set_coeffs(self, rc);
     return 0;
 }
 fn dhvani_biquad_set_bypass(self, bypassed) { DhBiquadFilter_set_bypassed(self, bypassed); return 0; }

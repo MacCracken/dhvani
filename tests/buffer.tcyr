@@ -100,5 +100,48 @@ test_group("sample_format_display");
 assert_streq(dhvani_format_name(DH_FMT_F32), "f32", "f32 name");
 assert_streq(dhvani_format_name(DH_FMT_I16), "i16", "i16 name");
 
+# ---- hardening (2.3.3) ----
+# dh_vec_zeros is one exact allocation: the push-doubling build kept every outgrown copy
+# (2,097,048 B for 100000 zeros through 2.3.2, against 800,024 B of payload + header).
+test_group("vec_zeros_exact");
+var vz_used = alloc_used();
+var vz = dh_vec_zeros(100000);
+var vz_bytes = alloc_used() - vz_used;
+assert_eq(vec_len(vz), 100000, "len 100000");
+assert(vz_bytes < 800100, "within one header of the payload");
+assert_eq(vec_get(vz, 99999), 0, "zeroed to the end");
+vec_push(vz, 1.0);
+assert_eq(vec_get(vz, 100000), 1.0, "still grows by push");
+assert_eq(vec_len(dh_vec_zeros(0)), 0, "n = 0 -> empty");
+assert_eq(vec_len(dh_vec_zeros(0 - 5)), 0, "n < 0 -> empty");
+var vc_src = vec_new(); vec_push(vc_src, 0.25); vec_push(vc_src, f64_neg(0.5));
+var vc = dh_vec_copy(vc_src);
+assert_eq(vec_len(vc), 2, "copy keeps the length");
+assert_eq(vec_get(vc, 1), f64_neg(0.5), "copy keeps the bits");
+
+# Negative shapes are refused where the oracle's u16 / u32 could not be negative, and a
+# silence() whose channels * frames overflows the vec cap is refused, not mis-sized.
+test_group("negative_and_overflowing_shapes");
+var ns_v = vec_new(); vec_push(ns_v, 0); vec_push(ns_v, 0); vec_push(ns_v, 0); vec_push(ns_v, 0);
+assert_eq(dhvani_buffer_from_interleaved(ns_v, 0 - 2, 48000), 0, "negative channels");
+assert_eq(dhvani_buffer_from_interleaved(ns_v, 2, 0 - 48000), 0, "negative rate");
+assert_eq(dhvani_buffer_silence(0 - 1, 4, 48000), 0, "silence: negative channels");
+assert_eq(dhvani_buffer_silence(2, 0 - 4, 48000), 0, "silence: negative frames");
+assert_eq(dhvani_buffer_silence(2, 0x4000000000000000, 48000), 0, "silence: channels * frames overflows");
+var ns_b = dhvani_buffer_from_interleaved(ns_v, 2, 44100);
+assert_eq(dhvani_buffer_resample_linear(ns_b, 0 - 44100), 0, "resample_linear: negative target");
+var ns_z = dhvani_buffer_silence(2, 10, 0);
+assert_eq(dhvani_buffer_resample_linear(ns_z, 48000), 0, "resample_linear: 0 Hz source refused, no abort");
+
+# pool_release zeroes the whole buffer (now by walking the storage).
+test_group("pool_release_zeroes");
+var pr_pool = dhvani_pool_new(0, 2, 8, 48000);
+var pr_buf = dhvani_buffer_silence(2, 8, 48000);
+vec_set(dhvani_buffer_samples(pr_buf), 0, 0.5);
+vec_set(dhvani_buffer_samples(pr_buf), 15, f64_neg(0.5));
+dhvani_pool_release(pr_pool, pr_buf);
+assert_eq(vec_get(dhvani_buffer_samples(pr_buf), 0), 0, "first sample zeroed");
+assert_eq(vec_get(dhvani_buffer_samples(pr_buf), 15), 0, "last sample zeroed");
+
 var rc = assert_summary();
 syscall(60, rc);

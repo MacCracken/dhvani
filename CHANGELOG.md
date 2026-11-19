@@ -5,6 +5,259 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.3] — P(-1) sweep: audit, hardening, refactor, optimization
+
+A full audit of `src/` (58 files, 10.3k lines) in seven module groups, each read against
+`rust-old` and its tests. Every P-1/P-2 claim was proven with a probe before it was
+fixed, and every fix has a regression test that fails on the 2.3.2 sources. Every
+behaviour change that diverges from the oracle is recorded in
+**`docs/decisions/005-hardening-divergences.md`**. No dependency or toolchain change
+(cyrius 6.7.18, the 2.3.2 tags).
+
+### Fixed — regressions in 2.3.2's new code
+
+- **The biquad stereo fast path ran `vec_len(samples) / 2` frames, not `frames`.**
+  - Rust's `samples.len()` is safe there, because its buffers keep that invariant. The
+    de-esser's sidechain vec only ever grew, so it does not.
+  - After a large block, every smaller stereo block also filtered the stale tail of the
+    earlier one, so the detector state drifted. 58 of 512 samples differed when the same
+    signal was split differently into blocks.
+  - The fast path now runs `min(frames, len / ch)` frames. The de-esser truncates its
+    sidechain to the block.
+- **`dhvani_resample_sinc`'s new default path walked raw pointers sized from
+  `new_frames * ch` with no size check.**
+  - A 0 Hz source rate makes the ratio infinite. `f64_to` then saturated `new_frames`,
+    the product wrapped, and the stores ran off the heap (SIGSEGV). A huge target rate
+    did the same.
+  - The old loop had aborted cleanly. Both paths now refuse such shapes and return 0
+    (`dh_resample_rates_ok`).
+
+### Fixed — P-1 (memory safety, process abort, unbounded leak, wrong output on valid input)
+
+- **Capture overran its buffer.** `dhvani_capture_read` / `_read_fmt` sized the PCM
+  buffer from the caller's arguments, not from the device's negotiated format. A 32-bit
+  device read with the 16-bit `capture_read` let the kernel write 4 KB past the heap
+  buffer. This is the capture-side twin of 2.2.3's playback fix.
+  - The buffer is now sized from `vani_format_get`, a mismatch is refused, and only the
+    frames actually read are decoded.
+- **Device I/O never prepared the stream.** `dhvani_playback_open_fmt` /
+  `dhvani_capture_open_fmt` configured the device (HW_PARAMS, which leaves it in SETUP)
+  and called START with no PREPARE. vani's write-recovery table maps SETUP to failure.
+  - Playback now runs configure → prepare. The first write starts the stream.
+  - Capture runs configure → prepare → start, and each step is checked.
+- **Real-time paths that allocated on every call** (a leak under the free-less allocator):
+
+  | path | leaked | now |
+  |---|---:|---:|
+  | `dhvani_recorder_read` (the RT capture loop) | 32,696 B per block | 0 |
+  | `dhvani_playback_write`, `dhvani_capture_read` | 4,112 B per call | 0 in steady state |
+  | `dhvani_noise_reducer_process` | 262–392 KB per call | 0 |
+  | biquad `set_params` / `set_sample_rate` (so EQ `set_band`, de-esser, graphic EQ) | 40 B per change | 0 |
+  | graphic EQ `set_band` / `load_preset`, de-esser `set_params` | 800 B / 296 B per call | 0 |
+  | meter `peak_load` / `bank_load` / `read_all` | 152 B per poll | 0 via the new readers |
+  | graph plan swap | every node buffer, about 16.7 KB per swap for 4 nodes | 0 |
+  | MIDI clip queries, route `filter_event`, translators | 32–152 B per call | 0 via `_into` |
+  | `dhvani_pan_set_pan` | 16 B per call | 0 |
+  | convolution channel-count switch | 428 KB+ per switch | 0 (storage only grows) |
+
+- **`moddelay.set_params` with a longer base + depth aborted the next `process`.** The
+  ring was never resized, so a negative index reached `vec_get`. The ring now grows,
+  keeping its history, and reads are clamped to it.
+- **Graph topological order differed from rust-old's.** On a graph with several sinks,
+  `process()` returned a different sink's buffer, and `is_finished` checked a different
+  node.
+  - The ready queue now replicates Rust's exactly, including the `partition_point` insert.
+  - Checked against rust-old on 400 random DAGs.
+- **`dh_vec_zeros` grew by push-doubling and kept every outgrown copy.** It cost about 2× the bytes for
+  every buffer the library made: 100,000 zeros took 2.1 MB instead of 0.8 MB. It is now
+  one exact allocation, as is `dhvani_buffer_clone` (via the new `dh_vec_copy`). STFT,
+  tempo and R128 memory halves as a result.
+
+### Fixed — P-2 (hostile or edge input, missing guards)
+
+- **Process aborts on bad input, now refused or passed through:**
+  - negative band, meter, channel and node indices;
+  - negative or zero hop sizes;
+  - a short `chromagram_from_array`;
+  - a buffer with more channels than a filter's state;
+  - a 0-channel reverb buffer;
+  - a shorter `out` vec in dither;
+  - negative node ids;
+  - edges to missing nodes;
+  - FFT windows past 2^24 (`DH_MAX_FFT`);
+  - a `dh_next_pow2` that looped forever past 2^62.
+- **Wild accesses (SIGSEGV), now guarded:**
+  - every sibling bridge handed an error handle (environment, mechanical, sampler, voice,
+    g2p, acoustics);
+  - `dhvani_playback_write(0, …)`;
+  - player/recorder constructors with a refused ring or 0 channels (SIGFPE);
+  - a null plan or swap handle;
+  - `dhvani_simd_biquad_stereo` with short `coeffs` or `state` vecs.
+- **NaN accepted by `validate()`** where rust-old's `contains` rejected it. Every check now
+  goes through the new `dh_in_range`.
+- **NaN-blind folds** in waveform min/max and dynamics true peak (the 2.2.3 sweep had
+  missed them). `[0.9, NaN, 0.1]` read a max of 0.1, and `true_peak` could come out below
+  `peak`.
+- **One NaN or Inf sample latched forever** in biquad/svf state, delay and reverb rings,
+  the compressor/limiter detector and the meter's RMS/LUFS sums. Each one silenced the
+  effect until `reset()`. It no longer persists (ADR 005).
+- **Shapes and formats:**
+  - the PCM player and recorder move whole frames only, where a 6-channel push could
+    misalign every later sample;
+  - bit depths other than 16/24/32 are refused, where they used to be treated as 32;
+  - `playback_write` checks the device's channel count;
+  - negative buffer shapes are refused;
+  - `silence()` refuses a `channels * frames` overflow;
+  - `dhvani_meter_level_new` takes an INTEGER sample rate, like every other constructor.
+    Given `48000` it had built a zero-length window and pinned LUFS at -200.
+- **Sample rates:** a biquad or svf at a sample rate under 3 designs pass-through
+  coefficients, not NaN.
+
+### Fixed — P-3 (parity with rust-old, contracts)
+
+- **Restored to the oracle's behaviour:**
+  - the Hard/Soft velocity curves saturate at 255 like `as u8` (Hard(200) was 314);
+  - same-frame automation breakpoints keep the oracle's order and search;
+  - phase wraps use Rust's `x % 1.0` (`dh_fmod1`) instead of a single conditional
+    subtract;
+  - routing skips a `-0.0` crosspoint;
+  - spectrum peak and chroma dominant class break ties toward the LAST maximum, as Rust's
+    `max_by` does;
+  - a graphic EQ rebuild zeroes the filter state;
+  - PCM decode divides by 2^(bits-1), 32768 for 16-bit, as rust-old's `i16_to_f32` does
+    (it was 32767);
+  - `render_environment` / `render_impact` fail instead of returning a 1 Hz silence
+    buffer;
+  - negative delay times become 0 samples.
+- **Parameter handles are copied into instance-owned storage** (compressor, limiter,
+  envelope, gain smoother, delay, reverb, de-esser, graphic EQ, EQ bands, graph node
+  table). A caller mutating its handle can no longer bypass `validate` or half-apply a
+  change.
+- **Consistent error returns:** the handle-returning bridges return 0 on failure. Before,
+  they returned a mix of negative garjan / goonj codes and `DHVANI_ERR_DSP`.
+- **Oracle bugs fixed, recorded in ADR 005:**
+  - a MIDI 2.0 note-on whose velocity scales to 0 becomes velocity 1, not a note-off;
+  - `MidiClip::merge` extends to the latest note end;
+  - `merge(c, c)` works;
+  - `acoustics_convolve_multiband` convolves the trailing `frames % 512`, which the
+    oracle left raw;
+  - the default capture/playback device is the first that opens, in (card, device)
+    order, not the first `/dev/snd` readdir entry.
+- **Smaller fixes:**
+  - the reverb flushes subnormals on its ring stores;
+  - `record.cyr` stores fixed 64 Ki-sample chunks, so a push never copies the take (a
+    stereo take used to stall for hundreds of ms at the 268 MB grow);
+  - `capture` validate refuses negatives;
+  - `dhvani_plan_total_latency` is computed at compile time.
+
+### Changed — optimization
+
+All bit-identical to the code they replace, proven by tests against kept references or
+golden checksums:
+
+- **FFT:** twiddle tables cached per size, raw storage walk. 6.2× at 1024 points. The
+  old code is kept as `dhvani_fft_in_place_scalar`.
+- **R128 / LRA:** the O(n²) insertion sort became `vec_sort_by`. 1.2 s → 2 ms on 30 min
+  of blocks.
+- **Graph:** a cycle is O(N+E) through dense slots, with raw zeroing. 32 nodes go from
+  209 to 48 µs, 200 nodes from 298 to 33 µs.
+- **Meter:** a running sum replaces the per-meter LUFS buffer (150 KB at 48 kHz). 3.1×.
+- **Other walked loops**, with coefficients and fields hoisted per block:
+  - filters and dynamics: svf (2.4×), the biquad generic loop, delay (3.6×), moddelay,
+    compressor, limiter;
+  - effects: reverb (flat rings, compare-and-wrap), EQ, de-esser, convolution,
+    noise reduction;
+  - buffer and format work: pan (6.9×), waveform, crossfade (trig once per frame), fades,
+    the i32 / f64 converters, PCM pack/unpack, `pool_release`, dynamics, STFT;
+  - the mono resampler (no gather copy).
+- **Spectral flux** is shared by onset and beat detection, which had duplicated it.
+- **MIDI clip queries** binary-search their start and stop at the first note past the
+  window. A `max_note_duration` on the clip keeps that sound.
+
+### Added
+
+- **Allocation-free forms:**
+  - MIDI: `dhvani_midi_clip_{notes_at,note_ons_at,note_offs_at,events_in_range}_into`,
+    `dhvani_midiroute_filter_event_into`, `dhvani_miditx_*_into`, and `_init`
+    re-initialisers for every event type;
+  - meter: `dhvani_meter_peak_left/right`, `bank_left/right`, `peak_load_into`,
+    `bank_load_into`, `bank_read_all_into`;
+  - I/O: `dhvani_capture_read_into`, `dhvani_recorder_read_into`,
+    `dhvani_player_push_from` (resume a partial push by frame), `dhvani_*_render_into`
+    for the synthesis, sampler, voice, environment and mechanical bridges;
+  - `dhvani_acoustics_convolution_from_multiband`, a reusable convolver for per-block use.
+- **Helpers:**
+  - `dhvani_biquad_design_into`;
+  - `dh_in_range`, `dh_fmod1` and `dh_min_ignore_nan` (error / simd);
+  - `dh_vec_copy`;
+  - `dhvani_resample_sinc_scalar`, rust-old's `not(simd)` loop kept as the oracle;
+  - `dhvani_device_candidates`;
+  - `DH_MAX_FFT`.
+- **Tests:** `tests/bench_dsp.bcyr`, benchmarks for the per-block DSP paths, which A/B
+  against 2.3.2.
+
+### Verified
+
+- `cyrius distlib` → `cyrius test` with `/dev/snd` hidden, the way CI runs: **65 suites,
+  2,603 assertions, 0 failed** (2.3.2: 1,759).
+- Every new regression group fails on the 2.3.2 sources, each in the way it should. That
+  includes the resample SIGSEGV, the dither and moddelay aborts and the allocation counts.
+  It was checked by running the new tests against a snapshot of the tagged tree, and each
+  repair group's own pre-fix runs.
+- `cyrius fmt --check` and `cyrius lint` are clean on every source file, and on every test
+  file this release touched. Five untouched test files (`convert`, `dsp`, `integration`,
+  `integration_advanced`, `proptest`) still carry their earlier lint warnings.
+- No name added to `src/` collides with the 19 bundles in `lib/`. One internal function
+  was removed (`dh_midi_event_alloc`, no callers).
+- `dist/dhvani.cyr` regenerated: 12,682 lines. distlib still names `is_err` on
+  x86_64-windows only (see 2.2.7).
+- **Benchmarks:** 2.3.2 against 2.3.3, interleaved twice, in `BENCHMARKS.md`.
+  - pan 7.0×, noise reduction 6.2×, convolution 5.5×, FFT 4.2×, reverb 2.7×, waveform
+    2.7×, delay 2.6×, svf 2.3×, dynamics 1.6×, limiter / R128 / compressor 1.3–1.4×.
+  - The 2.3.2 kernels and per-sample paths are within ±3 %.
+
+### Changed — API (behaviour visible to callers)
+
+- `dhvani_meter_level_new(channels, sample_rate)` takes an integer rate.
+- `dhvani_swap_handle_swap` returns an error code.
+- `dhvani_recorder_read` returns the recorder's reused buffer, valid until the next read.
+- **Error returns that changed:**
+  - `dhvani_env_render_environment` / `_render_impact`, `dhvani_mech_render_engine` and
+    `dhvani_acoustics_export_ir_wav` return 0 on failure;
+  - `dhvani_playback_write` returns 0 for an empty buffer and -1 on a mismatch.
+- **Analysis on silence and ties** (parity with rust-old):
+  - silence's `dominant_frequency` is now `(n - 1) · fr` (about 22 kHz at 1024 / 44.1 kHz),
+    not 0;
+  - silence's chroma `dominant_name` is "B", not "C";
+  - ties go to the later bin.
+- **The default device** on a machine whose card 0 is HDMI-only (this development box is
+  one) is now card 0's HDMI output. Before, it was whatever `/dev/snd` listed first. Pass
+  an explicit device to pick the analog card.
+
+### Known
+
+- **Convolution `process` keeps the oracle's streaming timing.**
+  - Output is written only when a 512-frame block completes, and only into the current
+    call's buffer.
+  - So a host block that is not a multiple of 512 returns some frames dry. The pattern
+    repeats at the buffer rate: with 256-frame calls, every other call is dry.
+  - The fix is to stream with one block of latency, which callers would see. It is left
+    as a decision. The one-shot `acoustics_convolve_multiband` is fixed.
+- **`simd_has_avx2()`** (stdlib `lib/simd.cyr`) reads CPUID.7.EBX[5] only. It does not
+  check OSXSAVE/XCR0 or the maximum CPUID leaf. A hypervisor that hides YMM state but
+  reports AVX2 would SIGILL in dhvani's 256-bit path on rows of 64 or more. This is an
+  upstream stdlib fix.
+- **Two hardware paths are verified only by reasoning:** capture short reads, and the
+  PREPARE/START sequence.
+  - The fix follows vani's own contract: `vani_configure` does HW_PARAMS only, and its
+    write-recovery table maps SETUP to failure.
+  - A silent 10 ms write on this box could not run in either version, because PipeWire
+    holds every PCM device (the open fails), so it says nothing either way.
+- **Deferred:**
+  - streaming onset/beat flux instead of materializing the spectrogram;
+  - the R128 block loop's `vec_get` walk;
+  - min-center-max MIDI 2.0 upscaling (ADR 005, *Not changed*).
+
 ## [2.3.2] — SIMD kernels restored, and the newest dependency tags with nothing held back
 
 Toolchain `cyrius` stays **6.7.18** (still the newest). Two changes:

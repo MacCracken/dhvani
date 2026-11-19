@@ -4,26 +4,62 @@
 # bridge carries over. Requires the nidhi bundle (n_engine_next_sample) to be
 # included before this unit, in dependency order:
 #   sakshi -> hisab -> goonj -> naad -> shravan -> nidhi   (see port-audit.md).
+#
+# n_engine_new answers 0 when an allocation is refused, and n_engine_next_sample
+# reads the engine's fields with no check, so both bridges refuse an engine
+# handle <= 0 before calling it.
 
 # render_to_buffer: pull `frames` mono samples from the engine's active voices,
 # duplicate across `channels`, assemble an interleaved AudioBuffer (silence
-# fallback on construction failure, matching the Rust unwrap_or_else).
+# fallback on construction failure, matching the Rust unwrap_or_else). One exact
+# allocation for the samples. 0 for an engine handle <= 0 or a refused allocation.
+#must_use
 fn dhvani_sampler_render_to_buffer(engine, channels, frames, sample_rate) {
-    var samples = vec_new();
+    if (engine <= 0) { return 0; }
+    var nf = frames;
+    if (nf < 0) { nf = 0; }
+    var n = 0;
+    if (channels > 0) { n = nf * channels; }
+    var samples = dh_vec_zeros(n);
+    if (vec_len(samples) != n) { return 0; }
+    var d = dh_vec_data(samples);
     var i = 0;
-    while (i < frames) {
+    while (i < nf) {
         var s = n_engine_next_sample(engine);
         var c = 0;
-        while (c < channels) { vec_push(samples, s); c = c + 1; }
+        while (c < channels) { store64(d, s); d = d + 8; c = c + 1; }
         i = i + 1;
     }
-    var buf = dhvani_buffer_from_interleaved(samples, channels, sample_rate);
+    var buf = 0;
+    if (channels > 0) { buf = dhvani_buffer_from_interleaved(samples, channels, sample_rate); }
     if (buf == 0) {
         var ch = channels;
         if (ch < 1) { ch = 1; }
         var sr = sample_rate;
         if (sr < 1) { sr = 1; }
-        return dhvani_buffer_silence(ch, frames, sr);
+        return dhvani_buffer_silence(ch, nf, sr);
     }
     return buf;
+}
+
+# render_into: alloc-free per-block form. Pulls one engine sample per frame of the
+# caller-owned `buf` and writes it into every channel, in place. DHVANI_ERR_NONE, or
+# DHVANI_ERR_INVALID_PARAMETER for a null buffer, an engine handle <= 0, or a
+# buffer with no channels (buf untouched).
+fn dhvani_sampler_render_into(engine, buf) {
+    if (engine <= 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (buf == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var ch = dhvani_buffer_channels(buf);
+    if (ch < 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var samples = dhvani_buffer_samples(buf);
+    var frames = dh_imin(dhvani_buffer_frames(buf), vec_len(samples) / ch);
+    var d = dh_vec_data(samples);
+    var i = 0;
+    while (i < frames) {
+        var s = n_engine_next_sample(engine);
+        var c = 0;
+        while (c < ch) { store64(d, s); d = d + 8; c = c + 1; }
+        i = i + 1;
+    }
+    return DHVANI_ERR_NONE;
 }

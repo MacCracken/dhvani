@@ -64,5 +64,19 @@ dhvani_pan_process(pp3, mbuf);
 assert(near(vec_get(dhvani_buffer_samples(mbuf), 0), 0.5, 0.0001), "mono[0] unchanged");
 assert(near(vec_get(dhvani_buffer_samples(mbuf), 1), 0.5, 0.0001), "mono[1] unchanged");
 
+# ---- set_pan is allocation-free (2.3.3; it did two alloc(8)s per call) ----
+test_group("set_pan_alloc_free");
+var spn = dhvani_pan_new(0);
+dhvani_pan_set_pan(spn, 0.3);
+var spn_used = alloc_used();
+var spn_k = 0;
+while (spn_k < 1000) { dhvani_pan_set_pan(spn, f64_div(f64_from(spn_k), 1000.0)); spn_k = spn_k + 1; }
+assert_eq(alloc_used() - spn_used, 0, "1000 set_pan calls: 0 bytes");
+var spn_l = vec_new(); var spn_r = vec_new();
+var spn_lp = alloc(8); var spn_rp = alloc(8);
+constant_power_pan(f64_div(f64_from(999), 1000.0), spn_lp, spn_rp);
+assert_eq(dhvani_pan_gain_l(spn), load64(spn_lp), "gain_l as constant_power_pan gives it");
+assert_eq(dhvani_pan_gain_r(spn), load64(spn_rp), "gain_r as constant_power_pan gives it");
+
 var rc = assert_summary();
 syscall(60, rc);

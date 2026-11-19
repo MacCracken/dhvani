@@ -77,26 +77,22 @@ fn dhvani_loudness_lufs_from_blocks(blocks) {
     return DH_NEG_INF;
 }
 
-# ascending in-place insertion sort of a `vec` of f64 (mirrors partial_cmp with
-# NaN treated as Equal -- our block loudness values are finite or -inf, both of
-# which f64_gt orders correctly).
+# three-way f64 comparator for vec_sort_by: partial_cmp().unwrap_or(Equal), so a
+# NaN compares Equal (block loudness values are finite or +/-inf in practice).
+#must_use
+fn dh_loudness_cmp_asc(a, b) {
+    if (f64_lt(a, b) == 1) { return 0 - 1; }
+    if (f64_gt(a, b) == 1) { return 1; }
+    return 0;
+}
+
+# ascending in-place sort of a `vec` of f64 (the oracle's sort_by(partial_cmp)).
+# vec_sort_by: introsort, O(n log n), O(n) on already-ordered input, no scratch
+# allocation. (Was an O(n^2) insertion sort: ~1.2 s for 30 min of 100 ms blocks.)
+# Equal-comparing block values are bit-identical, so the order -- and every
+# percentile read from it -- matches the stable sort it replaced.
 fn dhvani_loudness_sort_asc(v) {
-    var n = vec_len(v);
-    var i = 1;
-    while (i < n) {
-        var key = vec_get(v, i);
-        var j = i - 1;
-        var cont = 1;
-        while (cont == 1) {
-            if (j < 0) { cont = 0; }
-            elif (f64_gt(vec_get(v, j), key) == 1) {
-                vec_set(v, j + 1, vec_get(v, j));
-                j = j - 1;
-            } else { cont = 0; }
-        }
-        vec_set(v, j + 1, key);
-        i = i + 1;
-    }
+    vec_sort_by(v, &dh_loudness_cmp_asc);
     return 0;
 }
 
@@ -105,9 +101,8 @@ fn dhvani_loudness_sort_asc(v) {
 fn dhvani_loudness_compute_lra(blocks) {
     var n = vec_len(blocks);
     if (n < 2) { return 0; }
-    var sorted = vec_new();
-    var s = 0;
-    while (s < n) { vec_push(sorted, vec_get(blocks, s)); s = s + 1; }
+    var sorted = dh_vec_copy(blocks);
+    if (vec_len(sorted) != n) { return 0; }
     dhvani_loudness_sort_asc(sorted);
     var nf = f64_from(n);
     var idx10 = f64_to(f64_mul(nf, 0.1));

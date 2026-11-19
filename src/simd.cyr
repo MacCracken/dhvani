@@ -34,7 +34,6 @@
 var DH_NEG_ONE = 0xBFF0000000000000;   # -1.0
 
 # min of two integer lengths.
-#inline
 #must_use
 fn dh_imin(a, b) {
     if (a < b) { return a; }
@@ -42,7 +41,6 @@ fn dh_imin(a, b) {
 }
 
 # sign-extend the low 24 bits of x (matches Rust `(x << 8) >> 8` on i32).
-#inline
 #must_use
 fn dh_sext24(x) {
     var low = x & 0xFFFFFF;
@@ -61,6 +59,12 @@ fn dh_sext24(x) {
 fn dh_max_ignore_nan(acc, x) {
     if (f64_eq(x, x) == 0) { return acc; }
     return f64_max(acc, x);
+}
+
+# The min fold's twin, as Rust's `f32::min`: a NaN x leaves the accumulator alone.
+fn dh_min_ignore_nan(acc, x) {
+    if (f64_eq(x, x) == 0) { return acc; }
+    return f64_min(acc, x);
 }
 
 # ================================================================
@@ -368,7 +372,10 @@ fn dhvani_simd_i24_to_f32(src, dst) {
     var d = dh_vec_data(dst);
     var end = s + len * 8;
     while (s < end) {
-        store64(d, f64_div(f64_from(dh_sext24(load64(s))), 8388608.0));
+        # dh_sext24 by hand: the compiler ignores its #inline (it has control flow)
+        var x = load64(s) & 0xFFFFFF;
+        if ((x & 0x800000) != 0) { x = x - 0x1000000; }
+        store64(d, f64_div(f64_from(x), 8388608.0));
         s = s + 8;
         d = d + 8;
     }
@@ -501,7 +508,7 @@ fn dhvani_simd_weighted_sum_scalar(samples, weights, out_sum, out_weight_sum) {
 }
 
 # ================================================================
-# Stereo biquad (Direct-Form-I, cross-channel): rust-old x86.rs biquad_stereo_sse2
+# Stereo biquad (Direct Form II Transposed, cross-channel): rust-old x86.rs biquad_stereo_sse2
 # ================================================================
 
 # The kernel over raw storage, so dhvani_biquad_process can run it on its own coeffs and
@@ -550,7 +557,11 @@ fn dh_simd_biquad_stereo_raw(data, frames, c, st_l, st_r) {
 
 # biquad_stereo(samples, coeffs, state) -- process interleaved L/R in place.
 # coeffs = [b0,b1,b2,a1,a2] (vec), state = [z1L,z2L,z1R,z2R] (vec, mutated).
+# DHVANI_ERR_INVALID_PARAMETER for a coeffs vec under 5 or a state vec under 4: the raw
+# kernel reads and writes those slots directly (the oracle's types fixed the lengths).
 fn dhvani_simd_biquad_stereo(samples, coeffs, state) {
+    if (vec_len(coeffs) < 5) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (vec_len(state) < 4) { return DHVANI_ERR_INVALID_PARAMETER; }
     var st = dh_vec_data(state);
     dh_simd_biquad_stereo_raw(dh_vec_data(samples), vec_len(samples) / 2,
       dh_vec_data(coeffs), st, st + 16);

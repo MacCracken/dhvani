@@ -5,6 +5,7 @@
 # confirming the noise stays within a couple LSBs.
 
 include "src/error.cyr"
+include "src/simd.cyr"
 include "src/dither.cyr"
 
 alloc_init();
@@ -53,6 +54,19 @@ dhvani_dither_tpdf(e_in, e_out, 16);
 assert_eq(vec_len(e_out), 0, "tpdf empty -> empty");
 dhvani_dither_noise_shaped(e_in, e_out, 16);
 assert_eq(vec_len(e_out), 0, "noise-shaped empty -> empty");
+
+# ---- a shorter `out` is filled, not overrun (2.3.3; it aborted the process) ----
+test_group("short_out_vec");
+var so_in = vec_new();
+var so_i = 0;
+while (so_i < 8) { vec_push(so_in, 0.25); so_i = so_i + 1; }
+var so_out = vec_new(); vec_push(so_out, 0); vec_push(so_out, 0); vec_push(so_out, 0);
+dhvani_dither_tpdf(so_in, so_out, 16);
+assert_eq(vec_len(so_out), 3, "tpdf: out keeps its length");
+assert(vec_get(so_out, 2) != 0, "tpdf: its 3 slots written");
+var so_out2 = vec_new(); vec_push(so_out2, 0); vec_push(so_out2, 0);
+dhvani_dither_noise_shaped(so_in, so_out2, 16);
+assert(vec_get(so_out2, 1) != 0, "noise-shaped: its 2 slots written");
 
 var rc = assert_summary();
 syscall(60, rc);

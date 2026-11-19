@@ -21,11 +21,13 @@ fn dhvani_pan_new(pan) {
 fn dhvani_pan_set_pan(self, pan) {
     var clamped = f64_clamp(pan, f64_neg(1.0), 1.0);
     DhStereoPanner_set_pan(self, clamped);
-    var lp = alloc(8);
-    var rp = alloc(8);
-    constant_power_pan(clamped, lp, rp);
-    DhStereoPanner_set_gain_l(self, load64(lp));
-    DhStereoPanner_set_gain_r(self, load64(rp));
+    # stack out-params: pan automation calls this every block, and two alloc(8)s per
+    # call leaked under the free-less allocator through 2.3.2
+    var lp[8];
+    var rp[8];
+    constant_power_pan(clamped, &lp, &rp);
+    DhStereoPanner_set_gain_l(self, load64(&lp));
+    DhStereoPanner_set_gain_r(self, load64(&rp));
     return 0;
 }
 
@@ -47,13 +49,14 @@ fn dhvani_pan_process(self, buf) {
     var frames = DhAudioBuffer_frames(buf);
     var gl = DhStereoPanner_gain_l(self);
     var gr = DhStereoPanner_gain_r(self);
-    var frame = 0;
-    while (frame < frames) {
-        var l_idx = frame * ch;
-        var r_idx = frame * ch + 1;
-        vec_set(samples, l_idx, f64_mul(vec_get(samples, l_idx), gl));
-        vec_set(samples, r_idx, f64_mul(vec_get(samples, r_idx), gr));
-        frame = frame + 1;
+    frames = dh_imin(frames, vec_len(samples) / ch);
+    var p = dh_vec_data(samples);
+    var end = p + frames * ch * 8;
+    var stride = ch * 8;
+    while (p < end) {
+        store64(p, f64_mul(load64(p), gl));
+        store64(p + 8, f64_mul(load64(p + 8), gr));
+        p = p + stride;
     }
     return 0;
 }

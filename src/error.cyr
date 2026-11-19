@@ -72,6 +72,28 @@ fn dhvani_is_finite(x) {
     return f64_lt(f64_abs(x), DH_POS_INF);
 }
 
+# Range test: 1 iff lo <= x <= hi, as the oracle's `(lo..=hi).contains(&x)`, so a NaN
+# x is OUTSIDE. Write every validate() bound this way: the negated form
+# `f64_lt(x, lo) || f64_gt(x, hi)` lets a NaN through, since both compares are false.
+#must_use
+fn dh_in_range(x, lo, hi) {
+    if (f64_ge(x, lo) == 0) { return 0; }
+    if (f64_le(x, hi) == 0) { return 0; }
+    return 1;
+}
+
+# Rust's `x % 1.0` (fmod: the remainder keeps the dividend's sign; NaN and +-Inf give
+# NaN). For |x| < 2^52, x - trunc(x) IS that remainder, exactly: the fractional part is
+# representable and the subtraction rounds nothing. From 2^52 up x is an integer and the
+# remainder is a zero, which keeps x's sign, as fmod's does. The phase wraps of the
+# oscillator and the modulated delay's LFO use it (2.3.3).
+#must_use
+fn dh_fmod1(x) {
+    var r = f64_sub(x, f64_trunc(x));
+    if (f64_eq(r, 0) == 1) { return x & 0x8000000000000000; }
+    return r;
+}
+
 # tan(x) = sin(x)/cos(x). The stdlib exposes f64_sin/f64_cos but not f64_tan
 # (only f64_tanh); the filter modules (svf, biquad) need tangent for coefficient
 # design. Defined here in the L0 base so both share one definition.

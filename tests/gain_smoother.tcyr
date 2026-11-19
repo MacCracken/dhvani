@@ -53,5 +53,32 @@ assert_eq(dhvani_is_err(dhvani_gsparams_validate(pbad1)), 1, "attack 1.5 rejecte
 var pbad2 = dhvani_gsparams_new(0.3, f64_neg(0.1));
 assert_eq(dhvani_is_err(dhvani_gsparams_validate(pbad2)), 1, "release -0.1 rejected");
 
+# ================================================================
+# 2.3.2 hardening regressions (each fails on the 2.3.2 code)
+# ================================================================
+
+# ---- validate_rejects_nan ----
+# Rust: !(0.0..=1.0).contains(&x) rejects NaN; the port's negated tests let it through.
+test_group("validate_rejects_nan");
+var gsn = 0x7FF8000000000000;
+assert_eq(dhvani_gsparams_validate(dhvani_gsparams_new(gsn, 0.05)), DHVANI_ERR_INVALID_PARAMETER, "NaN attack");
+assert_eq(dhvani_gsparams_validate(dhvani_gsparams_new(0.3, gsn)), DHVANI_ERR_INVALID_PARAMETER, "NaN release");
+assert_eq(dhvani_gsparams_validate(dhvani_gsparams_new(0, 1.0)), DHVANI_ERR_NONE, "bounds inclusive");
+
+# ---- params_owned ----
+# from_params / set_params copy (the oracle takes the params by value).
+test_group("params_owned");
+var gsp = dhvani_gsparams_new(0.5, 0.25);
+var gso = dhvani_gs_from_params(gsp);
+DhGainSmootherParams_set_attack(gsp, 1.0);
+assert_eq(dhvani_gsparams_attack(dhvani_gs_params(gso)), F64_HALF, "from_params: attack still 0.5");
+assert_eq(dhvani_gs_smooth(gso, 0), F64_HALF, "smooth uses the copied attack");
+var gsq = dhvani_gsparams_new(0.125, 0.25);
+var gsu = alloc_used();
+dhvani_gs_set_params(gso, gsq);
+assert_eq(alloc_used() - gsu, 0, "set_params allocates nothing");
+DhGainSmootherParams_set_attack(gsq, 1.0);
+assert_eq(dhvani_gsparams_attack(dhvani_gs_params(gso)), 0.125, "set_params: attack still 0.125");
+
 var rc = assert_summary();
 syscall(60, rc);

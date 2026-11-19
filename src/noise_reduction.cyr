@@ -1,33 +1,39 @@
 # noise_reduction.cyr -- spectral noise reduction (STFT soft gating).
 # Ports rust-old/src/dsp/noise_reduction.rs. L1: deps error + simd + buffer +
 # analysis + fft (dhvani_fft_in_place). NoiseReducer preallocates window/real/
-# imag/avg_magnitude scratch once in `new`; `process` reuses them across calls.
+# imag/avg_magnitude scratch once in `new`, and owns grow-only per-channel scratch
+# (mono / output / window_sum): `process` reuses all of it, so a steady-state call
+# allocates 0 bytes. (The oracle allocates `mono`, `output` and `window_sum` per
+# channel per call and lets scope drop them; under the free-less bump allocator
+# that leaked ~392 KB per stereo 4096-frame call through 2.3.1.)
 #
 # Two-pass per channel: pass 1 estimates the average magnitude spectrum (noise
 # floor); pass 2 soft-gates bins below threshold and rebuilds via overlap-add.
 # IFFT via conjugate: IFFT(X) = conj(FFT(conj(X))) / N. Rust stored f32 samples
 # (cast `as f64` before windowing) -- the Cyrius port is f64 throughout, so the
-# window multiply is direct. serde/Debug/Clone/Default dropped.
+# window multiply is direct. The loops walk the vec storage (dh_vec_data) with the
+# oracle's arithmetic order. serde/Debug/Clone/Default dropped.
 
 var DH_NR_WINDOW_SIZE = 2048;
 var DH_NR_HOP_SIZE    = 1024;   # WINDOW_SIZE / 2 -- 50% overlap
 var DH_NR_NUM_BINS    = 1024;   # WINDOW_SIZE / 2
 
 #derive(accessors)
-struct DhNoiseReducer { window; real; imag; avg_magnitude; }
+struct DhNoiseReducer { window; real; imag; avg_magnitude; mono; output; window_sum; }
 
 # new() -- allocate scratch: Hann window + zeroed real/imag (WINDOW_SIZE) +
-# zeroed avg_magnitude (NUM_BINS).
+# zeroed avg_magnitude (NUM_BINS). The per-channel scratch starts empty and grows
+# to the longest channel seen.
 #must_use
 fn dhvani_noise_reducer_new() {
-    var window = vec_new();
+    var window = dh_vec_zeros(DH_NR_WINDOW_SIZE);
     var denom = DH_NR_WINDOW_SIZE - 1;
     var i = 0;
     while (i < DH_NR_WINDOW_SIZE) {
         var w = f64_mul(
           0.5,
           f64_sub(1.0, f64_cos(f64_div(f64_mul(f64_mul(2.0, F64_PI), f64_from(i)), f64_from(denom)))));
-        vec_push(window, w);
+        vec_set(window, i, w);
         i = i + 1;
     }
     var self = alloc(sizeof(DhNoiseReducer));
@@ -35,13 +41,42 @@ fn dhvani_noise_reducer_new() {
     DhNoiseReducer_set_real(self, dh_vec_zeros(DH_NR_WINDOW_SIZE));
     DhNoiseReducer_set_imag(self, dh_vec_zeros(DH_NR_WINDOW_SIZE));
     DhNoiseReducer_set_avg_magnitude(self, dh_vec_zeros(DH_NR_NUM_BINS));
+    DhNoiseReducer_set_mono(self, vec_new());
+    DhNoiseReducer_set_output(self, vec_new());
+    DhNoiseReducer_set_window_sum(self, vec_new());
     return self;
 }
 
 # fill a vec's first `n` slots with 0.
 fn dh_nr_fill_zero(v, n) {
+    var p = dh_vec_data(v);
+    var end = p + n * 8;
+    while (p < end) { store64(p, 0); p = p + 8; }
+    return 0;
+}
+
+# A vec of exactly n slots for scratch: `v` itself when its storage already holds n
+# (length set by truncate / in-capacity push -- no allocation), else one fresh
+# exact allocation. Contents are unspecified; callers overwrite or zero them.
+#must_use
+fn dh_nr_fit(v, n) {
+    if (vec_cap(v) < n) { return dh_vec_zeros(n); }
+    vec_truncate(v, n);
+    var len = vec_len(v);
+    while (len < n) { vec_push(v, 0); len = len + 1; }
+    return v;
+}
+
+# windowed frame at samples[pos..pos+WINDOW_SIZE) -> real; imag zeroed.
+fn dh_nr_load_frame(sd, pos, wd, rd, id) {
     var i = 0;
-    while (i < n) { vec_set(v, i, 0); i = i + 1; }
+    var span = DH_NR_WINDOW_SIZE * 8;
+    var sp = sd + pos * 8;
+    while (i < span) {
+        store64(rd + i, f64_mul(load64(sp + i), load64(wd + i)));
+        store64(id + i, 0);
+        i = i + 8;
+    }
     return 0;
 }
 
@@ -54,77 +89,74 @@ fn dhvani_noise_reducer_process_channel(self, samples, strength) {
     var real = DhNoiseReducer_real(self);
     var imag = DhNoiseReducer_imag(self);
     var avg = DhNoiseReducer_avg_magnitude(self);
+    var sd = dh_vec_data(samples);
+    var wd = dh_vec_data(window);
+    var rd = dh_vec_data(real);
+    var id = dh_vec_data(imag);
+    var ad = dh_vec_data(avg);
+    var nbins = DH_NR_NUM_BINS * 8;
 
     # Pass 1: estimate average magnitude spectrum (noise floor)
     dh_nr_fill_zero(avg, DH_NR_NUM_BINS);
     var frame_count = 0;
     var pos = 0;
     while (pos + DH_NR_WINDOW_SIZE <= n) {
-        dh_nr_fill_zero(real, DH_NR_WINDOW_SIZE);
-        dh_nr_fill_zero(imag, DH_NR_WINDOW_SIZE);
-        var i1 = 0;
-        while (i1 < DH_NR_WINDOW_SIZE) {
-            vec_set(real, i1, f64_mul(vec_get(samples, pos + i1), vec_get(window, i1)));
-            i1 = i1 + 1;
-        }
-        if (dhvani_fft_in_place(real, imag) == 0) {
-            pos = pos + DH_NR_HOP_SIZE;
-        } else {
+        dh_nr_load_frame(sd, pos, wd, rd, id);
+        if (dhvani_fft_in_place(real, imag) == 1) {
             var k1 = 0;
-            while (k1 < DH_NR_NUM_BINS) {
-                var re1 = vec_get(real, k1);
-                var im1 = vec_get(imag, k1);
-                vec_set(avg, k1, f64_add(vec_get(avg, k1), f64_sqrt(f64_add(f64_mul(re1, re1), f64_mul(im1, im1)))));
-                k1 = k1 + 1;
+            while (k1 < nbins) {
+                var re1 = load64(rd + k1);
+                var im1 = load64(id + k1);
+                store64(ad + k1, f64_add(load64(ad + k1), f64_sqrt(f64_add(f64_mul(re1, re1), f64_mul(im1, im1)))));
+                k1 = k1 + 8;
             }
             frame_count = frame_count + 1;
-            pos = pos + DH_NR_HOP_SIZE;
         }
+        pos = pos + DH_NR_HOP_SIZE;
     }
 
     if (frame_count == 0) { return 0; }
     var fc = f64_from(frame_count);
     var mi = 0;
-    while (mi < DH_NR_NUM_BINS) {
-        vec_set(avg, mi, f64_div(vec_get(avg, mi), fc));
-        mi = mi + 1;
+    while (mi < nbins) {
+        store64(ad + mi, f64_div(load64(ad + mi), fc));
+        mi = mi + 8;
     }
 
-    # Pass 2: gate + reconstruct via overlap-add. Per-channel length buffers.
-    var output = dh_vec_zeros(n);
-    var window_sum = dh_vec_zeros(n);
+    # Pass 2: gate + reconstruct via overlap-add into the owned, grow-only
+    # per-channel-length scratch (zeroed in place).
+    var output = dh_nr_fit(DhNoiseReducer_output(self), n);
+    DhNoiseReducer_set_output(self, output);
+    var window_sum = dh_nr_fit(DhNoiseReducer_window_sum(self), n);
+    DhNoiseReducer_set_window_sum(self, window_sum);
+    dh_nr_fill_zero(output, n);
+    dh_nr_fill_zero(window_sum, n);
+    var od = dh_vec_data(output);
+    var wsd = dh_vec_data(window_sum);
+    var gate_factor = f64_mul(strength, 1.5);
+    var scale = f64_div(1.0, f64_from(DH_NR_WINDOW_SIZE));
+    var wspan = DH_NR_WINDOW_SIZE * 8;
     pos = 0;
     while (pos + DH_NR_WINDOW_SIZE <= n) {
-        dh_nr_fill_zero(real, DH_NR_WINDOW_SIZE);
-        dh_nr_fill_zero(imag, DH_NR_WINDOW_SIZE);
-        var i2 = 0;
-        while (i2 < DH_NR_WINDOW_SIZE) {
-            vec_set(real, i2, f64_mul(vec_get(samples, pos + i2), vec_get(window, i2)));
-            i2 = i2 + 1;
-        }
-        if (dhvani_fft_in_place(real, imag) == 0) {
-            pos = pos + DH_NR_HOP_SIZE;
-        } else {
+        dh_nr_load_frame(sd, pos, wd, rd, id);
+        if (dhvani_fft_in_place(real, imag) == 1) {
             # Soft gate: attenuate bins below threshold
-            var gate_factor = f64_mul(strength, 1.5);
             var k2 = 0;
             while (k2 < DH_NR_NUM_BINS) {
-                var re2 = vec_get(real, k2);
-                var im2 = vec_get(imag, k2);
+                var re2 = load64(rd + k2 * 8);
+                var im2 = load64(id + k2 * 8);
                 var mag = f64_sqrt(f64_add(f64_mul(re2, re2), f64_mul(im2, im2)));
-                var threshold = f64_mul(vec_get(avg, k2), gate_factor);
+                var threshold = f64_mul(load64(ad + k2 * 8), gate_factor);
                 if (f64_lt(mag, threshold) == 1) {
                     if (f64_gt(threshold, 0.0) == 1) {
                         var attenuation = f64_div(mag, threshold);
-                        vec_set(real, k2, f64_mul(re2, attenuation));
-                        vec_set(imag, k2, f64_mul(im2, attenuation));
-                        # Mirror for negative frequencies
+                        store64(rd + k2 * 8, f64_mul(re2, attenuation));
+                        store64(id + k2 * 8, f64_mul(im2, attenuation));
+                        # Mirror for negative frequencies (k2 < NUM_BINS always holds)
                         if (k2 > 0) {
-                            if (k2 < DH_NR_NUM_BINS) {
-                                var mirror = DH_NR_WINDOW_SIZE - k2;
-                                vec_set(real, mirror, f64_mul(vec_get(real, mirror), attenuation));
-                                vec_set(imag, mirror, f64_mul(vec_get(imag, mirror), attenuation));
-                            }
+                            var mirror = (DH_NR_WINDOW_SIZE - k2) * 8;
+                            store64(rd + mirror, f64_mul(load64(rd + mirror), attenuation));
+                            store64(id + mirror, f64_mul(load64(id + mirror), attenuation));
                         }
                     }
                 }
@@ -133,91 +165,95 @@ fn dhvani_noise_reducer_process_channel(self, samples, strength) {
 
             # Inverse FFT (conjugate: negate imag, forward FFT, divide by N)
             var ci = 0;
-            while (ci < DH_NR_WINDOW_SIZE) {
-                vec_set(imag, ci, f64_neg(vec_get(imag, ci)));
-                ci = ci + 1;
+            while (ci < wspan) {
+                store64(id + ci, f64_neg(load64(id + ci)));
+                ci = ci + 8;
             }
-            if (dhvani_fft_in_place(real, imag) == 0) {
-                pos = pos + DH_NR_HOP_SIZE;
-            } else {
-                var scale = f64_div(1.0, f64_from(DH_NR_WINDOW_SIZE));
-                var ri = 0;
-                while (ri < DH_NR_WINDOW_SIZE) {
-                    vec_set(real, ri, f64_mul(vec_get(real, ri), scale));
-                    ri = ri + 1;
-                }
-                # Overlap-add with window
+            if (dhvani_fft_in_place(real, imag) == 1) {
+                # scale, then overlap-add with window
                 var oi = 0;
-                while (oi < DH_NR_WINDOW_SIZE) {
-                    var wv = vec_get(window, oi);
-                    var op = pos + oi;
-                    vec_set(output, op, f64_add(vec_get(output, op), f64_mul(vec_get(real, oi), wv)));
-                    vec_set(window_sum, op, f64_add(vec_get(window_sum, op), f64_mul(wv, wv)));
-                    oi = oi + 1;
+                var op = od + pos * 8;
+                var wp = wsd + pos * 8;
+                while (oi < wspan) {
+                    var wv = load64(wd + oi);
+                    var r = f64_mul(load64(rd + oi), scale);
+                    store64(op + oi, f64_add(load64(op + oi), f64_mul(r, wv)));
+                    store64(wp + oi, f64_add(load64(wp + oi), f64_mul(wv, wv)));
+                    oi = oi + 8;
                 }
-                pos = pos + DH_NR_HOP_SIZE;
             }
         }
+        pos = pos + DH_NR_HOP_SIZE;
     }
 
     # Normalize by window sum and write back
     var ni = 0;
-    while (ni < n) {
-        if (f64_gt(vec_get(window_sum, ni), 0.0000000001) == 1) {
-            vec_set(samples, ni, f64_div(vec_get(output, ni), vec_get(window_sum, ni)));
+    var nspan = n * 8;
+    while (ni < nspan) {
+        var ws = load64(wsd + ni);
+        if (f64_gt(ws, 0.0000000001) == 1) {
+            store64(sd + ni, f64_div(load64(od + ni), ws));
         }
-        if (dhvani_is_finite(vec_get(samples, ni)) == 0) {
-            vec_set(samples, ni, 0);
+        if (dhvani_is_finite(load64(sd + ni)) == 0) {
+            store64(sd + ni, 0);
         }
-        ni = ni + 1;
+        ni = ni + 8;
     }
     return 0;
 }
 
 # process(self, buf, strength) -- apply spectral noise reduction in place.
+# Steady state (a buffer no longer than the longest seen) allocates 0 bytes.
 fn dhvani_noise_reducer_process(self, buf, strength) {
     var s = f64_clamp(strength, 0.0, 1.0);
     var frames = DhAudioBuffer_frames(buf);
     var samples = DhAudioBuffer_samples(buf);
+    var slen = vec_len(samples);
+    var d = dh_vec_data(samples);
     if (frames < DH_NR_WINDOW_SIZE) {
         # Too short for STFT -- fall back to a simple amplitude gate.
         var threshold = f64_mul(s, 0.05);
-        var slen = vec_len(samples);
-        var si = 0;
-        while (si < slen) {
-            if (f64_lt(f64_abs(vec_get(samples, si)), threshold) == 1) {
-                vec_set(samples, si, 0);
-            }
-            si = si + 1;
+        var p = d;
+        var end = d + slen * 8;
+        while (p < end) {
+            if (f64_lt(f64_abs(load64(p)), threshold) == 1) { store64(p, 0); }
+            p = p + 8;
         }
         return 0;
     }
 
     var ch = DhAudioBuffer_channels(buf);
+    if (ch < 1) { return 0; }
+    # never walk past the storage, whatever `frames` claims
+    frames = dh_imin(frames, slen / ch);
+    var mono = dh_nr_fit(DhNoiseReducer_mono(self), frames);
+    DhNoiseReducer_set_mono(self, mono);
+    var md = dh_vec_data(mono);
+    var stride = ch * 8;
+    var mend = md + frames * 8;
 
     # Process each channel independently
     var c = 0;
     while (c < ch) {
         # Extract mono channel
-        var mono = vec_new();
-        var f = 0;
-        while (f < frames) {
-            vec_push(mono, vec_get(samples, f * ch + c));
-            f = f + 1;
-        }
+        var src = d + c * 8;
+        var m = md;
+        while (m < mend) { store64(m, load64(src)); src = src + stride; m = m + 8; }
         dhvani_noise_reducer_process_channel(self, mono, s);
         # Write back
-        var fw = 0;
-        while (fw < frames) {
-            vec_set(samples, fw * ch + c, vec_get(mono, fw));
-            fw = fw + 1;
-        }
+        var dst = d + c * 8;
+        m = md;
+        while (m < mend) { store64(dst, load64(m)); dst = dst + stride; m = m + 8; }
         c = c + 1;
     }
     return 0;
 }
 
-# noise_reduce(buf, strength) -- one-shot spectral noise reduction in place.
+# noise_reduce(buf, strength) -- ONE-SHOT spectral noise reduction in place. Builds
+# a fresh NoiseReducer every call (Hann window + ~115 KB of scratch, never freed
+# under the bump allocator): fine for a single offline pass, a leak if called per
+# block. For repeated processing keep a dhvani_noise_reducer_new() handle and call
+# dhvani_noise_reducer_process, which reuses its scratch (0 bytes per call).
 fn dhvani_noise_reduce(buf, strength) {
     var reducer = dhvani_noise_reducer_new();
     dhvani_noise_reducer_process(reducer, buf, strength);

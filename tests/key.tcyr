@@ -83,5 +83,29 @@ var au_buf = make_sine_amp(440.0, 44100, 44100, 0.8);
 var au_result = dhvani_key_detect(au_buf, 8192);
 assert_eq(dhvani_key_result_root(au_result), 9, "detect_key_from_audio: A440 -> root A (9)");
 
+# ================================================================
+# 2.3.2 audit regressions (not in rust-old)
+# ================================================================
+
+# ---- detect_from_chroma_rejects_bad_chromagram ----
+# Pre-fix: a short vec wrapped by from_array aborted the process in the Pearson
+# read ("vec: index out of bounds"). Now from_array returns 0 and
+# detect_key_from_chroma(0) returns 0.
+test_group("detect_from_chroma_rejects_bad_chromagram");
+var kshort = vec_new();
+var ks = 0;
+while (ks < 11) { vec_push(kshort, 0.5); ks = ks + 1; }
+assert_eq(dhvani_key_detect_from_chroma(dhvani_chromagram_from_array(kshort)), 0, "len-11 chroma -> 0, no abort");
+assert_eq(dhvani_key_detect_from_chroma(0), 0, "null chroma -> 0");
+assert_streq(dhvani_key_pitch_name(10), "A#", "pitch name table (shared with chroma)");
+assert_streq(dhvani_key_pitch_name(12), "unknown", "out-of-range pitch name");
+
+# ---- detect_key_window_cap ----
+test_group("detect_key_window_cap");
+var kw = vec_new();
+var kwi = 0;
+while (kwi < 64) { vec_push(kw, 0.25); kwi = kwi + 1; }
+assert_eq(dhvani_key_detect(dhvani_buffer_from_interleaved(kw, 1, 44100), 0x20000000), 0, "window 2^29 -> 0, no abort");
+
 var rc = assert_summary();
 syscall(60, rc);

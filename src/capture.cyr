@@ -140,21 +140,34 @@ fn dhvani_capture_output_config_has_device(o) {
 }
 
 # ---- validate (added per port spec; Rust had no validate) ----
-# 0 = "use device default" stays valid; a nonzero sample rate must be in-range
-# (<= DH_MAX_SAMPLE_RATE) and a nonzero buffer_frames must be nonzero. Returns a
-# shared DHVANI_ERR_* code, DHVANI_ERR_NONE on success.
+# Rust's fields are u32 / Option<u32>, so a negative value was unrepresentable
+# there; here every one is an i64 and is checked. 0 = "use device default" stays
+# valid for sample_rate / channels, and buffer_frames 0 is accepted as before. A
+# nonzero sample rate must be <= DH_MAX_SAMPLE_RATE; device_id must be >= 0 (Some)
+# or exactly DH_CAPTURE_NO_DEVICE (None). Returns a shared DHVANI_ERR_* code,
+# DHVANI_ERR_NONE on success (DHVANI_ERR_INVALID_PARAMETER for a null config).
 #must_use
-fn dhvani_capture_config_validate(c) {
-    var sr = DhCaptureConfig_sample_rate(c);
+fn dh_capture_fields_validate(sr, channels, buffer_frames, device_id) {
+    if (sr < 0) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
     if (sr > DH_MAX_SAMPLE_RATE) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
+    if (channels < 0) { return DHVANI_ERR_INVALID_CHANNELS; }
+    if (buffer_frames < 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (device_id < DH_CAPTURE_NO_DEVICE) { return DHVANI_ERR_INVALID_PARAMETER; }
     return DHVANI_ERR_NONE;
 }
 
 #must_use
+fn dhvani_capture_config_validate(c) {
+    if (c == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    return dh_capture_fields_validate(DhCaptureConfig_sample_rate(c), DhCaptureConfig_channels(c),
+      DhCaptureConfig_buffer_frames(c), DhCaptureConfig_device_id(c));
+}
+
+#must_use
 fn dhvani_capture_output_config_validate(o) {
-    var osr = DhOutputConfig_sample_rate(o);
-    if (osr > DH_MAX_SAMPLE_RATE) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
-    return DHVANI_ERR_NONE;
+    if (o == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    return dh_capture_fields_validate(DhOutputConfig_sample_rate(o), DhOutputConfig_channels(o),
+      DhOutputConfig_buffer_frames(o), DhOutputConfig_device_id(o));
 }
 
 # ---- CaptureEvent (was data-carrying `enum CaptureEvent`) ----

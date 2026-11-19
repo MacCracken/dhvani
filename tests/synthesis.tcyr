@@ -22,6 +22,15 @@ fn panned_tick(state, out_l, out_r) {
     return 0;
 }
 
+# alloc-free stereo tick (panned_tick's pan-gain lookup allocates per call, which
+# would hide whether the BRIDGE allocates): (s, s/2).
+fn split_tick(state, out_l, out_r) {
+    var s = osc_next_sample(state);
+    store64(out_l, s);
+    store64(out_r, f64_mul(s, 0.5));
+    return 0;
+}
+
 # 1 second of 440 Hz sine as a granular source buffer.
 fn build_sine(n, freq, sr) {
     var v = vec_new();
@@ -105,6 +114,66 @@ var kick = drum_kick_new(f64_from(150), f64_from(40), f64_from(200), 0.8, f64_fr
 drum_kick_trigger(kick);
 var kbuf = dhvani_synth_render_to_buffer(&drum_kick_next_sample, kick, 1, 4410, 44100);
 assert(f64_gt(dhvani_buffer_peak(kbuf), 0), "kick peak > 0");
+
+# ---- error_handles (2.3.2) ----
+# A negative state is a sibling constructor's error code (osc_new answers
+# NAAD_ERR_INVALID_PARAMETER for a bad waveform); osc_next_sample dereferences it.
+test_group("error_handles");
+var bad_osc = osc_new(0 - 1, f64_from(440), f64_from(44100));
+assert(bad_osc < 0, "osc_new(bad waveform) is an error code");
+assert_eq(dhvani_synth_render_to_buffer(&osc_next_sample, bad_osc, 2, 64, 44100), 0,
+  "render_to_buffer(error state) -> 0");
+assert_eq(dhvani_synth_render_stereo_to_buffer(&panned_tick, bad_osc, 64, 44100), 0,
+  "render_stereo_to_buffer(error state) -> 0");
+assert_eq(dhvani_synth_render_to_buffer(0, osc, 2, 64, 44100), 0, "render_to_buffer(null fn) -> 0");
+
+# ---- render_alloc (2.3.2) ----
+# One exact sample allocation per call (the push-grown vec allocated 32,696 B for
+# a 1024-frame stereo block: ~2x the 16,384 B payload), and the _into forms
+# allocate nothing while producing the same samples.
+test_group("render_alloc");
+var oa = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+var ob = osc_new(WAVEFORM_SINE, f64_from(440), f64_from(44100));
+var warm = dhvani_synth_render_to_buffer(&osc_next_sample, oa, 2, 1024, 44100);
+var warmi = dhvani_buffer_from_interleaved(dh_vec_zeros(2048), 2, 44100);
+var wri = dhvani_synth_render_into(&osc_next_sample, ob, warmi);
+var sa0 = alloc_used();
+var ra = dhvani_synth_render_to_buffer(&osc_next_sample, oa, 2, 1024, 44100);
+var sa1 = alloc_used();
+assert(sa1 - sa0 <= 16384 + 128, "render_to_buffer: one exact sample allocation");
+var rib = dhvani_buffer_from_interleaved(dh_vec_zeros(2048), 2, 44100);
+var sb0 = alloc_used();
+assert_eq(dhvani_synth_render_into(&osc_next_sample, ob, rib), DHVANI_ERR_NONE, "render_into ok");
+var sb1 = alloc_used();
+assert_eq(sb1 - sb0, 0, "render_into allocates nothing");
+var same = 1;
+var k = 0;
+while (k < 2048) {
+    if (vec_get(dhvani_buffer_samples(ra), k) != vec_get(dhvani_buffer_samples(rib), k)) { same = 0; }
+    k = k + 1;
+}
+assert_eq(same, 1, "render_into == render_to_buffer for identical oscillators");
+var pa = osc_new(WAVEFORM_SAW, f64_from(220), f64_from(44100));
+var pb = osc_new(WAVEFORM_SAW, f64_from(220), f64_from(44100));
+var sra = dhvani_synth_render_stereo_to_buffer(&split_tick, pa, 512, 44100);
+var srb = dhvani_buffer_from_interleaved(dh_vec_zeros(1024), 2, 44100);
+var sc0 = alloc_used();
+assert_eq(dhvani_synth_render_stereo_into(&split_tick, pb, srb), DHVANI_ERR_NONE, "render_stereo_into ok");
+var sc1 = alloc_used();
+assert_eq(sc1 - sc0, 0, "render_stereo_into allocates nothing");
+var same2 = 1;
+k = 0;
+while (k < 1024) {
+    if (vec_get(dhvani_buffer_samples(sra), k) != vec_get(dhvani_buffer_samples(srb), k)) { same2 = 0; }
+    k = k + 1;
+}
+assert_eq(same2, 1, "render_stereo_into == render_stereo_to_buffer");
+var monob = dhvani_buffer_from_interleaved(dh_vec_zeros(4), 1, 44100);
+assert_eq(dhvani_synth_render_stereo_into(&panned_tick, pb, monob), DHVANI_ERR_INVALID_PARAMETER,
+  "render_stereo_into(mono) -> invalid");
+var z0 = dhvani_synth_render_to_buffer(&osc_next_sample, oa, 0, 16, 44100);
+assert_eq(dhvani_buffer_channels(z0), 1, "channels 0 -> rust-old silence(1, frames, sr) fallback");
+assert_eq(dhvani_buffer_frames(z0), 16, "fallback keeps the frame count");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -54,7 +54,8 @@ vec_push(tp_samples, f64_neg(0.9));
 vec_push(tp_samples, 0.9);
 vec_push(tp_samples, f64_neg(0.9));
 var d_tp = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(tp_samples, 1, 44100));
-assert(f64_ge(vec_get(dhvani_dynamics_true_peak(d_tp), 0), f64_sub(vec_get(dhvani_dynamics_peak(d_tp), 0), 0.01)), "true_peak >= peak - 0.01");
+var d_tp_floor = f64_sub(vec_get(dhvani_dynamics_peak(d_tp), 0), 0.01);
+assert(f64_ge(vec_get(dhvani_dynamics_true_peak(d_tp), 0), d_tp_floor), "true_peak >= peak - 0.01");
 
 # ---- crest_factor_positive_for_sine ----
 test_group("crest_factor_positive_for_sine");
@@ -84,7 +85,8 @@ var d_st = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(st_data, 2, 44
 assert_eq(dhvani_dynamics_channel_count(d_st), 2, "channel_count == 2");
 assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_peak(d_st), 0), 0.8)), 0.001), "peak[0] ~ 0.8");
 assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_peak(d_st), 1), 0.1)), 0.001), "peak[1] ~ 0.1");
-assert(f64_gt(vec_get(dhvani_dynamics_peak_db(d_st), 0), vec_get(dhvani_dynamics_peak_db(d_st), 1)), "peak_db[0] > peak_db[1]");
+var d_st_pdb = dhvani_dynamics_peak_db(d_st);
+assert(f64_gt(vec_get(d_st_pdb, 0), vec_get(d_st_pdb, 1)), "peak_db[0] > peak_db[1]");
 assert(f64_gt(vec_get(dhvani_dynamics_rms(d_st), 0), vec_get(dhvani_dynamics_rms(d_st), 1)), "rms[0] > rms[1]");
 
 # ---- max_peak_across_channels ----
@@ -121,6 +123,114 @@ var d_sf = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(sf_data, 1, 44
 assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_peak(d_sf), 0), 0.75)), 0.001), "peak ~ 0.75");
 assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_rms(d_sf), 0), 0.75)), 0.001), "rms ~ 0.75");
 assert(f64_lt(f64_abs(f64_sub(vec_get(dhvani_dynamics_true_peak(d_sf), 0), 0.75)), 0.001), "true_peak ~ 0.75");
+
+# ================================================================
+# 2.3.2 audit regressions (not in rust-old)
+# ================================================================
+
+fn dyn_filled(n, val) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, val); i = i + 1; }
+    return v;
+}
+
+# The pre-2.3.2 per-channel loop for one channel (vec accessors, per-k
+# recomputation), on NaN-free input: [peak, rms_sum, true_peak] in a 3-slot vec.
+fn ref_channel(samples, ch, frames, c) {
+    var pk = 0;
+    var sq = 0;
+    var frame = 0;
+    while (frame < frames) {
+        var s = vec_get(samples, frame * ch + c);
+        var absv = f64_abs(s);
+        if (f64_gt(absv, pk) == 1) { pk = absv; }
+        sq = f64_add(sq, f64_mul(s, s));
+        frame = frame + 1;
+    }
+    var tp = pk;
+    if (frames > 1) {
+        var f2 = 0;
+        while (f2 < frames - 1) {
+            var s0 = vec_get(samples, f2 * ch + c);
+            var s1 = vec_get(samples, (f2 + 1) * ch + c);
+            var sm1 = s0;
+            if (f2 > 0) { sm1 = vec_get(samples, (f2 - 1) * ch + c); }
+            var s2 = s1;
+            if ((f2 + 2) < frames) { s2 = vec_get(samples, (f2 + 2) * ch + c); }
+            var k = 1;
+            while (k < 4) {
+                var t = f64_div(f64_from(k), 4.0);
+                var t2 = f64_mul(t, t);
+                var t3 = f64_mul(t2, t);
+                var c0 = f64_mul(2.0, s0);
+                var c1 = f64_mul(f64_add(f64_neg(sm1), s1), t);
+                var c2q = f64_sub(f64_add(f64_sub(f64_mul(2.0, sm1), f64_mul(5.0, s0)), f64_mul(4.0, s1)), s2);
+                var c3c = f64_add(f64_sub(f64_add(f64_neg(sm1), f64_mul(3.0, s0)), f64_mul(3.0, s1)), s2);
+                var interp = f64_mul(0.5, f64_add(f64_add(f64_add(c0, c1), f64_mul(c2q, t2)), f64_mul(c3c, t3)));
+                tp = f64_max(tp, f64_abs(interp));
+                k = k + 1;
+            }
+            f2 = f2 + 1;
+        }
+    }
+    var out = vec_new();
+    vec_push(out, pk); vec_push(out, sq); vec_push(out, tp);
+    return out;
+}
+
+# ---- true_peak_ignores_nan ----
+# Pre-fix the true-peak fold was f64_max(tp, |interp|): f64_max(x, NaN) = NaN, and
+# the next f64_max(NaN, y) = y drops the running peak. rust-old's f32::max
+# ignores NaN, so true_peak >= peak always holds.
+test_group("true_peak_ignores_nan");
+var na = dyn_filled(6, 0.1);
+vec_set(na, 1, 0.9); vec_set(na, 5, DH_NAN);
+var dna = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(na, 1, 44100));
+var tpna = vec_get(dhvani_dynamics_true_peak(dna), 0);
+assert(f64_eq(tpna, tpna) == 1, "NaN last sample: true_peak not NaN");
+assert(f64_ge(tpna, 0.9) == 1, "NaN last sample: true_peak >= 0.9");
+var nb = dyn_filled(8, 0.1);
+vec_set(nb, 0, 0.9); vec_set(nb, 1, DH_NAN);
+var dnb = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(nb, 1, 44100));
+var tpnb = vec_get(dhvani_dynamics_true_peak(dnb), 0);
+assert(f64_ge(tpnb, vec_get(dhvani_dynamics_peak(dnb), 0)) == 1, "NaN mid: true_peak >= peak (0.9)");
+# stereo: L = [0.9, NaN, 0.1 ...], R quiet 0.2 -- max folds keep 0.9-ish, not 0.2/NaN
+var nst = vec_new();
+var ni = 0;
+while (ni < 8) { vec_push(nst, 0.1); vec_push(nst, 0.2); ni = ni + 1; }
+vec_set(nst, 0, 0.9); vec_set(nst, 2, DH_NAN); vec_set(nst, 14, DH_NAN);
+var dns = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(nst, 2, 44100));
+assert(f64_ge(dhvani_dynamics_max_true_peak(dns), 0.9) == 1, "max_true_peak >= 0.9 with NaN in L");
+assert(f64_ge(dhvani_dynamics_max_true_peak_db(dns), amplitude_to_db(0.9)) == 1, "max_true_peak_db >= -0.92 dB");
+assert(f64_ge(dhvani_dynamics_max_peak(dns), 0.9) == 1, "max_peak 0.9");
+
+# ---- dynamics_bit_identical ----
+# Local accumulators + hoisted true-peak terms + raw-storage walk == the old
+# accessor loop, per channel, on a 3-channel NaN-free signal.
+test_group("dynamics_bit_identical");
+var bsm = vec_new();
+var bi = 0;
+while (bi < 3000) {
+    vec_push(bsm, f64_mul(0.8, f64_sin(f64_mul(0.071, f64_from(bi)))));
+    vec_push(bsm, f64_mul(0.3, f64_cos(f64_mul(0.013, f64_from(bi)))));
+    vec_push(bsm, f64_sub(f64_mul(0.6, f64_sin(f64_mul(1.9, f64_from(bi)))), 0.05));
+    bi = bi + 1;
+}
+var bdy = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(bsm, 3, 44100));
+var bok = 1;
+var bc = 0;
+while (bc < 3) {
+    var rf = ref_channel(bsm, 3, 3000, bc);
+    if (vec_get(dhvani_dynamics_peak(bdy), bc) != vec_get(rf, 0)) { bok = 0; }
+    if (vec_get(dhvani_dynamics_true_peak(bdy), bc) != vec_get(rf, 2)) { bok = 0; }
+    var rms_ref = f64_sqrt(f64_div(vec_get(rf, 1), f64_from(3000)));
+    if (vec_get(dhvani_dynamics_rms(bdy), bc) != rms_ref) { bok = 0; }
+    bc = bc + 1;
+}
+assert_eq(bok, 1, "peak / rms / true_peak bit-identical to pre-fix loop (3 ch)");
+var b1 = dhvani_analyze_dynamics(dhvani_buffer_from_interleaved(dyn_filled(1, 0.4), 1, 44100));
+assert_eq(vec_get(dhvani_dynamics_true_peak(b1), 0), 0.4, "1 frame: true_peak = peak");
 
 var rc = assert_summary();
 syscall(60, rc);

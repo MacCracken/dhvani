@@ -68,5 +68,29 @@ assert_eq(dhvani_capture_event_id(ev_rm), 99, "carries id 99");
 assert_eq(dhvani_capture_event_kind(dhvani_capture_event_overflow()), DH_CEVENT_OVERFLOW, "kind = Overflow");
 assert_eq(dhvani_capture_event_kind(dhvani_capture_event_underrun()), DH_CEVENT_UNDERRUN, "kind = Underrun");
 
+# ---- validate_rejects_negatives (2.3.2) ----
+# Rust's u32 fields made a negative value unrepresentable; the port's i64 fields
+# passed validate() with any negative value through 2.3.1.
+test_group("validate_rejects_negatives");
+assert_eq(dhvani_capture_config_validate(dhvani_capture_config_new(0 - 48000, 2, 1024, DH_CAPTURE_NO_DEVICE)),
+  DHVANI_ERR_INVALID_SAMPLE_RATE, "negative sample rate invalid");
+assert_eq(dhvani_capture_config_validate(dhvani_capture_config_new(48000, 0 - 2, 1024, DH_CAPTURE_NO_DEVICE)),
+  DHVANI_ERR_INVALID_CHANNELS, "negative channels invalid");
+assert_eq(dhvani_capture_config_validate(dhvani_capture_config_new(48000, 2, 0 - 1, DH_CAPTURE_NO_DEVICE)),
+  DHVANI_ERR_INVALID_PARAMETER, "negative buffer_frames invalid");
+assert_eq(dhvani_capture_config_validate(dhvani_capture_config_new(48000, 2, 1024, 0 - 2)),
+  DHVANI_ERR_INVALID_PARAMETER, "device_id below the None sentinel invalid");
+assert_eq(dhvani_capture_config_validate(dhvani_capture_config_new(48000, 2, 1024, 0)), DHVANI_ERR_NONE,
+  "device_id 0 is Some(0), valid");
+assert_eq(dhvani_capture_config_validate(0), DHVANI_ERR_INVALID_PARAMETER, "null config invalid");
+assert_eq(dhvani_capture_output_config_validate(dhvani_capture_output_config_new(0 - 1, 2, 1024, DH_CAPTURE_NO_DEVICE)),
+  DHVANI_ERR_INVALID_SAMPLE_RATE, "output: negative sample rate invalid");
+var oneg_ch = dhvani_capture_output_config_new(48000, 0 - 1, 1024, DH_CAPTURE_NO_DEVICE);
+assert_eq(dhvani_capture_output_config_validate(oneg_ch), DHVANI_ERR_INVALID_CHANNELS,
+  "output: negative channels invalid");
+assert_eq(dhvani_capture_output_config_validate(dhvani_capture_output_config_new(48000, 2, 1024, 0 - 5)),
+  DHVANI_ERR_INVALID_PARAMETER, "output: device_id below the sentinel invalid");
+assert_eq(dhvani_capture_output_config_validate(0), DHVANI_ERR_INVALID_PARAMETER, "output: null config invalid");
+
 var rc = assert_summary();
 syscall(60, rc);

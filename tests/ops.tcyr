@@ -92,5 +92,26 @@ var nlbuf = sine_buf(44100, f64_from(440), 44100);
 var ngain = dhvani_ops_normalize_to_lufs(nlbuf, f64_neg(f64_from(14)));
 assert_eq(dhvani_is_finite(ngain), 1, "normalize gain finite");
 
+# ---- crossfade with per-frame gains (2.3.3): the bits of the per-sample formula ----
+test_group("crossfade_per_frame_gains");
+var cfa = vec_new(); var cfb = vec_new();
+var cfi = 0;
+while (cfi < 10) {
+    vec_push(cfa, f64_mul(f64_from(cfi + 1), 0.05)); vec_push(cfb, f64_neg(f64_mul(f64_from(cfi + 1), 0.03)));
+    cfi = cfi + 1;
+}
+var cf_out = dhvani_ops_crossfade(dhvani_buffer_from_interleaved(cfa, 2, 48000),
+    dhvani_buffer_from_interleaved(cfb, 2, 48000), DH_XFADE_EQUAL_POWER);
+var cf_ok = 1;
+cfi = 0;
+while (cfi < 10) {
+    var cf_t = f64_div(f64_from(cfi / 2), f64_from(4));
+    var cf_ang = f64_mul(cf_t, DH_PI_2);
+    var cf_want = f64_add(f64_mul(vec_get(cfa, cfi), f64_cos(cf_ang)), f64_mul(vec_get(cfb, cfi), f64_sin(cf_ang)));
+    if (vec_get(dhvani_buffer_samples(cf_out), cfi) != cf_want) { cf_ok = 0; }
+    cfi = cfi + 1;
+}
+assert_eq(cf_ok, 1, "equal-power crossfade: every sample the formula's bits");
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -69,14 +69,114 @@ assert_eq(all_pos, 1, "each frame total > 0");
 # (sg.time_resolution - 1024.0/44100.0).abs() < 0.001
 test_group("time_resolution");
 var sg3 = dhvani_stft(dhvani_buffer_silence(1, 44100, 44100), 2048, 1024);
-assert(near(dhvani_spectrogram_time_resolution(sg3), f64_div(f64_from(1024), f64_from(44100)), 0.001), "time_resolution ~ 1024/44100");
+var sg3_want = f64_div(f64_from(1024), f64_from(44100));
+assert(near(dhvani_spectrogram_time_resolution(sg3), sg3_want, 0.001), "time_resolution ~ 1024/44100");
 
 # ---- freq_resolution ----
 # silence(1, 4096, 48000); stft(2048, 1024);
 # (sg.freq_resolution - 48000.0/2048.0).abs() < 0.1
 test_group("freq_resolution");
 var sg4 = dhvani_stft(dhvani_buffer_silence(1, 4096, 48000), 2048, 1024);
-assert(near(dhvani_spectrogram_freq_resolution(sg4), f64_div(f64_from(48000), f64_from(2048)), 0.1), "freq_resolution ~ 48000/2048");
+var sg4_want = f64_div(f64_from(48000), f64_from(2048));
+assert(near(dhvani_spectrogram_freq_resolution(sg4), sg4_want, 0.1), "freq_resolution ~ 48000/2048");
+
+# ================================================================
+# 2.3.2 audit regressions (not in rust-old)
+# ================================================================
+
+# The pre-2.3.2 dhvani_stft_run (vec accessors, full real+imag re-zero per frame,
+# scalar FFT oracle), kept here as the bit-exactness reference.
+fn ref_stft_frames(window, window_size, buf, hop_size) {
+    var num_bins = window_size / 2;
+    var samples = DhAudioBuffer_samples(buf);
+    var ch = DhAudioBuffer_channels(buf);
+    var total = DhAudioBuffer_frames(buf);
+    var frames = vec_new();
+    var pos = 0;
+    var real = dh_vec_zeros(window_size);
+    var imag = dh_vec_zeros(window_size);
+    while ((pos + window_size) <= total) {
+        var z = 0;
+        while (z < window_size) { vec_set(real, z, 0); vec_set(imag, z, 0); z = z + 1; }
+        var i = 0;
+        while (i < window_size) {
+            vec_set(real, i, f64_mul(vec_get(samples, (pos + i) * ch), vec_get(window, i)));
+            i = i + 1;
+        }
+        var ok = dhvani_fft_in_place_scalar(real, imag);
+        var mags = dh_vec_zeros(num_bins);
+        var k = 0;
+        while (k < num_bins) {
+            var re = vec_get(real, k);
+            var im = vec_get(imag, k);
+            vec_set(mags, k, f64_div(f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im))), f64_from(window_size)));
+            k = k + 1;
+        }
+        vec_push(frames, mags);
+        pos = pos + hop_size;
+    }
+    return frames;
+}
+
+fn frames_bit_equal(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    var f = 0;
+    while (f < vec_len(a)) {
+        var fa = vec_get(a, f);
+        var fb = vec_get(b, f);
+        if (vec_len(fa) != vec_len(fb)) { return 0; }
+        var k = 0;
+        while (k < vec_len(fa)) { if (vec_get(fa, k) != vec_get(fb, k)) { return 0; } k = k + 1; }
+        f = f + 1;
+    }
+    return 1;
+}
+
+# ---- hop_size_nonpositive ----
+# Pre-fix only hop == 0 was rejected: a negative hop walked pos below 0 and
+# aborted in vec_get ("vec: index < 0").
+test_group("hop_size_nonpositive");
+var hb = dhvani_buffer_silence(1, 4096, 44100);
+assert_eq(dhvani_stft(hb, 1024, 0 - 1), 0, "stft hop -1 -> 0 (no abort)");
+assert_eq(dhvani_stft(hb, 1024, 0 - 512), 0, "stft hop -512 -> 0");
+var hproc = dhvani_stftproc_new(1024);
+assert_eq(dhvani_stftproc_compute(hproc, hb, 0 - 1), 0, "stftproc hop -1 -> 0");
+assert_eq(dhvani_stftproc_compute(hproc, hb, 0), 0, "stftproc hop 0 -> 0");
+
+# ---- hop_size_huge ----
+# Pre-fix: pos + window_size overflowed to a negative i64 after the first hop, so
+# the loop kept going and aborted on an out-of-range index.
+test_group("hop_size_huge");
+var hh = dhvani_stft(hb, 1024, 0x7FFFFFFFFFFFFF00);
+assert(hh != 0, "huge hop -> valid spectrogram");
+assert_eq(dhvani_spectrogram_num_frames(hh), 1, "huge hop -> exactly the first frame");
+
+# ---- window_size_cap ----
+test_group("window_size_cap");
+assert_eq(dhvani_stft(hb, 0x2000000, 512), 0, "stft window 2^25 > DH_MAX_FFT -> 0");
+assert_eq(dhvani_stftproc_new(0x2000000), 0, "stftproc window 2^25 -> 0");
+assert_eq(dhvani_stft(hb, 0 - 4, 512), 0, "negative window -> 0");
+
+# ---- stft_bit_identical ----
+# Raw-storage walk + imag-only re-zero + table FFT == the old accessor loop, on a
+# stereo buffer (channel-0 stride), an odd hop, and a non-silent signal.
+test_group("stft_bit_identical");
+var bst = vec_new();
+var bi = 0;
+while (bi < 6000) {
+    vec_push(bst, f64_sin(f64_mul(0.031, f64_from(bi))));
+    vec_push(bst, f64_mul(0.5, f64_cos(f64_mul(0.17, f64_from(bi)))));
+    bi = bi + 1;
+}
+var bbuf = dhvani_buffer_from_interleaved(bst, 2, 44100);
+var bsg = dhvani_stft(bbuf, 512, 301);
+var bref = ref_stft_frames(dhvani_stft_hann_window(512), 512, bbuf, 301);
+assert(vec_len(bref) > 10, "reference has frames");
+assert_eq(frames_bit_equal(dhvani_spectrogram_frames(bsg), bref), 1, "stft frames bit-identical to pre-fix loop");
+var bproc = dhvani_stftproc_new(256);
+var bpsg = dhvani_stftproc_compute(bproc, bbuf, 128);
+var bpref = ref_stft_frames(dhvani_stft_hann_window(256), 256, bbuf, 128);
+assert_eq(frames_bit_equal(dhvani_spectrogram_frames(bpsg), bpref), 1, "stftproc frames bit-identical");
 
 var rc = assert_summary();
 syscall(60, rc);

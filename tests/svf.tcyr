@@ -178,5 +178,122 @@ var f16 = dhvani_svf_new(DH_SVF_HIGHSHELF, 1000.0, 0.707, 12.0, 44100, 1);
 dhvani_svf_process(f16, b16);
 assert_eq(in_range(f64_div(dhvani_buffer_rms(b16), r16b), 0.7, 1.5), 1, "high shelf spares lows");
 
+# ================================================================
+# 2.3.2 hardening + OPT regressions
+# ================================================================
+fn sx_stereo(frames, phase0) {
+    var v = vec_new();
+    var i = 0;
+    while (i < frames) {
+        var t = f64_from(i + phase0);
+        vec_push(v, f64_mul(f64_sin(f64_mul(t, 0.0627)), 0.8));
+        vec_push(v, f64_mul(f64_sin(f64_mul(t, 0.4274)), 0.5));
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, 2, 44100);
+}
+
+# ---- process_matches_process_sample ----
+# process() hoists the coefficients and walks the storage; per mode, at full and half
+# wet, across two blocks, it must give the bits of process_sample (the 2.3.2 per-sample
+# body) on a twin filter, and allocate nothing.
+test_group("process_matches_process_sample");
+var sx_ok = 1;
+var sx_mode = 0;
+while (sx_mode < 9) {
+    var sx_mixi = 0;
+    while (sx_mixi < 2) {
+        var sx_f = dhvani_svf_new(sx_mode, 1200.0, 0.9, 5.0, 44100, 2);
+        var sx_t = dhvani_svf_new(sx_mode, 1200.0, 0.9, 5.0, 44100, 2);
+        var sx_mix = 1.0;
+        if (sx_mixi == 1) { sx_mix = 0.35; }
+        dhvani_svf_set_mix(sx_f, sx_mix);
+        var sx_dry = f64_sub(1.0, sx_mix);
+        var sx_blk = 0;
+        while (sx_blk < 2) {
+            var sx_b = sx_stereo(129, sx_blk * 129);
+            var sx_r = dhvani_buffer_samples(sx_stereo(129, sx_blk * 129));
+            var sx_u = alloc_used();
+            dhvani_svf_process(sx_f, sx_b);
+            if (alloc_used() != sx_u) { sx_ok = 0; }
+            var sx_s = dhvani_buffer_samples(sx_b);
+            var sx_i = 0;
+            while (sx_i < 258) {
+                var sx_in = vec_get(sx_r, sx_i);
+                var sx_wet = dhvani_svf_process_sample(sx_t, sx_in, sx_i % 2);
+                if (vec_get(sx_s, sx_i) != f64_add(f64_mul(sx_in, sx_dry), f64_mul(sx_wet, sx_mix))) { sx_ok = 0; }
+                sx_i = sx_i + 1;
+            }
+            sx_blk = sx_blk + 1;
+        }
+        sx_mixi = sx_mixi + 1;
+    }
+    sx_mode = sx_mode + 1;
+}
+assert_eq(sx_ok, 1, "8 modes (+ an out-of-range code) x 2 mixes: bit-identical, 0 bytes");
+
+# ---- extra_channels_pass_through ----
+# A stereo buffer through a mono filter: the oracle panics on its state index (here a
+# vec_get abort). Channel 1 now passes through untouched.
+test_group("extra_channels_pass_through");
+var sx_m = dhvani_svf_new(DH_SVF_LOWPASS, 1000.0, 0.707, 0, 44100, 1);
+var sx_mt = dhvani_svf_new(DH_SVF_LOWPASS, 1000.0, 0.707, 0, 44100, 1);
+var sx_mb = sx_stereo(64, 0);
+var sx_mr = dhvani_buffer_samples(sx_stereo(64, 0));
+dhvani_svf_process(sx_m, sx_mb);
+var sx_ms = dhvani_buffer_samples(sx_mb);
+var sx_mok = 1;
+var sx_mi = 0;
+while (sx_mi < 64) {
+    if (vec_get(sx_ms, sx_mi * 2 + 1) != vec_get(sx_mr, sx_mi * 2 + 1)) { sx_mok = 0; }
+    if (vec_get(sx_ms, sx_mi * 2) != dhvani_svf_process_sample(sx_mt, vec_get(sx_mr, sx_mi * 2), 0)) { sx_mok = 0; }
+    sx_mi = sx_mi + 1;
+}
+assert_eq(sx_mok, 1, "channel 0 filtered, channel 1 untouched");
+
+# ---- negative_channel_passthrough ----
+test_group("negative_channel_passthrough");
+assert_eq(dhvani_svf_process_sample(sx_m, 0.75, 0 - 1), 0.75, "process_sample(-1) returns the input");
+
+# ---- low_sample_rate_passthrough ----
+# Below 3 Hz the Nyquist clamp falls under the 1 Hz floor: the oracle's f64::clamp
+# panics, and tan(pi * 0 / 0) made every output NaN. Pass-through instead, until a
+# usable rate is set.
+test_group("low_sample_rate_passthrough");
+var sx_z = dhvani_svf_new(DH_SVF_LOWPASS, 1000.0, 0.707, 0, 0, 1);
+var sx_zv = vec_new(); vec_push(sx_zv, 0.5); vec_push(sx_zv, f64_neg(0.25)); vec_push(sx_zv, 0.125);
+var sx_zb = dhvani_buffer_from_interleaved(sx_zv, 1, 44100);
+dhvani_svf_process(sx_z, sx_zb);
+var sx_zs = dhvani_buffer_samples(sx_zb);
+assert_eq(vec_get(sx_zs, 0), 0.5, "rate 0: sample 0 unchanged");
+assert_eq(vec_get(sx_zs, 1), f64_neg(0.25), "rate 0: sample 1 unchanged");
+assert_eq(dhvani_svf_process_sample(sx_z, 0.3, 0), 0.3, "rate 0: process_sample passes through");
+var sx_z2 = dhvani_svf_new(DH_SVF_HIGHPASS, 1000.0, 0.707, 0, 2, 1);
+assert_eq(dhvani_svf_process_sample(sx_z2, 0.3, 0), 0.3, "rate 2: passes through");
+dhvani_svf_set_sample_rate(sx_z, 44100);
+var sx_zo = dhvani_svf_process_sample(sx_z, 1.0, 0);
+assert(f64_lt(sx_zo, 0.5), "44.1 kHz set: filtering again (LP of a step starts low)");
+assert_eq(dhvani_is_finite(sx_zo), 1, "and finite");
+
+# ---- nonfinite_state_cleared ----
+# The oracle keeps a NaN state forever (every later output NaN until reset); it is now
+# cleared at the end of the block it arrived in.
+test_group("nonfinite_state_cleared");
+var sx_n = dhvani_svf_new(DH_SVF_BANDPASS, 1000.0, 0.707, 0, 44100, 1);
+var sx_nv = vec_new(); vec_push(sx_nv, 0.5); vec_push(sx_nv, 0x7FF8000000000000); vec_push(sx_nv, 0.5);
+dhvani_svf_process(sx_n, dhvani_buffer_from_interleaved(sx_nv, 1, 44100));
+var sx_nb = sx_stereo(32, 0);
+var sx_n2 = dhvani_svf_new(DH_SVF_BANDPASS, 1000.0, 0.707, 0, 44100, 2);
+dhvani_svf_process(sx_n2, dhvani_buffer_from_interleaved(sx_nv, 1, 44100));
+dhvani_svf_process(sx_n2, sx_nb);
+var sx_nf = 1;
+var sx_ns = dhvani_buffer_samples(sx_nb);
+var sx_ni = 0;
+while (sx_ni < 64) { if (dhvani_is_finite(vec_get(sx_ns, sx_ni)) == 0) { sx_nf = 0; } sx_ni = sx_ni + 1; }
+assert_eq(sx_nf, 1, "the next block is finite");
+var sx_st = vec_get(DhSvfFilter_states(sx_n), 0);
+assert_eq(DhSvfState_ic1eq(sx_st), 0, "ic1eq cleared");
+assert_eq(DhSvfState_ic2eq(sx_st), 0, "ic2eq cleared");
+
 var rc = assert_summary();
 syscall(60, rc);
