@@ -1,7 +1,9 @@
 # ADR 005: Hardening divergences from the oracle
 
 ## Status
-**Accepted** (2026-11-18, dhvani 2.3.3).
+**Accepted** (2026-11-18, dhvani 2.3.3). Extended 2026-11-19 with the MIDI 1.0 → 2.0
+upscaling section (unreleased; its tests are named in the CHANGELOG `[Unreleased]`
+section).
 
 ## Context
 
@@ -162,9 +164,34 @@ the CHANGELOG `[2.3.3]` section.
 - **`dhvani_conv_render`** is the aligned, offline form. `acoustics_convolve_multiband`
   uses it.
 
+### MIDI 1.0 → 2.0 upscaling is min-center-max (user decision, 2026-11-19, after 2.3.3)
+
+- **The oracle's rule.** `velocity_7_to_16`, `cc_7_to_32` and `pitch_bend_14_to_32` used
+  plain bit replication (`v << 9 | v << 2 | v >> 5` for velocity), which its doc comment
+  calls "MIDI 2.0 spec scaling". It is not the spec's rule, and it moves every centre value:
+  - velocity 64 went to `0x8102`, not `0x8000`;
+  - CC 64 went to `0x81020408`, not `0x80000000`;
+  - pitch bend 8192 went to `0x80020008`, not `PITCH_BEND_CENTER` (`0x80000000`). A MIDI
+    1.0 bend at rest became a slight detune, and a consumer's `== PITCH_BEND_CENTER`
+    test for "no bend" never matched.
+- **dhvani now uses min-center-max**, the up-scaling rule in the MIDI 2.0 UMP
+  specification (M2-104-UM), as its reference algorithm (`dh_miditx_scale_up`):
+  - at or below the centre, a plain shift, so 0 and the centre land exactly on 0 and the
+    2.0 centre;
+  - above the centre, the low source bits are repeated downward, so the maximum lands
+    exactly on the 2.0 maximum.
+- **What changes.** Every up-scaled value except 0 and the maximum. Down-scaling is the
+  spec's plain shift and is unchanged, every value still round-trips exactly, and the
+  up-scalers stay strictly increasing over the whole domain.
+- **Out-of-range input.** A 7-bit input of 128–255 (a valid Rust `u8`, outside MIDI 1.0)
+  saturates to 127, and a 14-bit input above 16383 to 16383. The oracle let them wrap in
+  `u16` / `u32`. Inputs are still masked to the Rust type width first.
+- **Tests.** The oracle's 12 tests still pass unchanged: they check only round trips,
+  near-maximum thresholds and the centre round trip. `upscale_is_min_center_max` pins
+  the centres, extremes and hand-computed vectors either side of the centre.
+  `upscale_monotone_over_the_whole_domain` covers every 7- and 14-bit value.
+
 ### Not changed (parity kept, documented)
-- **Translate upscaling** stays bit replication, not the MIDI 2.0 min-center-max rule.
-  The pitch-bend centre (8192) therefore does not map to `0x80000000`.
 - **clamp / noise_gate** pass NaN through, as the oracle's scalar and NEON paths do. Its
   x86 SIMD path did not, and it was inconsistent across platforms.
 
@@ -183,7 +210,8 @@ the CHANGELOG `[2.3.3]` section.
 - **Neutral:**
   - Convolution consumers now see one block (512 frames, about 11.6 ms at 44.1 kHz) of
     latency, and must compensate for it like any other latent node.
-  - min-center-max scaling is a candidate for a later ADR.
+  - MIDI 1.0 → 2.0 up-scaled values differ from the Rust crate's (min-center-max). A
+    consumer that stored the oracle's 2.0 values sees new bits for the same 1.0 input.
 
 ## Alternatives considered
 

@@ -154,8 +154,8 @@ Parity first; these resume once the port is green. Demand-gated.
 - **Open from the 2.3.3 P(-1) sweep** (each needs a decision; `state.md`, ADR 005):
   - (decided in 2.3.3: convolution `process` streams with one block of latency, so a
     host block of any size is fully processed; ADR 005.)
-  - MIDI 2.0 upscaling is bit replication, not min-center-max, so the pitch-bend centre
-    8192 does not map to `0x80000000`.
+  - ✅ MIDI 2.0 upscaling (decided 2026-11-19, after 2.3.3): min-center-max replaces the
+    oracle's bit replication, so the pitch-bend centre 8192 maps to `0x80000000`; ADR 005.
   - upstream (cyrius stdlib): `simd_has_avx2` should also check OSXSAVE/XCR0 and the
     maximum CPUID leaf. Filed 2026-11-19 as cyrius
     `docs/development/issues/2026-11-19-simd-has-avx2-skips-the-os-check.md`, with a

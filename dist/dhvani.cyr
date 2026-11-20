@@ -9629,17 +9629,24 @@ fn dhvani_midi2_pitch_bend_value(e) { return DhPitchBendV2_value(e); }
 # Cyrius port uses i64 slots, so every scaler masks its INPUT to the Rust type
 # width (u8 & 0xFF, u16 & 0xFFFF, u32 & 0xFFFFFFFF -- what the Rust argument
 # type would have held) and its OUTPUT to the result width (u16/u32 for the
-# up-scalers, the 7/14-bit domain for the down-scalers). For every in-type input
-# the result is bit-identical to rust-old; out-of-type input (a negative or
-# sign-extended word, >32-bit garbage) can no longer leak past the 7/14-bit range.
+# up-scalers, the 7/14-bit domain for the down-scalers). Out-of-type input (a
+# negative or sign-extended word, >32-bit garbage) can never leak past the
+# 7/14-bit range.
 #
-# UP-SCALING IS BIT REPLICATION, NOT THE MIDI 2.0 MIN-CENTER-MAX RULE. rust-old's
-# doc calls `v << 9 | v << 2 | v >> 5` "MIDI 2.0 spec scaling"; it is plain bit
-# replication, kept here for oracle parity. Consequence: centre values are NOT
-# preserved -- 7-bit velocity 64 -> 0x8102 (not 0x8000), CC 64 -> 0x81020408
-# (not 0x80000000), and pitch bend 8192 -> 0x80020008, which is NOT
-# DH_MIDITX_PITCH_BEND_CENTER (a consumer testing `== CENTER` for "no bend" on an
-# up-scaled MIDI 1.0 bend never matches). Up-then-down round-trips are exact.
+# UP-SCALING IS THE MIDI 2.0 MIN-CENTER-MAX RULE (a divergence from rust-old,
+# ADR 005). rust-old used plain bit replication (`v << 9 | v << 2 | v >> 5`), which
+# its doc mislabels "MIDI 2.0 spec scaling" and which moves every centre value:
+# pitch bend 8192 went to 0x80020008, not DH_MIDITX_PITCH_BEND_CENTER, so an
+# up-scaled MIDI 1.0 bend at rest read as a slight detune. The MIDI 2.0 UMP
+# specification (M2-104-UM) defines min-center-max scaling instead (dh_miditx_scale_up):
+#   - a value at or below the centre is a plain shift, so 0 -> 0 and the centre
+#     (64, or 8192) lands exactly on the 2.0 centre (0x8000, 0x80000000);
+#   - above the centre, the low source bits are repeated into the new low bits,
+#     so the maximum (127, 16383) lands exactly on the 2.0 maximum.
+# A 7-bit up-scaler input of 128..255 (in the u8 type, outside MIDI 1.0) saturates
+# to 127, and a 14-bit input above 16383 to 16383: past full scale is full scale.
+# Down-scaling is the spec's plain shift, unchanged from rust-old, and every
+# up-then-down round trip is exact.
 #
 # The struct conversions allocate (free-less bump allocator); each has a
 # zero-alloc `*_into(..., out)` twin that writes a caller-owned handle.
@@ -9650,13 +9657,41 @@ var DH_MIDITX_PITCH_BEND_CENTER = 0x80000000;
 
 # ---- scalar scaling (pure integer bit logic) ----
 
-# Scale 7-bit MIDI 1.0 velocity (u8) to 16-bit MIDI 2.0: bit replication
-# v << 9 | v << 2 | v >> 5 (see header -- not min-center-max).
+# MIDI 2.0 min-center-max up-scaling of src (0 .. 2^src_bits - 1) from src_bits to
+# dst_bits (dst_bits > src_bits): the spec's reference algorithm. At or below the
+# centre 2^(src_bits-1) it is a plain shift. Above it, the low src_bits-1 bits are
+# aligned under the shifted value and repeated downward until they run out, so the
+# source maximum maps to the destination maximum. Allocation-free.
+#must_use
+fn dh_miditx_scale_up(src, src_bits, dst_bits) {
+    var scale = dst_bits - src_bits;
+    var shifted = src << scale;
+    if (src <= (1 << (src_bits - 1))) { return shifted; }
+    var rep_bits = src_bits - 1;
+    var rep = src & ((1 << rep_bits) - 1);
+    if (scale > rep_bits) { rep = rep << (scale - rep_bits); } else { rep = rep >> (rep_bits - scale); }
+    while (rep != 0) {
+        shifted = shifted | rep;
+        rep = rep >> rep_bits;
+    }
+    return shifted;
+}
+
+# A 7-bit up-scaler input: masked to u8 (the Rust argument type), then saturated to
+# the MIDI 1.0 range 0..127.
+#inline
+#must_use
+fn dh_miditx_in7(v) {
+    var x = v & 0xFF;
+    if (x > 127) { return 127; }
+    return x;
+}
+
+# Scale 7-bit MIDI 1.0 velocity (u8) to 16-bit MIDI 2.0, min-center-max:
+# 0 -> 0, 64 -> 0x8000, 127 -> 0xFFFF (see header).
 #must_use
 fn dhvani_miditx_velocity_7_to_16(v) {
-    var x = v & 0xFF;
-    if (x == 0) { return 0; }
-    return ((x << 9) | (x << 2) | (x >> 5)) & 0xFFFF;
+    return dh_miditx_scale_up(dh_miditx_in7(v), 7, 16);
 }
 
 # Scale 16-bit MIDI 2.0 velocity (u16) to 7-bit MIDI 1.0 (lossy). Pure scaler:
@@ -9667,11 +9702,11 @@ fn dhvani_miditx_velocity_16_to_7(v) {
     return ((v & 0xFFFF) >> 9) & 0x7F;
 }
 
-# Scale 7-bit CC value (u8) to 32-bit MIDI 2.0 (bit replication).
+# Scale 7-bit CC value (u8) to 32-bit MIDI 2.0, min-center-max:
+# 0 -> 0, 64 -> 0x80000000, 127 -> 0xFFFFFFFF.
 #must_use
 fn dhvani_miditx_cc_7_to_32(v) {
-    var x = v & 0xFF;
-    return ((x << 25) | (x << 18) | (x << 11) | (x << 4) | (x >> 3)) & 0xFFFFFFFF;
+    return dh_miditx_scale_up(dh_miditx_in7(v), 7, 32);
 }
 
 # Scale 32-bit CC value (u32) to 7-bit MIDI 1.0 (lossy).
@@ -9681,11 +9716,14 @@ fn dhvani_miditx_cc_32_to_7(v) {
     return ((v & 0xFFFFFFFF) >> 25) & 0x7F;
 }
 
-# Convert 14-bit MIDI 1.0 pitch bend (u16) to 32-bit MIDI 2.0 (bit replication).
+# Convert 14-bit MIDI 1.0 pitch bend (u16) to 32-bit MIDI 2.0, min-center-max:
+# 0 -> 0, 8192 -> DH_MIDITX_PITCH_BEND_CENTER, 16383 -> 0xFFFFFFFF. An input
+# above 16383 (in the u16 type, outside MIDI 1.0) saturates to 16383.
 #must_use
 fn dhvani_miditx_pitch_bend_14_to_32(v) {
     var x = v & 0xFFFF;
-    return ((x << 18) | (x << 4) | (x >> 10)) & 0xFFFFFFFF;
+    if (x > 16383) { x = 16383; }
+    return dh_miditx_scale_up(x, 14, 32);
 }
 
 # Convert 32-bit MIDI 2.0 pitch bend (u32) to 14-bit MIDI 1.0 (lossy).

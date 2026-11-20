@@ -258,7 +258,7 @@ confirm the link.
 | `dsp/noise_reduction` | 283 | D | 6 | analysis/fft, buffer | spectral subtraction; needs fft. |
 | `analysis/stft` | 262 | D | 4 | analysis, buffer, error | 4 per-frame scratch → preallocate. |
 | `analysis/chroma` | 139 | D | 4 | analysis, buffer | chromagram. |
-| `midi/translate` | 210 | E | 10 | midi | note/CC translation; no alloc. |
+| `midi/translate` | 210 | E | 10 | midi | note/CC translation; no alloc. Up-scaling is min-center-max, not the oracle's bit replication (ADR 005). |
 | `graph` | 1174 | E | 21 | buffer | RT-safe node graph (largest module); 5 scratch to preallocate. See `docs/decisions/003-rt-safe-graph-design.md`. |
 | `acoustics` | 467 | F | 9 | buffer, error, dsp, **goonj** | convolution reverb / FDN / ambisonics over goonj. |
 

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **MIDI 1.0 → 2.0 up-scaling is the MIDI 2.0 spec's min-center-max rule** (ADR 005,
+  user decision 2026-11-19). This diverges from the oracle.
+  - **Why.** The oracle used plain bit replication, which moves every centre value.
+    Pitch bend 8192 went to `0x80020008`, not `PITCH_BEND_CENTER`, so a MIDI 1.0 bend at
+    rest became a slight detune. Velocity 64 went to `0x8102` and CC 64 to `0x81020408`.
+  - **Now.** `dhvani_miditx_velocity_7_to_16`, `dhvani_miditx_cc_7_to_32` and
+    `dhvani_miditx_pitch_bend_14_to_32` share `dh_miditx_scale_up`, the spec's reference
+    algorithm:
+    - 0, the centre and the maximum land exactly on the 2.0 minimum, centre and maximum
+      (8192 → `0x80000000`, 127 → `0xFFFF` / `0xFFFFFFFF`);
+    - at or below the centre a value is a plain shift; above it, the low source bits
+      repeat downward.
+  - **What every caller sees.** Every up-scaled value except 0 and the maximum changes;
+    the note-on and CC struct conversions use the same scalers. Down-scaling is unchanged,
+    and every value still round-trips exactly.
+  - **Out-of-range input.** A 7-bit input of 128–255 now saturates to 127, and a 14-bit
+    input above 16383 to 16383. The oracle let them wrap.
 - **Onset detection and tempo detection no longer build the whole spectrogram.**
   - **The change.**
     - The new `dhvani_spectral_flux_from_buffer(buf, window_size, hop_size)` computes the
@@ -47,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - dropping the frame swap;
   - stepping frames by one sample instead of the hop.
 - **`tests/bench_dsp.bcyr`: `onsets 1s 2048/512` and `tempo 1s` rows.**
+- **`tests/translate.tcyr`, min-center-max coverage** (333 assertions, was 310):
+  - `upscale_is_min_center_max` pins the centres, the extremes, the note-on and CC struct
+    paths, and hand-computed vectors either side of the centre. The vectors are checked
+    against a separate implementation of the spec algorithm.
+  - `upscale_monotone_over_the_whole_domain` checks every 7- and 14-bit value: strictly
+    increasing, inside the result width, and an exact round trip.
+  - `scalers_mask_to_rust_type_width` now expects saturation, not the oracle's wrap.
+  - The oracle's 12 tests pass unchanged.
+  - **Mutation check.** Three mutants are each caught: a single repeat instead of the
+    loop, no 7-bit saturation, and CC back on bit replication.
 - **ADR 006** (`docs/decisions/006-math-base-abaco.md`) records the Wave B decision that
   abaco is dhvani's math base. This closes the last open 2.0.0 criterion that was
   dhvani's own to close.

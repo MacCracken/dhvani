@@ -2,8 +2,8 @@
 # Ported one-for-one from the 12 #[test] blocks in rust-old/src/midi/translate.rs.
 # No serde round-trip or Display-string tests exist in the oracle -> none dropped.
 # Groups after `pitch_bend_center_constant` are port regressions (type-width
-# masking, the note-on velocity floor, zero-alloc `_into`, bit-replication
-# centre values).
+# masking and saturation, the note-on velocity floor, zero-alloc `_into`) and the
+# min-center-max up-scaling that replaced the oracle's bit replication (ADR 005).
 
 include "src/error.cyr"
 include "src/midi.cyr"
@@ -105,13 +105,16 @@ while (pbx < 16384) {
 assert_eq(pb_bad, 0, "all 16384 bend values round-trip");
 
 # ---- scalers_mask_to_rust_type_width ----
-# In-type values keep the oracle's u8/u16/u32 wrap; out-of-type values are
-# masked at entry like the Rust argument type, outputs stay in 7/14 bits.
+# Inputs are masked at entry like the Rust argument type (u8 / u16 / u32). An
+# up-scaler input past the 7/14-bit MIDI 1.0 range saturates to full scale (the
+# oracle let it wrap in u16/u32); down-scaler outputs stay in 7/14 bits.
 test_group("scalers_mask_to_rust_type_width");
-assert_eq(dhvani_miditx_velocity_7_to_16(200), 37670, "u8 200 wraps in u16 like Rust");
-assert_eq(dhvani_miditx_cc_7_to_32(200), 2468760729, "u8 200 wraps in u32 like Rust");
+assert_eq(dhvani_miditx_velocity_7_to_16(200), 0xFFFF, "u8 200 saturates to 127 -> 0xFFFF");
+assert_eq(dhvani_miditx_velocity_7_to_16(128), 0xFFFF, "u8 128 saturates to 127 -> 0xFFFF");
+assert_eq(dhvani_miditx_cc_7_to_32(200), 0xFFFFFFFF, "u8 200 saturates to 127 -> u32 max");
 assert_eq(dhvani_miditx_pitch_bend_14_to_32(0xFFFF), 0xFFFFFFFF, "u16 0xFFFF -> u32 max");
-assert_eq(dhvani_miditx_pitch_bend_14_to_32(16384), 262160, "u16 16384 wraps like Rust");
+assert_eq(dhvani_miditx_pitch_bend_14_to_32(16384), 0xFFFFFFFF, "u16 16384 saturates to 16383");
+assert_eq(dhvani_miditx_pitch_bend_14_to_32(0x10000), 0, "0x10000 masks to u16 0 -> 0");
 assert_eq(dhvani_miditx_velocity_7_to_16(256), 0, "256 masks to u8 0 -> 0");
 assert_eq(dhvani_miditx_velocity_7_to_16(0 - 1), 0xFFFF, "-1 masks to u8 255 -> 0xFFFF");
 assert_eq(dhvani_miditx_velocity_16_to_7(0x1FFFF), 127, "16->7 out-of-type input stays 7-bit");
@@ -163,13 +166,72 @@ assert_eq(dhvani_cc_controller(tccb), 7, "ccb controller");
 assert_eq(dhvani_cc_value(tccb), 100, "ccb value");
 assert_eq(dhvani_cc_channel(tccb), 2, "ccb channel");
 
-# ---- upscale_is_bit_replication_not_min_center_max (oracle parity) ----
-# Centre values are NOT preserved (documented in src/translate.cyr).
-test_group("upscale_is_bit_replication_not_min_center_max");
-assert_eq(dhvani_miditx_pitch_bend_14_to_32(8192), 0x80020008, "bend 8192 -> 0x80020008");
-assert(dhvani_miditx_pitch_bend_14_to_32(8192) != DH_MIDITX_PITCH_BEND_CENTER, "!= PITCH_BEND_CENTER");
-assert_eq(dhvani_miditx_cc_7_to_32(64), 0x81020408, "cc 64 -> 0x81020408");
-assert_eq(dhvani_miditx_velocity_7_to_16(64), 0x8102, "velocity 64 -> 0x8102");
+# ---- upscale_is_min_center_max (oracle-divergent, ADR 005) ----
+# The MIDI 2.0 spec's min-center-max rule: min, centre and max land exactly on the
+# 2.0 min, centre and max. The oracle's bit replication gave 0x8102, 0x81020408 and
+# 0x80020008 for the three centres. Values computed by hand from the spec's
+# reference algorithm, and checked against a separate implementation of it.
+test_group("upscale_is_min_center_max");
+var pb_center = dhvani_miditx_pitch_bend_14_to_32(8192);
+assert_eq(pb_center, DH_MIDITX_PITCH_BEND_CENTER, "bend 8192 -> PITCH_BEND_CENTER");
+assert_eq(dhvani_miditx_cc_7_to_32(64), 0x80000000, "cc 64 -> 0x80000000");
+assert_eq(dhvani_miditx_velocity_7_to_16(64), 0x8000, "velocity 64 -> 0x8000");
+assert_eq(dhvani_miditx_velocity_7_to_16(127), 0xFFFF, "velocity 127 -> 0xFFFF");
+assert_eq(dhvani_miditx_cc_7_to_32(127), 0xFFFFFFFF, "cc 127 -> 0xFFFFFFFF");
+assert_eq(dhvani_miditx_pitch_bend_14_to_32(16383), 0xFFFFFFFF, "bend 16383 -> 0xFFFFFFFF");
+assert_eq(dhvani_miditx_cc_7_to_32(0), 0, "cc 0 -> 0");
+assert_eq(dhvani_miditx_pitch_bend_14_to_32(0), 0, "bend 0 -> 0");
+# at or below the centre: a plain shift
+assert_eq(dhvani_miditx_velocity_7_to_16(1), 0x0200, "velocity 1 -> 0x0200");
+assert_eq(dhvani_miditx_velocity_7_to_16(63), 0x7E00, "velocity 63 -> 0x7E00");
+assert_eq(dhvani_miditx_cc_7_to_32(1), 0x02000000, "cc 1 -> 0x02000000");
+assert_eq(dhvani_miditx_pitch_bend_14_to_32(1), 0x40000, "bend 1 -> 0x40000");
+assert_eq(dhvani_miditx_pitch_bend_14_to_32(8191), 0x7FFC0000, "bend 8191 -> 0x7FFC0000");
+# above the centre: the low source bits repeated downward
+assert_eq(dhvani_miditx_velocity_7_to_16(65), 0x8208, "velocity 65 -> 0x8208");
+assert_eq(dhvani_miditx_velocity_7_to_16(100), 0xC924, "velocity 100 -> 0xC924");
+assert_eq(dhvani_miditx_velocity_7_to_16(126), 0xFDF7, "velocity 126 -> 0xFDF7");
+assert_eq(dhvani_miditx_cc_7_to_32(65), 0x82082082, "cc 65 -> 0x82082082");
+assert_eq(dhvani_miditx_cc_7_to_32(100), 0xC9249249, "cc 100 -> 0xC9249249");
+assert_eq(dhvani_miditx_pitch_bend_14_to_32(8193), 0x80040020, "bend 8193 -> 0x80040020");
+assert_eq(dhvani_miditx_pitch_bend_14_to_32(12288), 0xC0020010, "bend 12288 -> 0xC0020010");
+# the note-on struct path carries the centre too
+var cev = dhvani_note_event_new(0, 10, 60, 64, 0);
+assert_eq(dhvani_midi2_note_on_velocity(dhvani_miditx_note_event_to_v2(cev)), 0x8000, "note velocity 64 -> 0x8000");
+var ccc = dhvani_cc_new(0, 10, 64, 0);
+assert_eq(dhvani_midi2_cc_value(dhvani_miditx_cc_to_v2(ccc)), 0x80000000, "cc struct 64 -> 0x80000000");
+
+# ---- upscale_monotone_over_the_whole_domain ----
+# Every up-scaler is strictly increasing over its whole 7- or 14-bit domain, stays
+# inside its 16- or 32-bit result, and every value round-trips through the
+# down-scaler.
+test_group("upscale_monotone_over_the_whole_domain");
+
+# count of domain values (0 .. 2^bits - 1) where up(x) <= up(x-1), up(x) leaves
+# [0, out_max], or down(up(x)) != x. fp_up / fp_down are the scaler pair.
+fn upscale_faults(fp_up, fp_down, bits, out_max) {
+    var bad = 0;
+    var prev = 0 - 1;
+    var x = 0;
+    while (x < (1 << bits)) {
+        var u = fncall1(fp_up, x);
+        if (u <= prev) { bad = bad + 1; }
+        if (u < 0 || u > out_max) { bad = bad + 1; }
+        if (fncall1(fp_down, u) != x) { bad = bad + 1; }
+        prev = u;
+        x = x + 1;
+    }
+    return bad;
+}
+var vel_up = &dhvani_miditx_velocity_7_to_16;
+var vel_dn = &dhvani_miditx_velocity_16_to_7;
+var cc_up = &dhvani_miditx_cc_7_to_32;
+var cc_dn = &dhvani_miditx_cc_32_to_7;
+var pb_up = &dhvani_miditx_pitch_bend_14_to_32;
+var pb_dn = &dhvani_miditx_pitch_bend_32_to_14;
+assert_eq(upscale_faults(vel_up, vel_dn, 7, 0xFFFF), 0, "velocity 7->16");
+assert_eq(upscale_faults(cc_up, cc_dn, 7, 0xFFFFFFFF), 0, "cc 7->32");
+assert_eq(upscale_faults(pb_up, pb_dn, 14, 0xFFFFFFFF), 0, "bend 14->32");
 
 var rc = assert_summary();
 syscall(60, rc);
