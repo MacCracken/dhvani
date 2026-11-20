@@ -40,6 +40,7 @@ src/
 ├── eq.cyr            ParametricEq (N-band cascade)
 ├── graphic_eq.cyr     GraphicEq
 ├── compressor.cyr     Compressor (envelope follower, soft knee, makeup gain)
+├── multiband.cyr      MultibandCompressor (LR4 crossovers + a compressor per band; 2.3.4, ADR 007)
 ├── limiter.cyr        EnvelopeLimiter (brick-wall)
 ├── reverb.cyr         Reverb (Schroeder/Freeverb, 4 combs + 2 allpasses)
 ├── delay.cyr          DelayLine + ModulatedDelay (chorus/flanger)

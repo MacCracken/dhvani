@@ -21,7 +21,7 @@ dhvani is the **audio processing core** — it owns the audio math so nobody els
 | **Mixing** | Sum N sources with channel/rate validation |
 | **Resampling** | Linear + sinc (Blackman-Harris window, Draft/Good/Best quality) |
 | **Format conversion** | i16, i24, i32, f32, f64, u8 with roundtrip fidelity; dithering (TPDF + noise-shaped) |
-| **DSP effects** | Biquad EQ, SVF filter, parametric/graphic EQ, compressor, limiter, reverb, convolution reverb, delay, de-esser, panner, noise gate, automation curves, routing matrix |
+| **DSP effects** | Biquad EQ, SVF filter, parametric/graphic EQ, compressor, multiband compressor, limiter, reverb, convolution reverb, delay, de-esser, panner, noise gate, automation curves, routing matrix |
 | **Analysis** | FFT spectrum, STFT, EBU R128 loudness, dynamics (true peak), chromagram, onset/beat/key detection |
 | **Synthesis** | Subtractive, FM, additive, wavetable, granular, physical modeling, drum, vocoder, sampler (via [naad](https://github.com/MacCracken/naad)/[nidhi](https://github.com/MacCracken/nidhi)) |
 | **Voice synthesis** | Glottal source, formant filtering, phoneme sequencing, prosody (via [svara](https://github.com/MacCracken/svara)) |
@@ -84,7 +84,7 @@ sibling bundles it uses, and unused wrapper refs DCE-prune. The layers:
 | Layer | Sibling bundle | Provides |
 |-------|----------------|----------|
 | Core | — | Buffers, mixing, resampling, clock, format conversion |
-| DSP | — | EQ, compressor, limiter, reverb, convolution, delay, de-esser, panner, oscillator, LFO, envelope, SVF, automation, routing |
+| DSP | — | EQ, compressor, multiband compressor, limiter, reverb, convolution, delay, de-esser, panner, oscillator, LFO, envelope, SVF, automation, routing |
 | Analysis | — | FFT, STFT, R128 loudness, dynamics, chromagram, onset/beat/key detection |
 | MIDI | — | MIDI 1.0/2.0 events, voice management, routing, translation |
 | Graph | — | RT-safe audio graph, lock-free metering |
@@ -110,7 +110,7 @@ sibling bundles it uses, and unused wrapper refs DCE-prune. The layers:
 src/                (flat bundle — one namespace, dhvani_* prefix)
 ├── buffer.cyr       AudioBuffer, format conversion, mixing, resampling, dithering
 ├── clock.cyr        Sample-accurate transport, tempo, beats, PTS
-├── dsp.cyr …        Biquad, SVF, EQ, compressor, limiter, reverb, convolution, delay, automation, routing
+├── dsp.cyr …        Biquad, SVF, EQ, compressor, multiband, limiter, reverb, convolution, delay, automation, routing
 ├── analysis.cyr …   FFT, STFT, R128 loudness, dynamics, chromagram, onset/beat/key detection
 ├── midi.cyr …       MIDI 1.0/2.0, voice management, routing, translation
 ├── graph.cyr        RT-safe audio graph, topological execution, latency compensation

@@ -19,8 +19,9 @@
       keep abaco. hisab is not pruned: it is the siblings' dependency, not a second
       math base (goonj's geometry is built on its HVec3).
 - [x] CHANGELOG `[2.0.0]` complete; `VERSION` = 2.0.0
-- [ ] At least one downstream consumer (shruti / jalwa / aethersafta) builds
-      against the Cyrius bundle. **Still open**: no consumer is on the bundle yet.
+- [x] At least one downstream consumer (shruti / jalwa / aethersafta) builds
+      against the Cyrius bundle: **jalwa**, which pins dhvani 2.2.4's `dist/dhvani.cyr`
+      (found 2026-11-20). Its `tests/dsp.tcyr` also passes against the 2.3.4 bundle.
 - [x] Clean gate: `cyrius fmt` + `lint` + tests + bench green (fmt/lint gate since 2.2.3)
 
 ## Milestones
@@ -133,8 +134,23 @@ Parity first; these resume once the port is green. Demand-gated.
 
 - **Consumer adoption**: shruti (DAW), jalwa (player), aethersafta (compositor),
   kiran (game audio) build against the Cyrius bundle.
+  - ✅ **jalwa** is on the bundle: it pins dhvani 2.2.4 with cyrius 6.6.3 and abaco 2.4.6.
+    - Checked for 2.3.4: the 17 functions it calls, and the one settings accessor, are
+      unchanged since 2.2.4.
+    - Its `tests/dsp.tcyr` passes against the 2.3.4 bundle (42/42) on cyrius 6.7.18 with
+      abaco 2.8.0.
+    - To take 2.3.4, jalwa bumps those three pins. That is jalwa-side work.
+  - shruti and aethersafta are still Rust; kiran has no checkout here.
 - **Advanced DSP**: multiband compressor, noise suppression, pitch shift /
   time stretch (phase vocoder / WSOLA).
+  - ✅ **Multiband compressor**: shipped in **2.3.4**, as `src/multiband.cyr` (ADR 007).
+    - Built from LR4 crossovers in a tree, with allpass compensation and one compressor
+      per band, for 2 to 8 bands.
+    - Uncompressed, it is a flat-magnitude allpass. It allocates nothing per call, at any
+      host block size.
+  - Next in this line, demand-gated: noise suppression, then pitch shift / time stretch.
+    Possible multiband extras: a linear-phase crossover, sidechain, band solo, a graph
+    node.
 - **MIDI advanced**: SMF read/write, MIDI clock/MTC/SPP, SysEx, MPE.
 - **Platform backends**: JACK, and (pending Cyrius FFI) CoreAudio / WASAPI /
   WASM — plus the PipeWire capture unblock above.

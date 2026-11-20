@@ -5,12 +5,23 @@
 
 ## Version
 
-**Unreleased (on 2.3.3)** — onset and tempo detection compute the spectral flux one STFT
-frame at a time (`dhvani_spectral_flux_from_buffer`), bit for bit with the spectrogram
-path: 10 s of audio allocates 72.5 KB, not 7.1 MB. ADR 006 records abaco as the math base.
-MIDI 1.0 → 2.0 up-scaling is the spec's min-center-max rule (an oracle divergence, ADR
-005), so the centres land on the 2.0 centres. The AVX2 OS-check gap is filed in cyrius.
-`VERSION` is still 2.3.3.
+**2.3.4** — the **multiband compressor** (`src/multiband.cyr`, ADR 007), the first
+"Advanced DSP" backlog item.
+- It uses LR4 crossovers in a tree, with allpass compensation and one `DhCompressor` per
+  band, for 2 to 8 bands.
+- Uncompressed, it is a flat-magnitude allpass. It allocates 0 bytes per call at any host
+  block size.
+
+Also in 2.3.4:
+- Onset and tempo detection compute the spectral flux one STFT frame at a time
+  (`dhvani_spectral_flux_from_buffer`), bit for bit with the spectrogram path. 10 s of
+  audio allocates 72.5 KB, not 7.1 MB.
+- MIDI 1.0 → 2.0 up-scaling is the spec's min-center-max rule, an oracle divergence
+  recorded in ADR 005.
+- ADR 006 records abaco as the math base.
+- **jalwa** is confirmed on the bundle, and its DSP suite passes against 2.3.4.
+- The AVX2 OS-check gap is filed in cyrius.
+- No dependency or toolchain change: every dep was already on its newest tag.
 **2.3.3** — **P(-1) sweep**: a seven-group audit of all of `src/`. It fixed two
 regressions in 2.3.2's new code (the biquad fast path's frame count, the resample default
 path's unchecked raw stores), 9 P-1s, about 30 P-2s and the parity P-3s. It also added
@@ -113,8 +124,20 @@ Direct (declared in `cyrius.cyml`):
 
 ## Consumers
 
-_None on the Cyrius bundle yet._ Rust consumers (shruti, jalwa, aethersafta,
-kiran) migrate up the stack after the port is green (post-2.0.0).
+- **jalwa** (media player) is on the Cyrius bundle. It pins dhvani **2.2.4**'s
+  `dist/dhvani.cyr`, with cyrius 6.6.3 and abaco 2.4.6.
+  - **Its surface** is 17 functions: `dhvani_geq_*` (new, process, reset, set_enabled,
+    set_settings, band_name, settings_default / band / set_band / enabled / is_flat),
+    `dhvani_buffer_{from_interleaved, silence, samples, rms, peak}` and
+    `dhvani_analysis_suggest_gain`. It also calls one accessor,
+    `DhGraphicEqSettings_set_enabled`.
+  - **Checked for 2.3.4** (2026-11-20):
+    - Every one of those signatures, and the `DhGraphicEqSettings` layout, is unchanged
+      since 2.2.4.
+    - jalwa's `tests/dsp.tcyr` passes against the 2.3.4 bundle (42/42) on cyrius 6.7.18
+      with abaco 2.8.0.
+  - **Before changing that surface**, grep jalwa for the symbol.
+- shruti, aethersafta and kiran are still Rust, or have no checkout here.
 
 ## Port progress
 
@@ -137,8 +160,11 @@ externalized from the dist like the Wave F siblings; stdlib gained only `hashmap
 (the dictionary `map_*`) — not `mmap`/`bayan` (unreachable, DCE-prune). Parity `tests/g2p.tcyr` (14 one-for-one) +
 `tests/bundle_g2p.tcyr`. **Full CI suite: 1692 assertions across 64 top-level
 suites, all green on 6.4.12** (+ `tests/hw/device.tcyr`, HW-gated, excluded from CI).
-**Unreleased (on 2.3.3): 65 suites green on 6.7.18**: 2,660 assertions headless (the CI
-shape; +22 onset, +3 beat for the streamed flux, +23 translate for min-center-max).
+**As of 2.3.4: 66 suites green on 6.7.18**: 2,761 assertions headless (the CI shape).
+The additions since 2.3.3:
+- the new `tests/multiband.tcyr`, 99 assertions, and +2 in `tests/bundle.tcyr`;
+- +22 onset and +3 beat for the streamed flux;
+- +23 translate for min-center-max.
 **As of 2.3.3: 65 suites green on 6.7.18**: 2,612 assertions headless (the CI shape).
 Every new regression group fails on the 2.3.2 sources. **As of 2.3.2: 65 suites green on 6.7.18** — 1,759 assertions headless (the CI shape),
 1,760 with audio hardware (+23 simd, +4 biquad, +5 resample, +1 g2p). **As of 2.3.1: 65 suites green on 6.7.18** — 1,726 assertions headless, 1,727 with
@@ -161,8 +187,8 @@ constants (`DB_SCALE`/`DB_EXP`/`DB_GAIN_EXP`) encoding a wrong `ln(10)` — ~0.0
 error across 8 dhvani DSP modules. Fixed upstream (abaco 2.3.2), re-vendored;
 `dsp_reference` now tests the real shipped dB path.
 
-**Bundle:** `[lib].modules` = all 54 modules in L0→L4 order; `cyrius distlib` →
-`dist/dhvani.cyr` (9.4k lines / 340 KB). It **externalizes abaco + the 10 siblings**
+**Bundle:** `[lib].modules` = all 55 modules in L0→L4 order (54 ports + the 2.3.4
+multiband compressor); `cyrius distlib` → `dist/dhvani.cyr` (13.2k lines at 2.3.4). It **externalizes abaco + the 10 siblings**
 — dhvani ships only its own auditable code; a consumer links the siblings for the
 features it uses (unused refs DCE-prune). Validated by `tests/bundle.tcyr` (core:
 abaco+dist) + `tests/bundle_synth.tcyr` (synthesis feature: naad chain+abaco+dist).
@@ -196,7 +222,7 @@ Per-module parity ledger + conventions: [`port-audit.md`](port-audit.md).
 
 One `tests/<module>.tcyr` per ported module, each Rust `#[test]` ported one-for-one
 (serde round-trip + Display tests dropped), plus the integration / dsp-reference /
-proptest / bundle suites and `tests/hw/device.tcyr` (self-gating). **65 suites, 2,660
+proptest / bundle suites and `tests/hw/device.tcyr` (self-gating). **66 suites, 2,761
 assertions headless** (2,612 at 2.3.3, 1,759 at 2.3.2). The oracle's five SIMD-vs-scalar
 tests, dropped while only the scalar path existed, are ported since 2.3.2.
 
@@ -208,7 +234,10 @@ I/O, 2.2.0 g2p, and 2.3.2 the SIMD kernels. What is left:
 - **Dep-blocked:** `voice_synth/bhava_bridge`, until bhava ports (bhava 2.0.0 is still Rust).
 - **Platform-blocked:** `ffi` (deliberate non-goal) and `capture/pw` (superseded in practice
   by vani device I/O; ADR 004).
-- **Consumers:** none on the Cyrius bundle yet.
+- **Consumers:** jalwa is on the bundle (pinned at 2.2.4, verified against 2.3.4); moving
+  its pins is jalwa-side work. shruti / aethersafta are still Rust.
+- **Advanced DSP, demand-gated:** noise suppression, pitch shift / time stretch; multiband
+  extras (linear-phase crossover, sidechain, band solo, a graph node), ADR 007.
 - **SIMD, demand-gated:** `peak_abs` / `clamp` / `noise_gate` vectorize once Cyrius has
   packed min/max/compare verbs; today they are walked.
 - **Open from the 2.3.3 sweep:**

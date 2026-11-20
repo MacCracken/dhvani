@@ -4,7 +4,9 @@
 # Added in 2.3.3 for the P(-1) sweep's rewrites (storage walks, hoisted coefficients,
 # compare-and-wrap rings), which hotpath.bcyr and bench_compare.bcyr did not cover; the
 # onset and tempo rows since the streamed flux (after 2.3.3). Every
-# call here has the same signature in 2.3.2, so the file A/Bs across the two. Inputs
+# call here has the same signature in 2.3.2, so the file A/Bs across the two, except
+# the three compressor rows added in 2.3.4 (the multiband compressor is new there):
+# drop those to run the file on an older tree. Inputs
 # are in-band sines so the in-place, repeated processing stays bounded. Links abaco +
 # the assembled bundle, as a consumer does.
 
@@ -29,6 +31,8 @@ var _eq = 0;
 var _conv = 0;
 var _nr = 0;
 var _pan = 0;
+var _comp = 0;
+var _mbc = 0;
 
 fn b_svf()  { return dhvani_svf_process(_svf, _st512); }
 fn b_dly()  { return dhvani_delay_process(_dly, _st512); }
@@ -42,6 +46,9 @@ fn b_wave() { return dhvani_waveform_compute(_st1s, 100); }
 fn b_rsmp() { return dhvani_resample_sinc(_st1s, 48000, DH_RESAMPLE_GOOD); }
 fn b_ons()  { return dhvani_detect_onsets(_st1s, 2048, 512, 0.3); }
 fn b_tmpo() { return dhvani_detect_tempo(_st1s, 60.0, 200.0); }
+fn b_comp() { return dhvani_comp_process(_comp, _st512); }
+fn b_mbc()  { return dhvani_mbcomp_process(_mbc, _st512); }
+fn b_mbc1s() { return dhvani_mbcomp_process(_mbc, _st1s); }
 
 fn stereo_sine(frames, sr) {
     var v = vec_new();
@@ -78,6 +85,11 @@ fn main() {
     _conv = dhvani_conv_new(ir, F64_HALF, 44100);
     _nr = dhvani_noise_reducer_new();
     _pan = dhvani_pan_new(0.3);
+    _comp = dhvani_comp_new(dhvani_compparams_default(), 44100);
+    var mbx = vec_new();
+    vec_push(mbx, f64_from(200));
+    vec_push(mbx, f64_from(2000));
+    _mbc = dhvani_mbcomp_new(mbx, 44100, 2);
 
     bench_block("svf lp stereo 512   ", &b_svf, 5000);
     bench_block("delay stereo 512    ", &b_dly, 5000);
@@ -91,6 +103,9 @@ fn main() {
     bench_block("resample 1s st 48k  ", &b_rsmp, 10);
     bench_block("onsets 1s 2048/512  ", &b_ons, 50);
     bench_block("tempo 1s            ", &b_tmpo, 50);
+    bench_block("comp stereo 512     ", &b_comp, 5000);
+    bench_block("mbcomp 3b st 512    ", &b_mbc, 5000);
+    bench_block("mbcomp 3b 1s stereo ", &b_mbc1s, 50);
     return 0;
 }
 

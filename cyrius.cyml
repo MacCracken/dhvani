@@ -61,6 +61,7 @@ modules = [
     "src/noise_reduction.cyr",
     "src/eq.cyr",
     "src/deesser.cyr",
+    "src/multiband.cyr",        # 2.3.4: LR4 crossovers + a compressor per band (biquad + compressor)
     "src/ops.cyr",              # needs loudness (normalize_to_lufs)
     "src/meter.cyr",
     "src/midi_routing.cyr",

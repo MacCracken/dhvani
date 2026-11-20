@@ -254,6 +254,7 @@ confirm the link.
 | `buffer/ops` | 236 | B | 7 | buffer, error, (analysis) | crossfade → out-slice; `normalize_to_lufs` gated on analysis (defer that fn). |
 | `dsp/eq` | 465 | C | 14 | buffer, dsp/biquad | `BandType`→codes; `process()` dry clone → struct scratch. |
 | `dsp/deesser` | 323 | C | 7 | buffer, dsp/biquad | `mem::take` swap → explicit reuse; needs `FilterType::BandPass` code. |
+| `dsp/multiband` (new) | — | 2.3.4 | — | buffer, dsp/biquad, dsp/compressor | **Not a port**: rust-old has no multiband compressor, so ADR 007 is the reference. LR4 tree crossover with allpass compensation, one `DhCompressor` per band; 256-frame internal chunks, 0 bytes per call; 99 assertions against the analytic allpass identity. |
 | `dsp/convolution` | 424 | D | 8 | analysis/fft, buffer | partitioned convolution; needs fft. |
 | `dsp/noise_reduction` | 283 | D | 6 | analysis/fft, buffer | spectral subtraction; needs fft. |
 | `analysis/stft` | 262 | D | 4 | analysis, buffer, error | 4 per-frame scratch → preallocate. |

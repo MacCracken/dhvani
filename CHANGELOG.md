@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.4] — multiband compressor, streamed onset flux, MIDI min-center-max
+
+The first item of the post-2.0.0 "Advanced DSP" backlog: a multiband compressor (ADR 007).
+Also onset and tempo detection on a per-frame flux, MIDI 1.0 → 2.0 up-scaling on the spec's
+min-center-max rule (ADR 005), and ADR 006 on the math base. No dependency or toolchain
+change: every dep was already on its newest tag (checked against each remote on
+2026-11-20), and cyrius stays 6.7.18.
+
+**66 suites, 2,761 assertions, all green headless** (the CI shape, `/dev/snd` masked; 2.3.3
+had 65 / 2,612). `cyrius audit` passes: fmt, lint, tests and benches.
+
+### Added — multiband compressor (`src/multiband.cyr`, ADR 007)
+
+- **`dhvani_mbcomp_new(crossovers, sample_rate, channels)`**: 2 to 8 bands. The crossovers
+  are a vec of ascending Hz, each inside [1 Hz, 0.499 × rate]. Returns 0 on bad input.
+- **Signal path:**
+  - Linkwitz-Riley 4th-order crossovers: two cascaded Butterworth biquads per side, split
+    as a tree.
+  - Allpass compensation on the lower bands, then one `DhCompressor` per band, then the
+    sum.
+  - With no band compressing, the output is the input through the crossovers' allpasses:
+    flat magnitude, no latency.
+- **Control:**
+  - `set_band_params(band, params)`, validated and copied like `dhvani_comp_set_params`;
+  - `set_band_bypass` and `band_is_bypassed`;
+  - `band_gain_reduction_db` (NaN for a bad band);
+  - `set_crossovers` (same count; redesigns in place and keeps state);
+  - `set_sample_rate` (re-checks the crossovers against the new Nyquist);
+  - `reset`, `set_bypass` / `is_bypassed`;
+  - `num_bands`, `channels`, `sample_rate`, `crossover(i)`.
+- **Real time:** `process` walks the host block in 256-frame chunks through scratch made
+  in `new()`, so it allocates nothing for any block size. The chunking does not change a
+  bit of the output. The setters allocate nothing either.
+- **Bad input:**
+  - A NaN or ±Inf sample enters the crossover as 0, so no filter state is poisoned, and
+    the output is always finite.
+  - A buffer whose channel count differs from the instance's is refused with
+    `DHVANI_ERR_INVALID_CHANNELS` and left untouched.
+- **In the bundle:** `[lib].modules` now lists 55 modules, `src/multiband.cyr` after the
+  de-esser. `tests/bundle.tcyr` builds and runs one.
+- **`tests/multiband.tcyr`** (99 assertions, 14 groups). The reference is analytic, since
+  there is no oracle:
+  - uncompressed output against the allpass chain, ≤ 1e-9, for 2/3/4/8 bands, 1 to 3
+    channels and 44.1/48/96 kHz;
+  - a sine's level within 1e-6 at 50 Hz–12 kHz, crossovers included;
+  - compression stays inside its band (60 Hz vs 6 kHz, both ways);
+  - host blocks of 1–1000 frames give the same bits;
+  - 0 bytes per call;
+  - non-finite and max-magnitude input; channel mismatch, `frames` bounds, bypass;
+  - setter validation (refusals change nothing; params are copied);
+  - `set_crossovers` / `set_sample_rate` / `reset` equal a fresh instance bit for bit.
+  - **Mutation check.** Eight mutants are each caught: no compensation allpasses, LR2
+    instead of LR4, compensation at the wrong crossover, no input sanitize, chunk frames
+    not set, the top band dropped from the sum, `set_sample_rate` skipping the
+    compressors, `set_crossovers` skipping the allpasses.
+- **`tests/bench_dsp.bcyr`, three rows** (the mean of two runs, `BENCHMARKS.md`):
+  `comp stereo 512` (41.9 µs), `mbcomp 3b st 512` (216 µs, 5.2× one compressor) and
+  `mbcomp 3b 1s stereo` (23.2 ms per second of audio, 2.3% of a core).
+
+### Verified — the jalwa consumer
+
+- jalwa (the media player) builds against the Cyrius bundle. It pins dhvani 2.2.4's
+  `dist/dhvani.cyr`, with cyrius 6.6.3 and abaco 2.4.6.
+  - It calls 17 dhvani functions: graphic EQ and its settings, buffer construction,
+    RMS/peak, and `dhvani_analysis_suggest_gain`.
+  - It also calls one accessor, `DhGraphicEqSettings_set_enabled`.
+- Against 2.3.4:
+  - All 17 signatures and the `DhGraphicEqSettings` layout are unchanged since 2.2.4.
+  - jalwa's own `tests/dsp.tcyr` passes against the 2.3.4 bundle (42/42) on cyrius 6.7.18
+    with abaco 2.8.0. It was run from a scratch harness; jalwa's tree was not changed.
+- 2.3.3 copies the graphic EQ's settings into the EQ. jalwa is unaffected: it re-sends its
+  settings through `dhvani_geq_set_settings` before each use.
+- jalwa moves to 2.3.4 by bumping its own pins: cyrius 6.7.18, abaco 2.8.0, dhvani 2.3.4.
+
 ### Changed
 
 - **MIDI 1.0 → 2.0 up-scaling is the MIDI 2.0 spec's min-center-max rule** (ADR 005,

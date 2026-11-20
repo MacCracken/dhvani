@@ -1,0 +1,485 @@
+# multiband.tcyr -- tests for src/multiband.cyr (new in 2.3.4; no rust-old oracle).
+# The reference for the crossover is analytic: with every band uncompressed, the
+# multiband output must equal the input through the RBJ allpasses at the crossovers in
+# series (an LR4 lowpass plus its highpass is that allpass), and so keep a sine's level
+# at every frequency. Design: docs/decisions/007-multiband-compressor.md.
+
+include "src/error.cyr"
+include "src/simd.cyr"
+include "src/buffer.cyr"
+include "lib/abaco.cyr"
+include "src/dsp.cyr"
+include "src/biquad.cyr"
+include "src/compressor.cyr"
+include "src/multiband.cyr"
+
+alloc_init();
+
+# ---- helpers ----
+# float compares (assert_lt / assert_gt compare the bit patterns as integers)
+fn assert_flt(a, b, name) { return assert(f64_lt(a, b) == 1, name); }
+fn assert_fgt(a, b, name) { return assert(f64_gt(a, b) == 1, name); }
+var _seed = 12345;
+# deterministic noise in [-0.5, 0.5)
+fn noise() {
+    _seed = (_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return f64_sub(f64_div(f64_from(_seed), 2147483648.0), F64_HALF);
+}
+fn noise_buf(frames, ch, sr) {
+    var v = dh_vec_zeros(frames * ch);
+    var i = 0;
+    while (i < frames * ch) { vec_set(v, i, noise()); i = i + 1; }
+    return dhvani_buffer_from_interleaved(v, ch, sr);
+}
+# amp * sin(2 pi f i / sr) on every channel
+fn sine_buf(freq, amp, frames, ch, sr) {
+    var v = dh_vec_zeros(frames * ch);
+    var i = 0;
+    while (i < frames) {
+        var ph = f64_div(f64_mul(f64_mul(F64_TAU, freq), f64_from(i)), f64_from(sr));
+        var x = f64_mul(amp, f64_sin(ph));
+        var c = 0;
+        while (c < ch) { vec_set(v, i * ch + c, x); c = c + 1; }
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(v, ch, sr);
+}
+fn copy_buf(b) {
+    return dhvani_buffer_from_interleaved(dh_vec_copy(dhvani_buffer_samples(b)), DhAudioBuffer_channels(b),
+      DhAudioBuffer_sample_rate(b));
+}
+fn same_bits(a, b) {
+    var x = dhvani_buffer_samples(a);
+    var y = dhvani_buffer_samples(b);
+    if (vec_len(x) != vec_len(y)) { return 0; }
+    var i = 0;
+    while (i < vec_len(x)) { if (vec_get(x, i) != vec_get(y, i)) { return 0; } i = i + 1; }
+    return 1;
+}
+fn max_diff(a, b) {
+    var x = dhvani_buffer_samples(a);
+    var y = dhvani_buffer_samples(b);
+    var m = 0;
+    var i = 0;
+    while (i < vec_len(x)) {
+        var d = f64_abs(f64_sub(vec_get(x, i), vec_get(y, i)));
+        if (f64_gt(d, m) == 1) { m = d; }
+        if (f64_eq(d, d) == 0) { m = DH_POS_INF; }
+        i = i + 1;
+    }
+    return m;
+}
+fn all_finite(b) {
+    var s = dhvani_buffer_samples(b);
+    var i = 0;
+    while (i < vec_len(s)) { if (dhvani_is_finite(vec_get(s, i)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+# RMS of channel 0 over frames [from, to)
+fn rms_tail(b, from, to) {
+    var s = dhvani_buffer_samples(b);
+    var ch = DhAudioBuffer_channels(b);
+    var acc = 0;
+    var i = from;
+    while (i < to) { var x = vec_get(s, i * ch); acc = f64_add(acc, f64_mul(x, x)); i = i + 1; }
+    return f64_sqrt(f64_div(acc, f64_from(to - from)));
+}
+fn xs1(a) { var v = vec_new(); vec_push(v, a); return v; }
+fn xs2(a, b) { var v = xs1(a); vec_push(v, b); return v; }
+fn xs3(a, b, c) { var v = xs2(a, b); vec_push(v, c); return v; }
+# n log-spaced-ish ascending crossovers from 100 Hz, doubling
+fn xs_n(n) {
+    var v = vec_new();
+    var f = 100.0;
+    var i = 0;
+    while (i < n) { vec_push(v, f); f = f64_mul(f, 2.0); i = i + 1; }
+    return v;
+}
+fn params_flat() { return dhvani_compparams_new(f64_neg(20.0), 1.0, 10.0, 100.0, 0, 0, 1.0); }
+fn make_transparent(mb) {
+    var k = 0;
+    while (k < dhvani_mbcomp_num_bands(mb)) { dhvani_mbcomp_set_band_params(mb, k, params_flat()); k = k + 1; }
+    return mb;
+}
+# band k gets a distinct, active setting (so every compressor works in the chunk tests)
+fn make_active(mb) {
+    var k = 0;
+    while (k < dhvani_mbcomp_num_bands(mb)) {
+        var thr = f64_neg(f64_add(18.0, f64_from(k * 3)));
+        var mix = f64_sub(1.0, f64_mul(0.1, f64_from(k)));
+        dhvani_mbcomp_set_band_params(mb, k, dhvani_compparams_new(thr, f64_add(2.0, f64_from(k)), 1.0, 30.0,
+            3.0, 6.0, mix));
+        k = k + 1;
+    }
+    return mb;
+}
+# the input through the RBJ allpass (Q = 1/sqrt(2)) at each crossover, in series
+fn ref_allpass(b, xs) {
+    var out = copy_buf(b);
+    var j = 0;
+    while (j < vec_len(xs)) {
+        var ap = dhvani_biquad_new(DH_BQ_ALLPASS, 0, vec_get(xs, j), f64_sqrt(F64_HALF), DhAudioBuffer_sample_rate(b),
+          DhAudioBuffer_channels(b));
+        dhvani_biquad_process(ap, out);
+        j = j + 1;
+    }
+    return out;
+}
+# transparent multiband vs the allpass chain, for this crossover set / channel count
+fn transparent_err(xs, ch, sr, frames) {
+    var mb = make_transparent(dhvani_mbcomp_new(xs, sr, ch));
+    var b = noise_buf(frames, ch, sr);
+    var want = ref_allpass(b, xs);
+    dhvani_mbcomp_process(mb, b);
+    return max_diff(b, want);
+}
+
+# ---- new_validates ----
+test_group("new_validates");
+var nv = dhvani_mbcomp_new(xs2(200.0, 2000.0), 48000, 2);
+assert_neq(nv, 0, "3 bands at 48 kHz stereo");
+assert_eq(dhvani_mbcomp_num_bands(nv), 3, "num_bands = crossovers + 1");
+assert_eq(dhvani_mbcomp_channels(nv), 2, "channels");
+assert_eq(dhvani_mbcomp_sample_rate(nv), 48000, "sample_rate");
+assert_eq(dhvani_mbcomp_crossover(nv, 0), 200.0, "crossover 0");
+assert_eq(dhvani_mbcomp_crossover(nv, 1), 2000.0, "crossover 1");
+assert_eq(dhvani_is_finite(dhvani_mbcomp_crossover(nv, 2)), 0, "crossover past the end is NaN");
+assert_eq(dhvani_is_finite(dhvani_mbcomp_crossover(nv, 0 - 1)), 0, "crossover -1 is NaN");
+assert_eq(dhvani_mbcomp_is_bypassed(nv), 0, "not bypassed");
+assert_neq(dhvani_mbcomp_new(xs_n(DH_MBC_MAX_BANDS - 1), 48000, 1), 0, "the maximum band count");
+assert_eq(dhvani_mbcomp_new(xs_n(DH_MBC_MAX_BANDS), 48000, 1), 0, "one band too many");
+assert_eq(dhvani_mbcomp_new(vec_new(), 48000, 1), 0, "no crossover (one band)");
+assert_eq(dhvani_mbcomp_new(0, 48000, 1), 0, "null crossover vec");
+assert_eq(dhvani_mbcomp_new(xs2(2000.0, 200.0), 48000, 1), 0, "descending");
+assert_eq(dhvani_mbcomp_new(xs2(500.0, 500.0), 48000, 1), 0, "equal neighbours");
+assert_eq(dhvani_mbcomp_new(xs1(DH_NAN), 48000, 1), 0, "NaN crossover");
+assert_eq(dhvani_mbcomp_new(xs2(200.0, DH_NAN), 48000, 1), 0, "NaN second crossover");
+assert_eq(dhvani_mbcomp_new(xs1(0), 48000, 1), 0, "0 Hz");
+assert_eq(dhvani_mbcomp_new(xs1(f64_neg(100.0)), 48000, 1), 0, "negative Hz");
+assert_eq(dhvani_mbcomp_new(xs1(F64_HALF), 48000, 1), 0, "under the 1 Hz design floor");
+assert_neq(dhvani_mbcomp_new(xs1(1.0), 48000, 1), 0, "1 Hz is the floor itself");
+assert_neq(dhvani_mbcomp_new(xs1(22005.0), 44100, 1), 0, "just under 0.499 * 44100");
+assert_eq(dhvani_mbcomp_new(xs1(22006.0), 44100, 1), 0, "past 0.499 * 44100");
+assert_eq(dhvani_mbcomp_new(xs1(DH_POS_INF), 48000, 1), 0, "+Inf crossover");
+assert_eq(dhvani_mbcomp_new(xs1(1000.0), 48000, 0), 0, "0 channels");
+assert_eq(dhvani_mbcomp_new(xs1(1000.0), 48000, 0 - 1), 0, "negative channels");
+assert_eq(dhvani_mbcomp_new(xs1(1000.0), 48000, VEC_CAP_MAX), 0, "scratch too large for a vec");
+assert_eq(dhvani_mbcomp_new(xs1(1000.0), 0, 1), 0, "rate 0");
+assert_eq(dhvani_mbcomp_new(xs1(1000.0), 0 - 48000, 1), 0, "negative rate");
+assert_eq(dhvani_mbcomp_new(xs1(1000.0), DH_MAX_SAMPLE_RATE + 1, 1), 0, "rate past the max");
+assert_eq(dhvani_mbcomp_new(xs1(1.0), 2, 1), 0, "rate 2: Nyquist under the 1 Hz floor");
+var nv_in = xs2(200.0, 2000.0);
+var nv2 = dhvani_mbcomp_new(nv_in, 48000, 1);
+vec_set(nv_in, 0, 900.0);
+assert_eq(dhvani_mbcomp_crossover(nv2, 0), 200.0, "the crossover vec is copied");
+
+# ---- transparent_is_the_allpass_chain ----
+# Every band at ratio 1: the output is the allpass chain, to rounding, for 2..8 bands,
+# mono and stereo (stereo takes the biquad's cross-channel fast path).
+test_group("transparent_is_the_allpass_chain");
+var tol = 0.000000001;   # 1e-9 on +-0.5 noise; a missing compensation stage errs by ~0.1
+assert_flt(transparent_err(xs1(1000.0), 1, 48000, 3000), tol, "2 bands mono");
+assert_flt(transparent_err(xs1(1000.0), 2, 48000, 3000), tol, "2 bands stereo");
+assert_flt(transparent_err(xs2(200.0, 2000.0), 1, 48000, 3000), tol, "3 bands mono");
+assert_flt(transparent_err(xs2(200.0, 2000.0), 2, 44100, 3000), tol, "3 bands stereo 44.1k");
+assert_flt(transparent_err(xs3(120.0, 1000.0, 6000.0), 2, 48000, 3000), tol, "4 bands stereo");
+assert_flt(transparent_err(xs3(120.0, 1000.0, 6000.0), 3, 96000, 3000), tol, "4 bands 3 channels 96k");
+assert_flt(transparent_err(xs_n(DH_MBC_MAX_BANDS - 1), 2, 48000, 3000), tol, "8 bands stereo");
+var tb = noise_buf(600, 2, 48000);
+var tb0 = copy_buf(tb);
+dhvani_mbcomp_process(make_transparent(dhvani_mbcomp_new(xs2(200.0, 2000.0), 48000, 2)), tb);
+assert_eq(same_bits(tb, tb0), 0, "the output is phase-shifted, not a copy");
+
+# ---- transparent_magnitude_is_flat ----
+# A sine keeps its level through the uncompressed bands at every frequency, including
+# on a crossover (each band alone is -6 dB there). RMS over whole periods after 0.3 s.
+test_group("transparent_magnitude_is_flat");
+var fl_xs = xs2(200.0, 2000.0);
+var fl_f = vec_new();
+vec_push(fl_f, 50.0);
+vec_push(fl_f, 200.0);
+vec_push(fl_f, 1000.0);
+vec_push(fl_f, 2000.0);
+vec_push(fl_f, 6000.0);
+vec_push(fl_f, 12000.0);
+var fl_i = 0;
+var fl_worst = 0;
+while (fl_i < vec_len(fl_f)) {
+    var fl_mb = make_transparent(dhvani_mbcomp_new(fl_xs, 48000, 2));
+    var fl_b = sine_buf(vec_get(fl_f, fl_i), F64_HALF, 24000, 2, 48000);
+    dhvani_mbcomp_process(fl_mb, fl_b);
+    var fl_r = rms_tail(fl_b, 14400, 24000);
+    var fl_e = f64_abs(f64_sub(f64_div(fl_r, f64_div(F64_HALF, f64_sqrt(2.0))), 1.0));
+    if (f64_gt(fl_e, fl_worst) == 1) { fl_worst = fl_e; }
+    fl_i = fl_i + 1;
+}
+assert_flt(fl_worst, 0.000001, "level within 1e-6 at 50 Hz .. 12 kHz");
+
+# ---- band_compression_is_band_local ----
+# Only band 0 compresses: a 60 Hz sine is pulled down hard and a 6 kHz sine passes at
+# its level; then the same with only band 2.
+test_group("band_compression_is_band_local");
+fn hard_params() { return dhvani_compparams_new(f64_neg(40.0), 20.0, 0.1, 50.0, 0, 0, 1.0); }
+fn one_band_level(band, freq) {
+    var mb = make_transparent(dhvani_mbcomp_new(xs2(200.0, 2000.0), 48000, 2));
+    dhvani_mbcomp_set_band_params(mb, band, hard_params());
+    var b = sine_buf(freq, F64_HALF, 24000, 2, 48000);
+    dhvani_mbcomp_process(mb, b);
+    return f64_div(rms_tail(b, 14400, 24000), f64_div(F64_HALF, f64_sqrt(2.0)));
+}
+assert_flt(one_band_level(0, 60.0), 0.2, "low band compressed: 60 Hz pulled down");
+assert_flt(f64_abs(f64_sub(one_band_level(0, 6000.0), 1.0)), 0.001, "low band compressed: 6 kHz at its level");
+assert_flt(one_band_level(2, 6000.0), 0.2, "high band compressed: 6 kHz pulled down");
+assert_flt(f64_abs(f64_sub(one_band_level(2, 60.0), 1.0)), 0.001, "high band compressed: 60 Hz at its level");
+var gr_mb = make_transparent(dhvani_mbcomp_new(xs2(200.0, 2000.0), 48000, 2));
+dhvani_mbcomp_set_band_params(gr_mb, 0, hard_params());
+dhvani_mbcomp_process(gr_mb, sine_buf(60.0, F64_HALF, 4800, 2, 48000));
+assert_flt(dhvani_mbcomp_band_gain_reduction_db(gr_mb, 0), f64_neg(20.0), "band 0 reports its gain reduction");
+assert_eq(dhvani_mbcomp_band_gain_reduction_db(gr_mb, 1), 0, "an uncompressed band reports 0 dB");
+assert_eq(dhvani_is_finite(dhvani_mbcomp_band_gain_reduction_db(gr_mb, 3)), 0, "band past the end is NaN");
+assert_eq(dhvani_is_finite(dhvani_mbcomp_band_gain_reduction_db(gr_mb, 0 - 1)), 0, "band -1 is NaN");
+
+# ---- chunking_does_not_change_output ----
+# One 2000-frame call against the same audio in host blocks of 1, 7, 255, 256, 257 and
+# 1000 frames (and the rest): the output and every band's gain reduction, bit for bit.
+test_group("chunking_does_not_change_output");
+fn split_run(mb, src, sizes) {
+    var ch = DhAudioBuffer_channels(src);
+    var s = dhvani_buffer_samples(src);
+    var frames = vec_len(s) / ch;
+    var out = dh_vec_zeros(frames * ch);
+    var at = 0;
+    var i = 0;
+    while (at < frames) {
+        var n = frames - at;
+        if (i < vec_len(sizes)) { n = dh_imin(vec_get(sizes, i), n); }
+        var piece = dh_vec_zeros(n * ch);
+        var k = 0;
+        while (k < n * ch) { vec_set(piece, k, vec_get(s, at * ch + k)); k = k + 1; }
+        var pb = dhvani_buffer_from_interleaved(piece, ch, DhAudioBuffer_sample_rate(src));
+        dhvani_mbcomp_process(mb, pb);
+        k = 0;
+        while (k < n * ch) { vec_set(out, at * ch + k, vec_get(piece, k)); k = k + 1; }
+        at = at + n;
+        i = i + 1;
+    }
+    return dhvani_buffer_from_interleaved(out, ch, DhAudioBuffer_sample_rate(src));
+}
+var ck_src = noise_buf(2000, 2, 48000);
+var ck_one = copy_buf(ck_src);
+var ck_a = make_active(dhvani_mbcomp_new(xs3(150.0, 1500.0, 7000.0), 48000, 2));
+dhvani_mbcomp_process(ck_a, ck_one);
+var ck_sizes = vec_new();
+vec_push(ck_sizes, 1);
+vec_push(ck_sizes, 7);
+vec_push(ck_sizes, 255);
+vec_push(ck_sizes, 256);
+vec_push(ck_sizes, 257);
+vec_push(ck_sizes, 1000);
+var ck_b = make_active(dhvani_mbcomp_new(xs3(150.0, 1500.0, 7000.0), 48000, 2));
+var ck_split = split_run(ck_b, ck_src, ck_sizes);
+assert_eq(same_bits(ck_one, ck_split), 1, "split host blocks: same output bits");
+var ck_gr = 1;
+var ck_k = 0;
+while (ck_k < 4) {
+    if (dhvani_mbcomp_band_gain_reduction_db(ck_a, ck_k) != dhvani_mbcomp_band_gain_reduction_db(ck_b, ck_k)) {
+        ck_gr = 0;
+    }
+    ck_k = ck_k + 1;
+}
+assert_eq(ck_gr, 1, "split host blocks: same gain reduction in every band");
+var ck_m = make_active(dhvani_mbcomp_new(xs2(300.0, 3000.0), 44100, 1));
+var ck_m1 = noise_buf(1500, 1, 44100);
+var ck_m2 = split_run(make_active(dhvani_mbcomp_new(xs2(300.0, 3000.0), 44100, 1)), ck_m1, ck_sizes);
+dhvani_mbcomp_process(ck_m, ck_m1);
+assert_eq(same_bits(ck_m1, ck_m2), 1, "mono: same output bits");
+
+# ---- process_allocates_nothing ----
+test_group("process_allocates_nothing");
+var al_mb = make_active(dhvani_mbcomp_new(xs3(120.0, 1000.0, 6000.0), 48000, 2));
+var al_b = noise_buf(10000, 2, 48000);
+var al_u = alloc_used();
+dhvani_mbcomp_process(al_mb, al_b);
+dhvani_mbcomp_process(al_mb, al_b);
+assert_eq(alloc_used() - al_u, 0, "two 10000-frame stereo blocks, 4 bands: 0 bytes");
+var al_p = dhvani_compparams_new(f64_neg(30.0), 3.0, 2.0, 40.0, 0, 0, 1.0);
+var al_x = xs3(100.0, 900.0, 5000.0);
+al_u = alloc_used();
+dhvani_mbcomp_set_band_params(al_mb, 1, al_p);
+dhvani_mbcomp_set_crossovers(al_mb, al_x);
+dhvani_mbcomp_set_sample_rate(al_mb, 44100);
+dhvani_mbcomp_reset(al_mb);
+dhvani_mbcomp_set_band_bypass(al_mb, 2, 1);
+assert_eq(alloc_used() - al_u, 0, "set_band_params, set_crossovers, set_sample_rate, reset: 0 bytes");
+
+# ---- non_finite_input_enters_as_zero ----
+# NaN / +-Inf samples are silence to the crossover: the output is, bit for bit, the
+# output for the same audio with 0 there, and finite throughout.
+test_group("non_finite_input_enters_as_zero");
+var nf_bad = noise_buf(1200, 2, 48000);
+var nf_s = dhvani_buffer_samples(nf_bad);
+vec_set(nf_s, 10, DH_NAN);
+vec_set(nf_s, 301, DH_POS_INF);
+vec_set(nf_s, 302, f64_neg(DH_POS_INF));
+vec_set(nf_s, 1999, DH_NAN);
+var nf_zero = copy_buf(nf_bad);
+var nf_zs = dhvani_buffer_samples(nf_zero);
+vec_set(nf_zs, 10, 0);
+vec_set(nf_zs, 301, 0);
+vec_set(nf_zs, 302, 0);
+vec_set(nf_zs, 1999, 0);
+dhvani_mbcomp_process(make_active(dhvani_mbcomp_new(xs2(200.0, 2000.0), 48000, 2)), nf_bad);
+dhvani_mbcomp_process(make_active(dhvani_mbcomp_new(xs2(200.0, 2000.0), 48000, 2)), nf_zero);
+assert_eq(all_finite(nf_bad), 1, "every output sample finite");
+assert_eq(same_bits(nf_bad, nf_zero), 1, "same bits as zeros in those slots");
+# finite but huge input can overflow a filter; the output stays finite and the next
+# block is normal audio again
+var nf_mb = make_transparent(dhvani_mbcomp_new(xs1(1000.0), 48000, 1));
+var nf_h = dh_vec_zeros(512);
+var nf_i = 0;
+while (nf_i < 512) {
+    var nf_v = 0x7FEFFFFFFFFFFFFF;   # the largest finite f64
+    if ((nf_i & 1) == 1) { nf_v = f64_neg(nf_v); }
+    vec_set(nf_h, nf_i, nf_v);
+    nf_i = nf_i + 1;
+}
+var nf_hb = dhvani_buffer_from_interleaved(nf_h, 1, 48000);
+dhvani_mbcomp_process(nf_mb, nf_hb);
+assert_eq(all_finite(nf_hb), 1, "max-magnitude input: every output sample finite");
+var nf_next = sine_buf(440.0, F64_HALF, 4800, 1, 48000);
+dhvani_mbcomp_process(nf_mb, nf_next);
+assert_eq(all_finite(nf_next), 1, "the next block is finite");
+assert_fgt(rms_tail(nf_next, 2400, 4800), 0.3, "and carries the signal");
+
+# ---- channel_mismatch_refused ----
+test_group("channel_mismatch_refused");
+var cm_mb = dhvani_mbcomp_new(xs1(1000.0), 48000, 2);
+var cm_b = noise_buf(300, 1, 48000);
+var cm_0 = copy_buf(cm_b);
+assert_eq(dhvani_mbcomp_process(cm_mb, cm_b), DHVANI_ERR_INVALID_CHANNELS, "mono into stereo: refused");
+assert_eq(same_bits(cm_b, cm_0), 1, "the buffer is untouched");
+var cm_c = noise_buf(300, 3, 48000);
+assert_eq(dhvani_mbcomp_process(cm_mb, cm_c), DHVANI_ERR_INVALID_CHANNELS, "3 channels into stereo: refused");
+assert_eq(dhvani_mbcomp_process(cm_mb, noise_buf(300, 2, 48000)), 0, "matching channels: 0");
+assert_eq(dhvani_mbcomp_process(cm_mb, dhvani_buffer_silence(2, 0, 48000)), 0, "empty buffer: 0");
+
+# ---- frames_field_bounds_the_walk ----
+test_group("frames_field_bounds_the_walk");
+var fw_b = noise_buf(1000, 2, 48000);
+var fw_0 = copy_buf(fw_b);
+DhAudioBuffer_set_frames(fw_b, 600);
+dhvani_mbcomp_process(make_active(dhvani_mbcomp_new(xs1(1000.0), 48000, 2)), fw_b);
+var fw_s = dhvani_buffer_samples(fw_b);
+var fw_t = dhvani_buffer_samples(fw_0);
+var fw_ok = 1;
+var fw_i = 1200;
+while (fw_i < 2000) { if (vec_get(fw_s, fw_i) != vec_get(fw_t, fw_i)) { fw_ok = 0; } fw_i = fw_i + 1; }
+assert_eq(fw_ok, 1, "samples past `frames` untouched");
+assert_neq(vec_get(fw_s, 1199), vec_get(fw_t, 1199), "the last frame inside `frames` is processed");
+DhAudioBuffer_set_frames(fw_b, 5000);
+assert_eq(dhvani_mbcomp_process(make_active(dhvani_mbcomp_new(xs1(1000.0), 48000, 2)), fw_b), 0,
+  "frames past the storage: walks the storage only");
+
+# ---- bypass ----
+test_group("bypass");
+var by_mb = make_active(dhvani_mbcomp_new(xs2(200.0, 2000.0), 48000, 2));
+dhvani_mbcomp_set_bypass(by_mb, 1);
+assert_eq(dhvani_mbcomp_is_bypassed(by_mb), 1, "is_bypassed");
+var by_b = noise_buf(700, 2, 48000);
+var by_0 = copy_buf(by_b);
+dhvani_mbcomp_process(by_mb, by_b);
+assert_eq(same_bits(by_b, by_0), 1, "bypassed: buffer untouched");
+dhvani_mbcomp_set_bypass(by_mb, 0);
+var by_k = 0;
+while (by_k < 3) { dhvani_mbcomp_set_band_bypass(by_mb, by_k, 1); by_k = by_k + 1; }
+assert_eq(dhvani_mbcomp_band_is_bypassed(by_mb, 1), 1, "band_is_bypassed");
+assert_eq(dhvani_mbcomp_band_is_bypassed(by_mb, 7), 0, "band out of range: 0");
+var by_want = ref_allpass(by_b, xs2(200.0, 2000.0));
+dhvani_mbcomp_process(by_mb, by_b);
+assert_flt(max_diff(by_b, by_want), tol, "every band bypassed: the allpass chain");
+assert_eq(dhvani_mbcomp_set_band_bypass(by_mb, 3, 1), DHVANI_ERR_INVALID_PARAMETER, "band 3 of 3: refused");
+assert_eq(dhvani_mbcomp_set_band_bypass(by_mb, 0 - 1, 1), DHVANI_ERR_INVALID_PARAMETER, "band -1: refused");
+
+# ---- set_band_params_validates ----
+test_group("set_band_params_validates");
+var sp_mb = dhvani_mbcomp_new(xs1(1000.0), 48000, 1);
+var sp_ok = dhvani_compparams_new(f64_neg(10.0), 2.0, 1.0, 10.0, 0, 0, 1.0);
+assert_eq(dhvani_mbcomp_set_band_params(sp_mb, 1, sp_ok), DHVANI_ERR_NONE, "band 1: accepted");
+assert_eq(dhvani_mbcomp_set_band_params(sp_mb, 2, sp_ok), DHVANI_ERR_INVALID_PARAMETER, "band 2 of 2: refused");
+assert_eq(dhvani_mbcomp_set_band_params(sp_mb, 0 - 1, sp_ok), DHVANI_ERR_INVALID_PARAMETER, "band -1: refused");
+var sp_bad = dhvani_compparams_new(f64_neg(10.0), F64_HALF, 1.0, 10.0, 0, 0, 1.0);
+assert_eq(dhvani_mbcomp_set_band_params(sp_mb, 0, sp_bad), DHVANI_ERR_INVALID_PARAMETER, "ratio 0.5: refused");
+var sp_nan = dhvani_compparams_new(f64_neg(10.0), 2.0, DH_NAN, 10.0, 0, 0, 1.0);
+assert_eq(dhvani_mbcomp_set_band_params(sp_mb, 0, sp_nan), DHVANI_ERR_INVALID_PARAMETER, "NaN attack: refused");
+# a refused change leaves the band as it was: band 0 still on the defaults (ratio 4)
+var sp_ref = dhvani_mbcomp_new(xs1(1000.0), 48000, 1);
+dhvani_mbcomp_set_band_params(sp_ref, 1, sp_ok);
+var sp_b1 = noise_buf(800, 1, 48000);
+var sp_b2 = copy_buf(sp_b1);
+dhvani_mbcomp_process(sp_mb, sp_b1);
+dhvani_mbcomp_process(sp_ref, sp_b2);
+assert_eq(same_bits(sp_b1, sp_b2), 1, "refused params changed nothing");
+# the params are copied: a later change to the caller's handle does not reach the band
+var sp_c1 = dhvani_mbcomp_new(xs1(1000.0), 48000, 1);
+var sp_c2 = dhvani_mbcomp_new(xs1(1000.0), 48000, 1);
+var sp_h = dhvani_compparams_new(f64_neg(30.0), 8.0, 1.0, 10.0, 0, 0, 1.0);
+dhvani_mbcomp_set_band_params(sp_c1, 0, sp_h);
+dhvani_mbcomp_set_band_params(sp_c2, 0, dhvani_compparams_new(f64_neg(30.0), 8.0, 1.0, 10.0, 0, 0, 1.0));
+DhCompressorParams_set_ratio(sp_h, F64_HALF);
+var sp_d1 = noise_buf(800, 1, 48000);
+var sp_d2 = copy_buf(sp_d1);
+dhvani_mbcomp_process(sp_c1, sp_d1);
+dhvani_mbcomp_process(sp_c2, sp_d2);
+assert_eq(same_bits(sp_d1, sp_d2), 1, "the band params are copied");
+
+# ---- set_crossovers ----
+test_group("set_crossovers");
+var sc_mb = make_active(dhvani_mbcomp_new(xs2(200.0, 2000.0), 48000, 2));
+assert_eq(dhvani_mbcomp_set_crossovers(sc_mb, xs1(500.0)), DHVANI_ERR_INVALID_PARAMETER, "fewer crossovers: refused");
+assert_eq(dhvani_mbcomp_set_crossovers(sc_mb, xs3(100.0, 200.0, 300.0)), DHVANI_ERR_INVALID_PARAMETER,
+  "more crossovers: refused");
+assert_eq(dhvani_mbcomp_set_crossovers(sc_mb, xs2(3000.0, 300.0)), DHVANI_ERR_INVALID_PARAMETER, "descending: refused");
+assert_eq(dhvani_mbcomp_set_crossovers(sc_mb, xs2(300.0, DH_NAN)), DHVANI_ERR_INVALID_PARAMETER, "NaN: refused");
+assert_eq(dhvani_mbcomp_crossover(sc_mb, 1), 2000.0, "a refused set changes nothing");
+assert_eq(dhvani_mbcomp_set_crossovers(sc_mb, xs2(300.0, 3000.0)), DHVANI_ERR_NONE, "300 / 3000: accepted");
+assert_eq(dhvani_mbcomp_crossover(sc_mb, 0), 300.0, "crossover 0 moved");
+assert_eq(dhvani_mbcomp_crossover(sc_mb, 1), 3000.0, "crossover 1 moved");
+var sc_b1 = noise_buf(1000, 2, 48000);
+var sc_b2 = copy_buf(sc_b1);
+dhvani_mbcomp_process(sc_mb, sc_b1);
+dhvani_mbcomp_process(make_active(dhvani_mbcomp_new(xs2(300.0, 3000.0), 48000, 2)), sc_b2);
+assert_eq(same_bits(sc_b1, sc_b2), 1, "moved crossovers: bit for bit a new instance at them");
+
+# ---- set_sample_rate ----
+test_group("set_sample_rate");
+var sr_mb = make_active(dhvani_mbcomp_new(xs2(200.0, 2000.0), 48000, 2));
+assert_eq(dhvani_mbcomp_set_sample_rate(sr_mb, 0), DHVANI_ERR_INVALID_SAMPLE_RATE, "rate 0: refused");
+assert_eq(dhvani_mbcomp_set_sample_rate(sr_mb, 4000), DHVANI_ERR_INVALID_PARAMETER,
+  "4 kHz: 2000 Hz is past its 0.499 Nyquist, refused");
+assert_eq(dhvani_mbcomp_sample_rate(sr_mb), 48000, "a refused rate changes nothing");
+assert_eq(dhvani_mbcomp_set_sample_rate(sr_mb, 96000), DHVANI_ERR_NONE, "96 kHz: accepted");
+assert_eq(dhvani_mbcomp_sample_rate(sr_mb), 96000, "rate moved");
+var sr_b1 = noise_buf(1000, 2, 96000);
+var sr_b2 = copy_buf(sr_b1);
+dhvani_mbcomp_process(sr_mb, sr_b1);
+dhvani_mbcomp_process(make_active(dhvani_mbcomp_new(xs2(200.0, 2000.0), 96000, 2)), sr_b2);
+assert_eq(same_bits(sr_b1, sr_b2), 1, "new rate: bit for bit a new instance at it (filters and compressors)");
+
+# ---- reset_matches_fresh ----
+test_group("reset_matches_fresh");
+var rs_mb = make_active(dhvani_mbcomp_new(xs3(150.0, 1500.0, 7000.0), 48000, 2));
+dhvani_mbcomp_process(rs_mb, noise_buf(3000, 2, 48000));
+assert_flt(dhvani_mbcomp_band_gain_reduction_db(rs_mb, 3), 0, "band 3 was compressing");
+dhvani_mbcomp_reset(rs_mb);
+var rs_gr = 1;
+var rs_k = 0;
+while (rs_k < 4) { if (dhvani_mbcomp_band_gain_reduction_db(rs_mb, rs_k) != 0) { rs_gr = 0; } rs_k = rs_k + 1; }
+assert_eq(rs_gr, 1, "reset clears every band's gain reduction");
+var rs_b1 = noise_buf(900, 2, 48000);
+var rs_b2 = copy_buf(rs_b1);
+dhvani_mbcomp_process(rs_mb, rs_b1);
+dhvani_mbcomp_process(make_active(dhvani_mbcomp_new(xs3(150.0, 1500.0, 7000.0), 48000, 2)), rs_b2);
+assert_eq(same_bits(rs_b1, rs_b2), 1, "after reset: bit for bit a new instance");
+
+var rc = assert_summary();
+syscall(60, rc);

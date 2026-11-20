@@ -132,7 +132,31 @@ each cell is the mean of the two runs. **No path regressed**; every delta is wit
 | dynamics mono_1s | 4.52 ms | 4.47 ms | −1.2 % |
 | fft 4096 mono | 3.08 ms | 3.10 ms | +0.6 % |
 
-## Unreleased (on 2.3.3) — the streamed spectral flux (same box, one session, interleaved)
+## 2.3.4 — the multiband compressor (new rows, no A/B)
+
+`src/multiband.cyr` is new in 2.3.4, so there is no older tree to A/B it against. The rows
+put it next to the lone compressor it is built from, on the same 512-frame stereo sine
+block at 44.1 kHz. Both run on the default compressor params, and the multiband
+compressor has 3 bands at 200 / 2000 Hz. Two runs of `tests/bench_dsp.bcyr` in one session;
+each cell is their mean.
+
+| per call (`tests/bench_dsp.bcyr`) | mean | ratio |
+|----------|------:|------:|
+| `comp stereo 512` (one compressor) | 41.9 µs | 1× |
+| `mbcomp 3b st 512` (3 bands) | **216 µs** | 5.2× |
+| `mbcomp 3b 1s stereo` (44,100 frames) | **23.2 ms** | — |
+
+- **Where the time goes.** Three compressors account for about 60% of it, and nine
+  biquad passes for about a third. The nine passes are four per crossover plus one
+  compensation allpass, all on the stereo fast path.
+- **Real time.** One second of stereo takes 23.2 ms, 2.3% of one core.
+- **Memory.** It allocates nothing per call (`tests/multiband.tcyr` asserts 0 bytes).
+- **Existing paths.** The only other code change since the flux A/B below is MIDI
+  translation, which runs per event and has no bench row. So the existing rows have no new
+  A/B for 2.3.4. They ran in both sessions here, and moved only with the box's drift
+  between runs (about 5%, all rows together).
+
+## 2.3.4 — the streamed spectral flux (same box, one session, interleaved)
 
 The 2.3.3 tag against the working tree, each run twice in the order 2.3.3 → new → 2.3.3 →
 new; every cell is the mean of its two runs. The two rows were added to

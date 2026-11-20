@@ -15,6 +15,7 @@ Cyrius runs a **free-less bump allocator**: an allocation is never reclaimed, so
 | `BiquadFilter` | `dsp::biquad` | `process()` and `process_sample()` — no allocation, fixed state |
 | `SvfFilter` | `dsp::svf` | `process()` — allocation-free, safe for modulation |
 | `Compressor` | `dsp::compressor` | `process()` — fixed state per channel |
+| `MultibandCompressor` | `multiband` (2.3.4) | `process()`: 0 bytes per call at any block size (fixed 256-frame internal chunks over scratch made in `new()`); the setters redesign in place. No latency |
 | `EnvelopeLimiter` | `dsp::limiter` | `process()` — fixed state |
 | `DelayLine` | `dsp::delay` | `process()` — pre-allocated ring buffer |
 | `Reverb` | `dsp::reverb` | `process()` — pre-allocated delay lines |

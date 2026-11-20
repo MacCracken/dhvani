@@ -1,0 +1,394 @@
+# multiband.cyr -- multiband compressor: Linkwitz-Riley crossovers, one compressor per band.
+# New in 2.3.4 (roadmap "Advanced DSP"). rust-old has no multiband compressor, so there is
+# no oracle; the design is docs/decisions/007-multiband-compressor.md.
+# L2: deps error + simd + buffer + abaco + dsp + biquad + compressor.
+#
+# Signal path, for N bands and the N-1 ascending crossovers f[0..N-2]:
+#   - A non-finite input sample (NaN, +-Inf) enters the crossover as 0, so it never
+#     reaches a filter state.
+#   - Split, as a tree: band j is the Linkwitz-Riley 4th-order lowpass at f[j] of what is
+#     left above f[j-1]; the highpass at f[j] carries the rest on. Band N-1 is the final
+#     highpass. Each LR4 filter is two cascaded Butterworth biquads (Q = 1/sqrt(2)).
+#   - Phase compensation: band k also runs through the 2nd-order allpass of every
+#     crossover above its upper edge (f[k+1..N-2]), the allpass that the bands above it
+#     picked up when they were split there. (N-1)(N-2)/2 allpasses in all.
+#   - Each band runs through its own DhCompressor (its detector sees only its band).
+#   - The bands are summed back into the caller's buffer.
+# With every band left uncompressed, the output is the input through the allpasses at
+# f[0..N-2] in series: a flat magnitude response. An LR4 lowpass plus its highpass IS that
+# allpass, exactly, since the RBJ lowpass, highpass and allpass at one w0 and Q are
+# bilinear transforms of the analog Butterworth sections.
+#
+# Real-time contract: new() allocates everything. process() walks the caller's block in
+# chunks of DH_MBC_CHUNK frames through scratch the instance owns, so it allocates
+# nothing for any block size, and the chunking never changes the output (every stage is
+# a per-frame recurrence whose state carries across chunks).
+
+var DH_MBC_MAX_BANDS = 8;
+var DH_MBC_CHUNK = 256;   # frames per internal pass; each band's scratch holds one chunk
+
+#derive(accessors)
+struct DhMultibandCompressor {
+    num_bands; channels; sample_rate; bypassed;
+    crossovers;           # vec of f64 Hz, ascending, num_bands - 1 entries (instance-owned)
+    lp_a; lp_b;           # vecs of DhBiquadFilter: the two Butterworth lowpass stages per crossover
+    hp_a; hp_b;           # the two highpass stages per crossover
+    ap;                   # compensation allpasses, band-major: k = 0..N-3, then j = k+1..N-2
+    comps;                # vec of DhCompressor, one per band
+    bands;                # vec of DhAudioBuffer scratch, one per band, DH_MBC_CHUNK frames each
+}
+
+# check(crossovers, sample_rate) -- DHVANI_ERR_NONE, or the code of the first fault:
+#   - the rate must be 1 .. DH_MAX_SAMPLE_RATE (DHVANI_ERR_INVALID_SAMPLE_RATE);
+#   - there must be 1 .. DH_MBC_MAX_BANDS - 1 crossovers, each inside the biquad design's
+#     own clamp [1 Hz, 0.499 * rate] (so the frequency reported is the one designed), and
+#     strictly ascending (DHVANI_ERR_INVALID_PARAMETER). NaN fails every bound.
+#must_use
+fn dh_mbc_check(crossovers, sample_rate) {
+    if (sample_rate < 1) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
+    if (sample_rate > DH_MAX_SAMPLE_RATE) { return DHVANI_ERR_INVALID_SAMPLE_RATE; }
+    if (crossovers == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var n = vec_len(crossovers);
+    if (n < 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    if (n > DH_MBC_MAX_BANDS - 1) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var hi = f64_mul(f64_from(sample_rate), 0.499);
+    var prev = 0;
+    var i = 0;
+    while (i < n) {
+        var x = vec_get(crossovers, i);
+        if (dh_in_range(x, 1.0, hi) == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+        if (i > 0) {
+            if (f64_gt(x, prev) == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+        }
+        prev = x;
+        i = i + 1;
+    }
+    return DHVANI_ERR_NONE;
+}
+
+# Butterworth Q, 1/sqrt(2): computed, not a hex literal (abaco's dB constants once
+# mis-encoded; a sqrt cannot).
+#must_use
+fn dh_mbc_q() { return f64_sqrt(F64_HALF); }
+
+# new(crossovers, sample_rate, channels) -- a handle, or 0 if the crossovers or rate fail
+# dh_mbc_check, channels < 1, or the scratch cannot be allocated. The crossovers vec is
+# copied. Every band starts on dhvani_compparams_default(), as a lone compressor does.
+#must_use
+fn dhvani_mbcomp_new(crossovers, sample_rate, channels) {
+    if (channels < 1) { return 0; }
+    if (channels > VEC_CAP_MAX / DH_MBC_CHUNK) { return 0; }
+    if (dhvani_is_err(dh_mbc_check(crossovers, sample_rate)) == 1) { return 0; }
+    var nx = vec_len(crossovers);
+    var nb = nx + 1;
+    var q = dh_mbc_q();
+    var xs = dh_vec_zeros(nx);
+    if (vec_len(xs) != nx) { return 0; }
+    var lp_a = vec_new();
+    var lp_b = vec_new();
+    var hp_a = vec_new();
+    var hp_b = vec_new();
+    var j = 0;
+    while (j < nx) {
+        var fc = vec_get(crossovers, j);
+        vec_set(xs, j, fc);
+        vec_push(lp_a, dhvani_biquad_new(DH_BQ_LOWPASS, 0, fc, q, sample_rate, channels));
+        vec_push(lp_b, dhvani_biquad_new(DH_BQ_LOWPASS, 0, fc, q, sample_rate, channels));
+        vec_push(hp_a, dhvani_biquad_new(DH_BQ_HIGHPASS, 0, fc, q, sample_rate, channels));
+        vec_push(hp_b, dhvani_biquad_new(DH_BQ_HIGHPASS, 0, fc, q, sample_rate, channels));
+        j = j + 1;
+    }
+    var ap = vec_new();
+    var k = 0;
+    while (k < nb - 2) {
+        j = k + 1;
+        while (j < nx) {
+            vec_push(ap, dhvani_biquad_new(DH_BQ_ALLPASS, 0, vec_get(xs, j), q, sample_rate, channels));
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+    var comps = vec_new();
+    var bands = vec_new();
+    k = 0;
+    while (k < nb) {
+        var c = dhvani_comp_new(dhvani_compparams_default(), sample_rate);
+        if (c == 0) { return 0; }
+        vec_push(comps, c);
+        var b = dhvani_buffer_silence(channels, DH_MBC_CHUNK, sample_rate);
+        if (b == 0) { return 0; }
+        # the scratch must really hold a chunk: process() writes it by raw pointer
+        if (vec_len(DhAudioBuffer_samples(b)) != DH_MBC_CHUNK * channels) { return 0; }
+        vec_push(bands, b);
+        k = k + 1;
+    }
+    var self = alloc(sizeof(DhMultibandCompressor));
+    DhMultibandCompressor_set_num_bands(self, nb);
+    DhMultibandCompressor_set_channels(self, channels);
+    DhMultibandCompressor_set_sample_rate(self, sample_rate);
+    DhMultibandCompressor_set_bypassed(self, 0);
+    DhMultibandCompressor_set_crossovers(self, xs);
+    DhMultibandCompressor_set_lp_a(self, lp_a);
+    DhMultibandCompressor_set_lp_b(self, lp_b);
+    DhMultibandCompressor_set_hp_a(self, hp_a);
+    DhMultibandCompressor_set_hp_b(self, hp_b);
+    DhMultibandCompressor_set_ap(self, ap);
+    DhMultibandCompressor_set_comps(self, comps);
+    DhMultibandCompressor_set_bands(self, bands);
+    return self;
+}
+
+# one chunk of n frames at p (interleaved, the instance's channel count), in place.
+fn dh_mbc_chunk(self, p, n) {
+    var nb = DhMultibandCompressor_num_bands(self);
+    var nx = nb - 1;
+    var cnt = n * DhMultibandCompressor_channels(self);
+    var bp = dh_vec_data(DhMultibandCompressor_bands(self));
+    var k = 0;
+    while (k < nb) {
+        DhAudioBuffer_set_frames(load64(bp + k * 8), n);
+        k = k + 1;
+    }
+    # the remainder (band N-1's scratch) starts as the input, a non-finite sample as 0
+    var rest = load64(bp + nx * 8);
+    var rp = dh_vec_data(DhAudioBuffer_samples(rest));
+    var s = p;
+    var d = rp;
+    var end = p + cnt * 8;
+    while (s < end) {
+        var x = load64(s);
+        if (dhvani_is_finite(x) == 0) { x = 0; }
+        store64(d, x);
+        s = s + 8;
+        d = d + 8;
+    }
+    # split: band j = LR4 lowpass of the remainder at f[j]; the remainder keeps the highpass
+    var lpa = dh_vec_data(DhMultibandCompressor_lp_a(self));
+    var lpb = dh_vec_data(DhMultibandCompressor_lp_b(self));
+    var hpa = dh_vec_data(DhMultibandCompressor_hp_a(self));
+    var hpb = dh_vec_data(DhMultibandCompressor_hp_b(self));
+    var j = 0;
+    while (j < nx) {
+        var band = load64(bp + j * 8);
+        s = rp;
+        d = dh_vec_data(DhAudioBuffer_samples(band));
+        end = rp + cnt * 8;
+        while (s < end) { store64(d, load64(s)); s = s + 8; d = d + 8; }
+        dhvani_biquad_process(load64(lpa + j * 8), band);
+        dhvani_biquad_process(load64(lpb + j * 8), band);
+        dhvani_biquad_process(load64(hpa + j * 8), rest);
+        dhvani_biquad_process(load64(hpb + j * 8), rest);
+        j = j + 1;
+    }
+    # phase compensation, in the order new() built the allpasses
+    var app = dh_vec_data(DhMultibandCompressor_ap(self));
+    var a = 0;
+    k = 0;
+    while (k < nb - 2) {
+        var lower = load64(bp + k * 8);
+        j = k + 1;
+        while (j < nx) {
+            dhvani_biquad_process(load64(app + a * 8), lower);
+            a = a + 1;
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+    # compress each band on its own detector
+    var cp = dh_vec_data(DhMultibandCompressor_comps(self));
+    k = 0;
+    while (k < nb) {
+        dhvani_comp_process(load64(cp + k * 8), load64(bp + k * 8));
+        k = k + 1;
+    }
+    # sum: band 0, then each band above it added in turn; a sum that overflowed is 0
+    end = p + cnt * 8;
+    s = dh_vec_data(DhAudioBuffer_samples(load64(bp)));
+    d = p;
+    while (d < end) { store64(d, load64(s)); s = s + 8; d = d + 8; }
+    k = 1;
+    while (k < nb) {
+        s = dh_vec_data(DhAudioBuffer_samples(load64(bp + k * 8)));
+        d = p;
+        while (d < end) { store64(d, f64_add(load64(d), load64(s))); s = s + 8; d = d + 8; }
+        k = k + 1;
+    }
+    d = p;
+    while (d < end) {
+        if (dhvani_is_finite(load64(d)) == 0) { store64(d, 0); }
+        d = d + 8;
+    }
+    return 0;
+}
+
+# process(buf) -- compress in place. Returns 0, or DHVANI_ERR_INVALID_CHANNELS (buffer left
+# untouched) when the buffer's channel count is not the instance's. Bypassed: untouched.
+# Walks min(frames, storage / channels) frames, as the other processors do.
+fn dhvani_mbcomp_process(self, buf) {
+    if (DhMultibandCompressor_bypassed(self) == 1) { return 0; }
+    var ch = DhAudioBuffer_channels(buf);
+    if (ch != DhMultibandCompressor_channels(self)) { return DHVANI_ERR_INVALID_CHANNELS; }
+    var samples = DhAudioBuffer_samples(buf);
+    var frames = dh_imin(DhAudioBuffer_frames(buf), vec_len(samples) / ch);
+    if (frames < 1) { return 0; }
+    var p = dh_vec_data(samples);
+    var done = 0;
+    while (done < frames) {
+        var n = dh_imin(DH_MBC_CHUNK, frames - done);
+        dh_mbc_chunk(self, p + done * ch * 8, n);
+        done = done + n;
+    }
+    return 0;
+}
+
+# set_crossovers(crossovers) -- move the crossovers (same count; the band count is fixed at
+# new()). Validated first; on a fault nothing changes. The filters are redesigned in
+# place and keep their state, as a biquad set_params does: no allocation, no reset.
+fn dhvani_mbcomp_set_crossovers(self, crossovers) {
+    var rc = dh_mbc_check(crossovers, DhMultibandCompressor_sample_rate(self));
+    if (dhvani_is_err(rc) == 1) { return rc; }
+    var nx = DhMultibandCompressor_num_bands(self) - 1;
+    if (vec_len(crossovers) != nx) { return DHVANI_ERR_INVALID_PARAMETER; }
+    var xs = DhMultibandCompressor_crossovers(self);
+    var j = 0;
+    while (j < nx) { vec_set(xs, j, vec_get(crossovers, j)); j = j + 1; }
+    dh_mbc_redesign(self);
+    return DHVANI_ERR_NONE;
+}
+
+# redesign every filter for the stored crossovers and rate, in place (states kept).
+fn dh_mbc_redesign(self) {
+    var nx = DhMultibandCompressor_num_bands(self) - 1;
+    var xs = DhMultibandCompressor_crossovers(self);
+    var q = dh_mbc_q();
+    var j = 0;
+    while (j < nx) {
+        var fc = vec_get(xs, j);
+        dhvani_biquad_set_params(vec_get(DhMultibandCompressor_lp_a(self), j), DH_BQ_LOWPASS, 0, fc, q);
+        dhvani_biquad_set_params(vec_get(DhMultibandCompressor_lp_b(self), j), DH_BQ_LOWPASS, 0, fc, q);
+        dhvani_biquad_set_params(vec_get(DhMultibandCompressor_hp_a(self), j), DH_BQ_HIGHPASS, 0, fc, q);
+        dhvani_biquad_set_params(vec_get(DhMultibandCompressor_hp_b(self), j), DH_BQ_HIGHPASS, 0, fc, q);
+        j = j + 1;
+    }
+    var ap = DhMultibandCompressor_ap(self);
+    var a = 0;
+    var k = 0;
+    while (k < nx - 1) {
+        j = k + 1;
+        while (j < nx) {
+            dhvani_biquad_set_params(vec_get(ap, a), DH_BQ_ALLPASS, 0, vec_get(xs, j), q);
+            a = a + 1;
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# set_sample_rate(sample_rate) -- the crossovers are re-checked against the new Nyquist;
+# on a fault (DHVANI_ERR_INVALID_SAMPLE_RATE / _INVALID_PARAMETER) nothing changes.
+fn dhvani_mbcomp_set_sample_rate(self, sample_rate) {
+    var rc = dh_mbc_check(DhMultibandCompressor_crossovers(self), sample_rate);
+    if (dhvani_is_err(rc) == 1) { return rc; }
+    DhMultibandCompressor_set_sample_rate(self, sample_rate);
+    var nb = DhMultibandCompressor_num_bands(self);
+    var nx = nb - 1;
+    var j = 0;
+    while (j < nx) {
+        dhvani_biquad_set_sample_rate(vec_get(DhMultibandCompressor_lp_a(self), j), sample_rate);
+        dhvani_biquad_set_sample_rate(vec_get(DhMultibandCompressor_lp_b(self), j), sample_rate);
+        dhvani_biquad_set_sample_rate(vec_get(DhMultibandCompressor_hp_a(self), j), sample_rate);
+        dhvani_biquad_set_sample_rate(vec_get(DhMultibandCompressor_hp_b(self), j), sample_rate);
+        j = j + 1;
+    }
+    var ap = DhMultibandCompressor_ap(self);
+    var a = 0;
+    while (a < vec_len(ap)) { dhvani_biquad_set_sample_rate(vec_get(ap, a), sample_rate); a = a + 1; }
+    var k = 0;
+    while (k < nb) {
+        dhvani_comp_set_sample_rate(vec_get(DhMultibandCompressor_comps(self), k), sample_rate);
+        DhAudioBuffer_set_sample_rate(vec_get(DhMultibandCompressor_bands(self), k), sample_rate);
+        k = k + 1;
+    }
+    return DHVANI_ERR_NONE;
+}
+
+# 1 iff 0 <= band < num_bands.
+#must_use
+fn dh_mbc_band_ok(self, band) {
+    if (band < 0) { return 0; }
+    if (band >= DhMultibandCompressor_num_bands(self)) { return 0; }
+    return 1;
+}
+
+# set_band_params(band, params) -- validated and copied by the band's compressor
+# (dhvani_comp_set_params); DHVANI_ERR_INVALID_PARAMETER for a band out of range.
+fn dhvani_mbcomp_set_band_params(self, band, params) {
+    if (dh_mbc_band_ok(self, band) == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    return dhvani_comp_set_params(vec_get(DhMultibandCompressor_comps(self), band), params);
+}
+
+# set_band_bypass(band, bypassed) -- a bypassed band passes its (split) signal uncompressed.
+fn dhvani_mbcomp_set_band_bypass(self, band, bypassed) {
+    if (dh_mbc_band_ok(self, band) == 0) { return DHVANI_ERR_INVALID_PARAMETER; }
+    dhvani_comp_set_bypass(vec_get(DhMultibandCompressor_comps(self), band), bypassed);
+    return DHVANI_ERR_NONE;
+}
+
+# band_gain_reduction_db(band) -- the band compressor's last gain (dB, <= 0 without
+# makeup); NaN for a band out of range.
+#must_use
+fn dhvani_mbcomp_band_gain_reduction_db(self, band) {
+    if (dh_mbc_band_ok(self, band) == 0) { return DH_NAN; }
+    return dhvani_comp_gain_reduction_db(vec_get(DhMultibandCompressor_comps(self), band));
+}
+
+# band_is_bypassed(band) -- 1 / 0; 0 for a band out of range.
+#must_use
+fn dhvani_mbcomp_band_is_bypassed(self, band) {
+    if (dh_mbc_band_ok(self, band) == 0) { return 0; }
+    return dhvani_comp_is_bypassed(vec_get(DhMultibandCompressor_comps(self), band));
+}
+
+# crossover(i) -- Hz; NaN for i out of range.
+#must_use
+fn dhvani_mbcomp_crossover(self, i) {
+    if (i < 0) { return DH_NAN; }
+    if (i >= DhMultibandCompressor_num_bands(self) - 1) { return DH_NAN; }
+    return vec_get(DhMultibandCompressor_crossovers(self), i);
+}
+
+# reset() -- every filter state and band envelope back to new().
+fn dhvani_mbcomp_reset(self) {
+    var nb = DhMultibandCompressor_num_bands(self);
+    var j = 0;
+    while (j < nb - 1) {
+        dhvani_biquad_reset(vec_get(DhMultibandCompressor_lp_a(self), j));
+        dhvani_biquad_reset(vec_get(DhMultibandCompressor_lp_b(self), j));
+        dhvani_biquad_reset(vec_get(DhMultibandCompressor_hp_a(self), j));
+        dhvani_biquad_reset(vec_get(DhMultibandCompressor_hp_b(self), j));
+        j = j + 1;
+    }
+    var ap = DhMultibandCompressor_ap(self);
+    var a = 0;
+    while (a < vec_len(ap)) { dhvani_biquad_reset(vec_get(ap, a)); a = a + 1; }
+    var k = 0;
+    while (k < nb) { dhvani_comp_reset(vec_get(DhMultibandCompressor_comps(self), k)); k = k + 1; }
+    return 0;
+}
+
+#inline
+#must_use
+fn dhvani_mbcomp_num_bands(self) { return DhMultibandCompressor_num_bands(self); }
+#inline
+#must_use
+fn dhvani_mbcomp_channels(self) { return DhMultibandCompressor_channels(self); }
+#inline
+#must_use
+fn dhvani_mbcomp_sample_rate(self) { return DhMultibandCompressor_sample_rate(self); }
+fn dhvani_mbcomp_set_bypass(self, bypassed) { DhMultibandCompressor_set_bypassed(self, bypassed); return 0; }
+#must_use
+fn dhvani_mbcomp_is_bypassed(self) {
+    if (DhMultibandCompressor_bypassed(self) == 1) { return 1; }
+    return 0;
+}
